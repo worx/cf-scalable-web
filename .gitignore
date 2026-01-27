@@ -1,0 +1,41 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Secrets and sensitive files
+*.pem
+*.key
+secrets/
+.env
+.env.*
+
+# AWS
+.aws/
+
+# Parameters with sensitive data
+cloudformation/parameters/*-secrets.json
+
+# Terraform (if used later)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Logs
+*.log
+PROMPT_LOGS/
+
+# Temporary files
+tmp/
+temp/

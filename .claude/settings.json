@@ -1,0 +1,26 @@
+{
+  "project": {
+    "name": "cf-scalable-web",
+    "description": "Scalable AWS infrastructure for Drupal/WordPress hosting",
+    "version": "1.0.0",
+    "repository": "https://github.com/worxco/cf-scalable-web"
+  },
+  "aws": {
+    "region": "us-east-1",
+    "accountType": "production"
+  },
+  "standards": {
+    "license": "GPL-2.0-or-later",
+    "copyright": "2026 The Worx Company",
+    "author": "Kurt Vanderwater <kurt@worxco.net>"
+  },
+  "validation": {
+    "cloudformation": {
+      "linter": "cfn-lint",
+      "required": true
+    },
+    "scripts": {
+      "shellcheck": true
+    }
+  }
+}

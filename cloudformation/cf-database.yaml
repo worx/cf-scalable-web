@@ -1,0 +1,343 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: RDS PostgreSQL Database
+#
+# Purpose: Creates Multi-AZ RDS PostgreSQL instance optimized for Drupal/WordPress
+#
+# Features:
+#   - Multi-AZ deployment for high availability
+#   - Automated backups (14 days retention)
+#   - Encryption at rest
+#   - Performance Insights (optional)
+#   - Master password stored in Secrets Manager
+#
+# Dependencies: cf-vpc.yaml (subnets, security groups)
+#
+# Outputs: RDS endpoint, port, database name
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS PostgreSQL database for scalable web hosting'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    Default: production
+
+  SecretNamePrefix:
+    Type: String
+    Description: Secrets Manager prefix
+    Default: worxco/production
+
+  DBInstanceClass:
+    Type: String
+    Description: RDS instance class
+    Default: db.t4g.small
+    AllowedValues:
+      - db.t4g.micro
+      - db.t4g.small
+      - db.t4g.medium
+      - db.t4g.large
+      - db.r6g.large
+      - db.r6g.xlarge
+      - db.r6g.2xlarge
+
+  DBAllocatedStorage:
+    Type: Number
+    Description: Initial database storage in GB
+    MinValue: 20
+    MaxValue: 65536
+    Default: 100
+
+  DBMaxAllocatedStorage:
+    Type: Number
+    Description: Maximum storage for autoscaling in GB (0 = disabled)
+    MinValue: 0
+    MaxValue: 65536
+    Default: 1000
+
+  DBName:
+    Type: String
+    Description: Database name
+    Default: drupal
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  DBMasterUsername:
+    Type: String
+    Description: Master username
+    Default: dbadmin
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_]*$'
+
+  PostgreSQLVersion:
+    Type: String
+    Description: PostgreSQL engine version
+    Default: '16.1'
+    AllowedValues:
+      - '16.1'
+      - '15.5'
+      - '14.10'
+
+  BackupRetentionDays:
+    Type: Number
+    Description: Number of days to retain automated backups
+    MinValue: 1
+    MaxValue: 35
+    Default: 14
+
+  EnablePerformanceInsights:
+    Type: String
+    Description: Enable Performance Insights
+    AllowedValues: [true, false]
+    Default: false
+
+  EnableEnhancedMonitoring:
+    Type: String
+    Description: Enable Enhanced Monitoring
+    AllowedValues: [true, false]
+    Default: false
+
+Conditions:
+  PerformanceInsightsEnabled: !Equals [!Ref EnablePerformanceInsights, true]
+  EnhancedMonitoringEnabled: !Equals [!Ref EnableEnhancedMonitoring, true]
+  StorageAutoscalingEnabled: !Not [!Equals [!Ref DBMaxAllocatedStorage, 0]]
+
+Resources:
+  # ========================================
+  # DB Subnet Group
+  # ========================================
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${EnvironmentName}-db-subnet-group'
+      DBSubnetGroupDescription: Subnet group for RDS database
+      SubnetIds: !Split
+        - ','
+        - Fn::ImportValue: !Sub '${EnvironmentName}-php-subnets'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-db-subnet-group'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # DB Parameter Group (Optimized for Drupal)
+  # ========================================
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      DBParameterGroupName: !Sub '${EnvironmentName}-postgres-params'
+      Description: PostgreSQL parameter group optimized for Drupal/WordPress
+      Family: !Sub 'postgres${PostgreSQLVersion}'
+      Parameters:
+        max_connections: '300'
+        shared_buffers: '{DBInstanceClassMemory/4096}'
+        effective_cache_size: '{DBInstanceClassMemory*3/4096}'
+        maintenance_work_mem: '{DBInstanceClassMemory/16384}'
+        checkpoint_completion_target: '0.9'
+        wal_buffers: '16MB'
+        default_statistics_target: '100'
+        random_page_cost: '1.1'
+        effective_io_concurrency: '200'
+        work_mem: '4MB'
+        min_wal_size: '1GB'
+        max_wal_size: '4GB'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-postgres-params'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Master Password Secret
+  # ========================================
+
+  DBMasterPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${SecretNamePrefix}/rds/master-password'
+      Description: RDS master password
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBMasterUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-master-password'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Enhanced Monitoring Role
+  # ========================================
+
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Condition: EnhancedMonitoringEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-enhanced-monitoring-role'
+
+  # ========================================
+  # RDS Instance
+  # ========================================
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${EnvironmentName}-postgres'
+      Engine: postgres
+      EngineVersion: !Ref PostgreSQLVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      MaxAllocatedStorage: !If [StorageAutoscalingEnabled, !Ref DBMaxAllocatedStorage, !Ref AWS::NoValue]
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBMasterPasswordSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub '${EnvironmentName}-rds-sg-id'
+      MultiAZ: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: !If [PerformanceInsightsEnabled, true, false]
+      PerformanceInsightsRetentionPeriod: !If [PerformanceInsightsEnabled, 7, !Ref AWS::NoValue]
+      MonitoringInterval: !If [EnhancedMonitoringEnabled, 60, 0]
+      MonitoringRoleArn: !If [EnhancedMonitoringEnabled, !GetAtt EnhancedMonitoringRole.Arn, !Ref AWS::NoValue]
+      EnableCloudwatchLogsExports:
+        - postgresql
+      DeletionProtection: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-postgres'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Store Connection Info in Secrets Manager
+  # ========================================
+
+  DBConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${SecretNamePrefix}/rds/connection'
+      Description: RDS connection information
+      SecretString: !Sub |
+        {
+          "engine": "postgres",
+          "host": "${DBInstance.Endpoint.Address}",
+          "port": ${DBInstance.Endpoint.Port},
+          "database": "${DBName}",
+          "username": "${DBMasterUsername}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-connection'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # SSM Parameters
+  # ========================================
+
+  DBEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/rds/endpoint'
+      Description: RDS endpoint address
+      Type: String
+      Value: !GetAtt DBInstance.Endpoint.Address
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  DBPortParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/rds/port'
+      Description: RDS port
+      Type: String
+      Value: !Sub '${DBInstance.Endpoint.Port}'
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  DBNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/rds/database'
+      Description: RDS database name
+      Type: String
+      Value: !Ref DBName
+      Tags:
+        Environment: !Ref EnvironmentName
+
+Outputs:
+  DBInstanceIdentifier:
+    Description: RDS instance identifier
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-instance-id'
+
+  DBEndpoint:
+    Description: RDS endpoint address
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-endpoint'
+
+  DBPort:
+    Description: RDS port
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-port'
+
+  DBName:
+    Description: Database name
+    Value: !Ref DBName
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-database-name'
+
+  DBMasterUsername:
+    Description: Master username
+    Value: !Ref DBMasterUsername
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-master-username'
+
+  DBMasterPasswordSecretArn:
+    Description: ARN of secret containing master password
+    Value: !Ref DBMasterPasswordSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-master-password-secret-arn'
+
+  DBConnectionSecretArn:
+    Description: ARN of secret containing connection info
+    Value: !Ref DBConnectionSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-connection-secret-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

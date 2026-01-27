@@ -1,0 +1,242 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: ElastiCache Redis
+#
+# Purpose: Creates Redis cluster for page caching and session storage
+#
+# Features:
+#   - Single node (dev/test) or cluster mode (production)
+#   - Encryption in transit
+#   - Auth token in Secrets Manager
+#   - Automatic failover (Multi-AZ)
+#
+# Dependencies: cf-vpc.yaml (subnets, security groups)
+#
+# Outputs: Redis endpoint, port, auth token ARN
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ElastiCache Redis cluster for scalable web hosting'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    Default: production
+
+  SecretNamePrefix:
+    Type: String
+    Description: Secrets Manager prefix
+    Default: worxco/production
+
+  CacheNodeType:
+    Type: String
+    Description: ElastiCache node type
+    Default: cache.t4g.micro
+    AllowedValues:
+      - cache.t4g.micro
+      - cache.t4g.small
+      - cache.t4g.medium
+      - cache.r6g.large
+      - cache.r6g.xlarge
+      - cache.r6g.2xlarge
+
+  NumCacheNodes:
+    Type: Number
+    Description: Number of cache nodes (1 for single node, 2+ for cluster)
+    MinValue: 1
+    MaxValue: 6
+    Default: 1
+
+  EnableMultiAZ:
+    Type: String
+    Description: Enable Multi-AZ with automatic failover (requires NumCacheNodes >= 2)
+    AllowedValues: [true, false]
+    Default: false
+
+  RedisVersion:
+    Type: String
+    Description: Redis engine version
+    Default: '7.1'
+    AllowedValues:
+      - '7.1'
+      - '7.0'
+      - '6.2'
+
+Conditions:
+  MultiAZEnabled: !And
+    - !Equals [!Ref EnableMultiAZ, true]
+    - !Not [!Equals [!Ref NumCacheNodes, 1]]
+
+Resources:
+  # ========================================
+  # Cache Subnet Group
+  # ========================================
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: !Sub '${EnvironmentName}-redis-subnet-group'
+      Description: Subnet group for ElastiCache Redis
+      SubnetIds: !Split
+        - ','
+        - Fn::ImportValue: !Sub '${EnvironmentName}-php-subnets'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-redis-subnet-group'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Cache Parameter Group
+  # ========================================
+
+  CacheParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      CacheParameterGroupFamily: !Sub 'redis${RedisVersion}'
+      Description: Redis parameter group optimized for Drupal/WordPress
+      Properties:
+        maxmemory-policy: allkeys-lru
+        timeout: '300'
+        tcp-keepalive: '300'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-redis-params'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Auth Token Secret
+  # ========================================
+
+  RedisAuthTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${SecretNamePrefix}/redis/auth-token'
+      Description: Redis AUTH token
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-redis-auth-token'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Replication Group (Redis Cluster)
+  # ========================================
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub '${EnvironmentName}-redis'
+      ReplicationGroupDescription: Redis cluster for page caching
+      Engine: redis
+      EngineVersion: !Ref RedisVersion
+      CacheNodeType: !Ref CacheNodeType
+      NumCacheClusters: !Ref NumCacheNodes
+      AutomaticFailoverEnabled: !If [MultiAZEnabled, true, false]
+      MultiAZEnabled: !If [MultiAZEnabled, true, false]
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      CacheParameterGroupName: !Ref CacheParameterGroup
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${EnvironmentName}-elasticache-sg-id'
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      AuthToken: !Sub '{{resolve:secretsmanager:${RedisAuthTokenSecret}:SecretString}}'
+      PreferredMaintenanceWindow: 'sun:05:00-sun:06:00'
+      SnapshotRetentionLimit: 0  # No backups (cache is ephemeral)
+      SnapshotWindow: '03:00-05:00'
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-redis'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Store Connection Info in Secrets Manager
+  # ========================================
+
+  RedisConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${SecretNamePrefix}/redis/connection'
+      Description: Redis connection information
+      SecretString: !Sub |
+        {
+          "engine": "redis",
+          "host": "${RedisReplicationGroup.PrimaryEndPoint.Address}",
+          "port": ${RedisReplicationGroup.PrimaryEndPoint.Port},
+          "auth_token_secret": "${RedisAuthTokenSecret}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-redis-connection'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # SSM Parameters
+  # ========================================
+
+  RedisEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/redis/endpoint'
+      Description: Redis primary endpoint address
+      Type: String
+      Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  RedisPortParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/redis/port'
+      Description: Redis port
+      Type: String
+      Value: !Sub '${RedisReplicationGroup.PrimaryEndPoint.Port}'
+      Tags:
+        Environment: !Ref EnvironmentName
+
+Outputs:
+  RedisReplicationGroupId:
+    Description: Redis replication group ID
+    Value: !Ref RedisReplicationGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-redis-replication-group-id'
+
+  RedisPrimaryEndpoint:
+    Description: Redis primary endpoint address
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+    Export:
+      Name: !Sub '${EnvironmentName}-redis-primary-endpoint'
+
+  RedisPort:
+    Description: Redis port
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+    Export:
+      Name: !Sub '${EnvironmentName}-redis-port'
+
+  RedisAuthTokenSecretArn:
+    Description: ARN of secret containing Redis AUTH token
+    Value: !Ref RedisAuthTokenSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-redis-auth-token-secret-arn'
+
+  RedisConnectionSecretArn:
+    Description: ARN of secret containing connection info
+    Value: !Ref RedisConnectionSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-redis-connection-secret-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

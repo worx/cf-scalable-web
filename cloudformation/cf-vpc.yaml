@@ -1,0 +1,867 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: VPC Infrastructure
+#
+# Purpose: Creates a multi-tier VPC with defense-in-depth architecture for scalable web hosting
+#
+# Architecture:
+#   - Public subnet tier (ALB only)
+#   - Private tier 1 (NGINX reverse proxies)
+#   - Private tier 2 (Network Load Balancer)
+#   - Private tier 3 (PHP-FPM application servers)
+#   - Private tier 4 (Data layer: RDS, FSx, ElastiCache)
+#
+# Dependencies: None (foundation stack)
+#
+# Outputs: VPC ID, Subnet IDs, Security Group IDs (used by other stacks)
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC infrastructure for scalable Drupal/WordPress hosting - Multi-tier defense-in-depth architecture'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+          - VPCCidr
+      - Label:
+          default: "Availability Zones"
+        Parameters:
+          - AvailabilityZoneCount
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - EnableVPCFlowLogs
+          - EnableNATGatewayHA
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  VPCCidr:
+    Type: String
+    Description: VPC CIDR block (e.g., 10.101.0.0/16)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid CIDR block
+    Default: 10.101.0.0/16
+
+  AvailabilityZoneCount:
+    Type: Number
+    Description: Number of Availability Zones (1-3)
+    MinValue: 1
+    MaxValue: 3
+    Default: 2
+
+  EnableVPCFlowLogs:
+    Type: String
+    Description: Enable VPC Flow Logs for compliance/auditing
+    AllowedValues: [true, false]
+    Default: false
+
+  EnableNATGatewayHA:
+    Type: String
+    Description: Deploy NAT Gateway in each AZ (true) or only in first AZ (false, cost savings)
+    AllowedValues: [true, false]
+    Default: true
+
+Conditions:
+  HasTwoAZs: !Or [!Equals [!Ref AvailabilityZoneCount, 2], !Equals [!Ref AvailabilityZoneCount, 3]]
+  HasThreeAZs: !Equals [!Ref AvailabilityZoneCount, 3]
+  EnableFlowLogs: !Equals [!Ref EnableVPCFlowLogs, true]
+  NATGatewayHA: !Equals [!Ref EnableNATGatewayHA, true]
+  NATGateway2: !And [Condition: HasTwoAZs, Condition: NATGatewayHA]
+  NATGateway3: !And [Condition: HasThreeAZs, Condition: NATGatewayHA]
+
+Resources:
+  # ========================================
+  # VPC and Internet Gateway
+  # ========================================
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ========================================
+  # Public Subnets (ALB only)
+  # ========================================
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [0, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet-1'
+        - Key: Tier
+          Value: public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [1, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet-2'
+        - Key: Tier
+          Value: public
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [2, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.3.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet-3'
+        - Key: Tier
+          Value: public
+
+  # ========================================
+  # Private Subnets - Tier 1 (NGINX)
+  # ========================================
+
+  PrivateTier1Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [3, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nginx-subnet-1'
+        - Key: Tier
+          Value: private-nginx
+
+  PrivateTier1Subnet2:
+    Type: AWS::EC2::Subnet
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [4, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nginx-subnet-2'
+        - Key: Tier
+          Value: private-nginx
+
+  PrivateTier1Subnet3:
+    Type: AWS::EC2::Subnet
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [5, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.13.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nginx-subnet-3'
+        - Key: Tier
+          Value: private-nginx
+
+  # ========================================
+  # Private Subnets - Tier 2 (NLB)
+  # ========================================
+
+  PrivateTier2Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [6, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.21.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nlb-subnet-1'
+        - Key: Tier
+          Value: private-nlb
+
+  PrivateTier2Subnet2:
+    Type: AWS::EC2::Subnet
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [7, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.22.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nlb-subnet-2'
+        - Key: Tier
+          Value: private-nlb
+
+  PrivateTier2Subnet3:
+    Type: AWS::EC2::Subnet
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [8, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.23.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-nlb-subnet-3'
+        - Key: Tier
+          Value: private-nlb
+
+  # ========================================
+  # Private Subnets - Tier 3 (PHP-FPM)
+  # ========================================
+
+  PrivateTier3Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [9, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.31.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-php-subnet-1'
+        - Key: Tier
+          Value: private-php
+
+  PrivateTier3Subnet2:
+    Type: AWS::EC2::Subnet
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [10, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.32.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-php-subnet-2'
+        - Key: Tier
+          Value: private-php
+
+  PrivateTier3Subnet3:
+    Type: AWS::EC2::Subnet
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [11, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.33.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-php-subnet-3'
+        - Key: Tier
+          Value: private-php
+
+  # ========================================
+  # NAT Gateways and Elastic IPs
+  # ========================================
+
+  NATGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-eip-1'
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-1'
+
+  NATGateway2EIP:
+    Type: AWS::EC2::EIP
+    Condition: NATGateway2
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-eip-2'
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: NATGateway2
+    Properties:
+      AllocationId: !GetAtt NATGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-2'
+
+  NATGateway3EIP:
+    Type: AWS::EC2::EIP
+    Condition: NATGateway3
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-eip-3'
+
+  NATGateway3:
+    Type: AWS::EC2::NatGateway
+    Condition: NATGateway3
+    Properties:
+      AllocationId: !GetAtt NATGateway3EIP.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nat-3'
+
+  # ========================================
+  # Route Tables - Public
+  # ========================================
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasTwoAZs
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThreeAZs
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+
+  # ========================================
+  # Route Tables - Private AZ1
+  # ========================================
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt-1'
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  PrivateTier1Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateTier1Subnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateTier2Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateTier2Subnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateTier3Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateTier3Subnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  # ========================================
+  # Route Tables - Private AZ2
+  # ========================================
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt-2'
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Condition: HasTwoAZs
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [NATGateway2, !Ref NATGateway2, !Ref NATGateway1]
+
+  PrivateTier1Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasTwoAZs
+    Properties:
+      SubnetId: !Ref PrivateTier1Subnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  PrivateTier2Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasTwoAZs
+    Properties:
+      SubnetId: !Ref PrivateTier2Subnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  PrivateTier3Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasTwoAZs
+    Properties:
+      SubnetId: !Ref PrivateTier3Subnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # ========================================
+  # Route Tables - Private AZ3
+  # ========================================
+
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt-3'
+
+  PrivateRoute3:
+    Type: AWS::EC2::Route
+    Condition: HasThreeAZs
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [NATGateway3, !Ref NATGateway3, !Ref NATGateway1]
+
+  PrivateTier1Subnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThreeAZs
+    Properties:
+      SubnetId: !Ref PrivateTier1Subnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
+  PrivateTier2Subnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThreeAZs
+    Properties:
+      SubnetId: !Ref PrivateTier2Subnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
+  PrivateTier3Subnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThreeAZs
+    Properties:
+      SubnetId: !Ref PrivateTier3Subnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
+  # ========================================
+  # Security Groups
+  # ========================================
+
+  # ALB Security Group (Public-facing)
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-alb-sg'
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from internet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-alb-sg'
+
+  # NGINX Security Group
+  NginxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-nginx-sg'
+      GroupDescription: Security group for NGINX reverse proxy servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTPS from ALB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nginx-sg'
+
+  # NLB Security Group (Internal)
+  NLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-nlb-sg'
+      GroupDescription: Security group for Network Load Balancer (PHP routing)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 1070
+          ToPort: 1099
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: PHP-FPM ports from NGINX
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nlb-sg'
+
+  # PHP-FPM Security Group
+  PHPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-php-sg'
+      GroupDescription: Security group for PHP-FPM application servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          SourceSecurityGroupId: !Ref NLBSecurityGroup
+          Description: PHP-FPM from NLB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php-sg'
+
+  # RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-rds-sg'
+      GroupDescription: Security group for RDS PostgreSQL database
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: PostgreSQL from PHP-FPM
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-sg'
+
+  # FSx Security Group
+  FSxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-fsx-sg'
+      GroupDescription: Security group for FSx OpenZFS shared storage
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 111
+          ToPort: 111
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: NFS portmapper from NGINX
+        - IpProtocol: udp
+          FromPort: 111
+          ToPort: 111
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: NFS portmapper from NGINX (UDP)
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: NFS from NGINX
+        - IpProtocol: tcp
+          FromPort: 20001
+          ToPort: 20003
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: FSx management from NGINX
+        - IpProtocol: tcp
+          FromPort: 111
+          ToPort: 111
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: NFS portmapper from PHP-FPM
+        - IpProtocol: udp
+          FromPort: 111
+          ToPort: 111
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: NFS portmapper from PHP-FPM (UDP)
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: NFS from PHP-FPM
+        - IpProtocol: tcp
+          FromPort: 20001
+          ToPort: 20003
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: FSx management from PHP-FPM
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-fsx-sg'
+
+  # ElastiCache Security Group
+  ElastiCacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-elasticache-sg'
+      GroupDescription: Security group for ElastiCache Redis
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref NginxSecurityGroup
+          Description: Redis from NGINX
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: Redis from PHP-FPM
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-elasticache-sg'
+
+  # ========================================
+  # VPC Flow Logs (Optional)
+  # ========================================
+
+  VPCFlowLogsRole:
+    Type: AWS::IAM::Role
+    Condition: EnableFlowLogs
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  VPCFlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableFlowLogs
+    Properties:
+      LogGroupName: !Sub '/aws/vpc/${EnvironmentName}/flow-logs'
+      RetentionInDays: 90
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: EnableFlowLogs
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogsLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc-flow-log'
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${EnvironmentName}-vpc-id'
+
+  VPCCidr:
+    Description: VPC CIDR block
+    Value: !Ref VPCCidr
+    Export:
+      Name: !Sub '${EnvironmentName}-vpc-cidr'
+
+  PublicSubnets:
+    Description: Comma-delimited list of public subnet IDs
+    Value: !If
+      - HasThreeAZs
+      - !Sub '${PublicSubnet1},${PublicSubnet2},${PublicSubnet3}'
+      - !If
+        - HasTwoAZs
+        - !Sub '${PublicSubnet1},${PublicSubnet2}'
+        - !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-public-subnets'
+
+  PrivateNginxSubnets:
+    Description: Comma-delimited list of NGINX private subnet IDs
+    Value: !If
+      - HasThreeAZs
+      - !Sub '${PrivateTier1Subnet1},${PrivateTier1Subnet2},${PrivateTier1Subnet3}'
+      - !If
+        - HasTwoAZs
+        - !Sub '${PrivateTier1Subnet1},${PrivateTier1Subnet2}'
+        - !Ref PrivateTier1Subnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-subnets'
+
+  PrivateNLBSubnets:
+    Description: Comma-delimited list of NLB private subnet IDs
+    Value: !If
+      - HasThreeAZs
+      - !Sub '${PrivateTier2Subnet1},${PrivateTier2Subnet2},${PrivateTier2Subnet3}'
+      - !If
+        - HasTwoAZs
+        - !Sub '${PrivateTier2Subnet1},${PrivateTier2Subnet2}'
+        - !Ref PrivateTier2Subnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-nlb-subnets'
+
+  PrivatePHPSubnets:
+    Description: Comma-delimited list of PHP-FPM private subnet IDs
+    Value: !If
+      - HasThreeAZs
+      - !Sub '${PrivateTier3Subnet1},${PrivateTier3Subnet2},${PrivateTier3Subnet3}'
+      - !If
+        - HasTwoAZs
+        - !Sub '${PrivateTier3Subnet1},${PrivateTier3Subnet2}'
+        - !Ref PrivateTier3Subnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-php-subnets'
+
+  ALBSecurityGroupId:
+    Description: Security group ID for ALB
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-alb-sg-id'
+
+  NginxSecurityGroupId:
+    Description: Security group ID for NGINX servers
+    Value: !Ref NginxSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-sg-id'
+
+  NLBSecurityGroupId:
+    Description: Security group ID for Network Load Balancer
+    Value: !Ref NLBSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-nlb-sg-id'
+
+  PHPSecurityGroupId:
+    Description: Security group ID for PHP-FPM servers
+    Value: !Ref PHPSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-php-sg-id'
+
+  RDSSecurityGroupId:
+    Description: Security group ID for RDS database
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-rds-sg-id'
+
+  FSxSecurityGroupId:
+    Description: Security group ID for FSx storage
+    Value: !Ref FSxSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-fsx-sg-id'
+
+  ElastiCacheSecurityGroupId:
+    Description: Security group ID for ElastiCache Redis
+    Value: !Ref ElastiCacheSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-elasticache-sg-id'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

@@ -1,0 +1,29 @@
+{
+  "Parameters": {
+    "EnvironmentName": "staging",
+    "VPCCidr": "10.102.0.0/16",
+    "AvailabilityZoneCount": "2",
+    "EnableVPCFlowLogs": "false",
+    "EnableNATGatewayHA": "false",
+    "SecretNamePrefix": "worxco/staging",
+    "EnableCompliance": "false",
+    "FSxStorageCapacityGB": "64",
+    "FSxThroughputMBps": "64",
+    "FSxDeploymentType": "SINGLE_AZ_1",
+    "FSxAutomaticBackupRetentionDays": "7",
+    "EnableS3Versioning": "false",
+    "DBInstanceClass": "db.t4g.micro",
+    "DBAllocatedStorage": "50",
+    "DBMaxAllocatedStorage": "200",
+    "DBName": "drupal",
+    "DBMasterUsername": "dbadmin",
+    "PostgreSQLVersion": "16.1",
+    "BackupRetentionDays": "7",
+    "EnablePerformanceInsights": "false",
+    "EnableEnhancedMonitoring": "false",
+    "CacheNodeType": "cache.t4g.micro",
+    "NumCacheNodes": "1",
+    "EnableMultiAZ": "false",
+    "RedisVersion": "7.1"
+  }
+}

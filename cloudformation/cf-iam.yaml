@@ -1,0 +1,448 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: IAM Roles and Policies
+#
+# Purpose: Creates IAM roles and instance profiles for EC2 instances and services
+#
+# Roles Created:
+#   - NGINX Instance Role (Session Manager, Secrets Manager, Route 53, CloudWatch, FSx)
+#   - PHP-FPM Instance Role (Session Manager, Secrets Manager, CloudWatch, FSx, S3)
+#   - Image Builder Role (EC2, SSM Parameter Store, S3)
+#
+# Dependencies: None
+#
+# Outputs: Instance Profile ARNs, Role ARNs (used by compute stacks)
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM roles and policies for scalable web infrastructure'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  SecretNamePrefix:
+    Type: String
+    Description: Secrets Manager prefix for SSH keys and passwords (e.g., worxco/prod)
+    Default: worxco/production
+
+  EnableCompliance:
+    Type: String
+    Description: Enable enhanced logging for compliance (ISO 27001)
+    AllowedValues: [true, false]
+    Default: false
+
+Conditions:
+  ComplianceEnabled: !Equals [!Ref EnableCompliance, true]
+
+Resources:
+  # ========================================
+  # NGINX Instance Role
+  # ========================================
+
+  NginxInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-nginx-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Session Manager
+        - !If
+          - ComplianceEnabled
+          - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+          - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/ssh-keys/*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/root-password*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/notifications/*'
+        - PolicyName: Route53CertBotAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:ListHostedZones
+                  - route53:GetChange
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetHostedZone
+                  - route53:ListResourceRecordSets
+                Resource: 'arn:aws:route53:::hostedzone/*'
+                # Note: In production, restrict to specific zone IDs stored in SSM Parameter
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ec2/${EnvironmentName}/nginx*'
+        - PolicyName: FSxAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - fsx:DescribeFileSystems
+                  - fsx:DescribeVolumes
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nginx-instance-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NginxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${EnvironmentName}-nginx-instance-profile'
+      Roles:
+        - !Ref NginxInstanceRole
+
+  # ========================================
+  # PHP-FPM Instance Role
+  # ========================================
+
+  PHPInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-php-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Session Manager
+        - !If
+          - ComplianceEnabled
+          - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+          - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/ssh-keys/*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/root-password*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/rds/*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/redis/*'
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                Resource: '*'
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ec2/${EnvironmentName}/php*'
+        - PolicyName: FSxAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - fsx:DescribeFileSystems
+                  - fsx:DescribeVolumes
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php-instance-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PHPInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${EnvironmentName}-php-instance-profile'
+      Roles:
+        - !Ref PHPInstanceRole
+
+  # ========================================
+  # EC2 Image Builder Role
+  # ========================================
+
+  ImageBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-image-builder-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      Policies:
+        - PolicyName: SSMParameterWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:AddTagsToResource
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/ami/*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder/*'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/root-password*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-image-builder-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ImageBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${EnvironmentName}-image-builder-instance-profile'
+      Roles:
+        - !Ref ImageBuilderRole
+
+  # ========================================
+  # Image Builder Service Role
+  # ========================================
+
+  ImageBuilderServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-image-builder-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilderECRContainerBuilds
+      Policies:
+        - PolicyName: ImageBuilderServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInstanceAttribute
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeVolumes
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:StopInstances
+                  - ec2:StartInstances
+                  - ec2:CreateImage
+                  - ec2:RegisterImage
+                  - ec2:DeregisterImage
+                  - ec2:CreateSnapshot
+                  - ec2:DeleteSnapshot
+                  - ec2:ModifyImageAttribute
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt ImageBuilderRole.Arn
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/ami/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-image-builder-service-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Auto Scaling Lifecycle Hook Role (Optional - for graceful shutdown)
+  # ========================================
+
+  AutoScalingLifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-asg-lifecycle-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LifecycleHookPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-asg-lifecycle-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  NginxInstanceRoleArn:
+    Description: ARN of NGINX instance IAM role
+    Value: !GetAtt NginxInstanceRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-instance-role-arn'
+
+  NginxInstanceProfileArn:
+    Description: ARN of NGINX instance profile
+    Value: !GetAtt NginxInstanceProfile.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-instance-profile-arn'
+
+  PHPInstanceRoleArn:
+    Description: ARN of PHP-FPM instance IAM role
+    Value: !GetAtt PHPInstanceRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-php-instance-role-arn'
+
+  PHPInstanceProfileArn:
+    Description: ARN of PHP-FPM instance profile
+    Value: !GetAtt PHPInstanceProfile.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-php-instance-profile-arn'
+
+  ImageBuilderRoleArn:
+    Description: ARN of Image Builder instance IAM role
+    Value: !GetAtt ImageBuilderRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-image-builder-role-arn'
+
+  ImageBuilderInstanceProfileArn:
+    Description: ARN of Image Builder instance profile
+    Value: !GetAtt ImageBuilderInstanceProfile.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-image-builder-instance-profile-arn'
+
+  ImageBuilderServiceRoleArn:
+    Description: ARN of Image Builder service role
+    Value: !GetAtt ImageBuilderServiceRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-image-builder-service-role-arn'
+
+  AutoScalingLifecycleRoleArn:
+    Description: ARN of Auto Scaling lifecycle hook role
+    Value: !GetAtt AutoScalingLifecycleRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-asg-lifecycle-role-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

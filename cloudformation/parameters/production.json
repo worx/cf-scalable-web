@@ -1,0 +1,29 @@
+{
+  "Parameters": {
+    "EnvironmentName": "production",
+    "VPCCidr": "10.101.0.0/16",
+    "AvailabilityZoneCount": "2",
+    "EnableVPCFlowLogs": "false",
+    "EnableNATGatewayHA": "true",
+    "SecretNamePrefix": "worxco/production",
+    "EnableCompliance": "false",
+    "FSxStorageCapacityGB": "100",
+    "FSxThroughputMBps": "128",
+    "FSxDeploymentType": "SINGLE_AZ_1",
+    "FSxAutomaticBackupRetentionDays": "14",
+    "EnableS3Versioning": "true",
+    "DBInstanceClass": "db.t4g.small",
+    "DBAllocatedStorage": "100",
+    "DBMaxAllocatedStorage": "1000",
+    "DBName": "drupal",
+    "DBMasterUsername": "dbadmin",
+    "PostgreSQLVersion": "16.1",
+    "BackupRetentionDays": "14",
+    "EnablePerformanceInsights": "false",
+    "EnableEnhancedMonitoring": "false",
+    "CacheNodeType": "cache.t4g.micro",
+    "NumCacheNodes": "1",
+    "EnableMultiAZ": "false",
+    "RedisVersion": "7.1"
+  }
+}
