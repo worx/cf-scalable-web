@@ -32,9 +32,8 @@ __pycache__/
 *.pyo
 venv/
 
-# Logs
+# Logs (but keep PROMPT_LOGS/ for audit trail)
 *.log
-PROMPT_LOGS/
 
 # Temporary files
 tmp/
