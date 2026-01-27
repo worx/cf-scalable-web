@@ -1,0 +1,29 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "VPCCidr": "10.200.0.0/16",
+    "AvailabilityZoneCount": "1",
+    "EnableVPCFlowLogs": "false",
+    "EnableNATGatewayHA": "false",
+    "SecretNamePrefix": "worxco/sandbox",
+    "EnableCompliance": "false",
+    "FSxStorageCapacityGB": "64",
+    "FSxThroughputMBps": "64",
+    "FSxDeploymentType": "SINGLE_AZ_1",
+    "FSxAutomaticBackupRetentionDays": "1",
+    "EnableS3Versioning": "false",
+    "DBInstanceClass": "db.t4g.micro",
+    "DBAllocatedStorage": "20",
+    "DBMaxAllocatedStorage": "100",
+    "DBName": "drupal",
+    "DBMasterUsername": "dbadmin",
+    "PostgreSQLVersion": "16.1",
+    "BackupRetentionDays": "1",
+    "EnablePerformanceInsights": "false",
+    "EnableEnhancedMonitoring": "false",
+    "CacheNodeType": "cache.t4g.micro",
+    "NumCacheNodes": "1",
+    "EnableMultiAZ": "false",
+    "RedisVersion": "7.1"
+  }
+}
