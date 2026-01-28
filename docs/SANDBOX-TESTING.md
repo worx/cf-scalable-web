@@ -13,22 +13,23 @@ This guide covers testing Phase 1 infrastructure in a sandbox AWS account.
 2. **AWS CLI Configuration**
    ```bash
    # Configure sandbox profile
-   aws configure --profile sandbox
+   aws configure --profile Office
 
    # Set environment
-   export AWS_PROFILE=sandbox
+   export AWS_PROFILE=Office
    export AWS_REGION=us-east-1
    ```
 
 3. **Cost Considerations**
 
    Sandbox parameters use minimal resources:
-   - VPC: 1 AZ, 1 NAT Gateway (~$33/month)
+   - VPC: 1 AZ, NO NAT Gateway (uses VPC Endpoints instead)
+   - SES VPC Endpoint: ~$7.50/month
    - FSx: 64GB, 64 MB/s throughput (~$13/month)
    - RDS: db.t4g.micro, 20GB storage (~$14/month)
    - ElastiCache: cache.t4g.micro, 1 node (~$11/month)
 
-   **Estimated cost: ~$71/month if left running**
+   **Estimated cost: ~$46/month if left running**
 
    **Recommendation**: Destroy stacks immediately after testing to avoid charges
 
@@ -38,11 +39,16 @@ The `cloudformation/parameters/sandbox.json` file contains minimal configuration
 
 - **Environment**: sandbox (10.200.0.0/16 CIDR)
 - **Availability Zones**: 1 (single AZ)
-- **NAT Gateway**: Single (no HA)
+- **NAT Gateway**: Disabled (uses VPC Endpoints for SES)
 - **FSx**: 64GB storage, 64 MB/s, 1-day backups
 - **RDS**: db.t4g.micro, 20GB, 1-day backups
 - **Redis**: cache.t4g.micro, single node
 - **No VPC Flow Logs, Performance Insights, or Enhanced Monitoring**
+
+View current parameters:
+```bash
+make show-params ENV=sandbox
+```
 
 ## Testing Strategy
 
@@ -51,26 +57,31 @@ The `cloudformation/parameters/sandbox.json` file contains minimal configuration
 Test each stack individually to isolate issues:
 
 ```bash
-# 1. Test VPC stack
-./scripts/test-deployment.sh test-vpc
+# 1. Deploy and verify VPC stack
+make deploy-vpc ENV=sandbox
+make verify-vpc ENV=sandbox
 
-# 2. Verify VPC deployment
-./scripts/test-deployment.sh status
+# 2. Check status
+make status ENV=sandbox
 
-# 3. Test IAM stack
-./scripts/test-deployment.sh test-iam
+# 3. Deploy IAM stack
+make deploy-iam ENV=sandbox
+make verify-iam ENV=sandbox
 
-# 4. Test Storage stack (FSx + S3)
-./scripts/test-deployment.sh test-storage
+# 4. Deploy Storage stack (FSx + S3)
+make deploy-storage ENV=sandbox
+make verify-storage ENV=sandbox
 
-# 5. Test Database stack (RDS PostgreSQL)
-./scripts/test-deployment.sh test-database
+# 5. Deploy Database stack (RDS PostgreSQL)
+make deploy-database ENV=sandbox
+make verify-database ENV=sandbox
 
-# 6. Test Cache stack (ElastiCache Redis)
-./scripts/test-deployment.sh test-cache
+# 6. Deploy Cache stack (ElastiCache Redis)
+make deploy-cache ENV=sandbox
+make verify-cache ENV=sandbox
 
 # 7. Destroy everything
-./scripts/test-deployment.sh destroy-all
+make destroy-all ENV=sandbox
 ```
 
 ### Full Stack Testing
@@ -79,28 +90,14 @@ After sequential testing passes, test all stacks together:
 
 ```bash
 # Deploy all stacks in order
-./scripts/test-deployment.sh test-all
+make deploy-all ENV=sandbox
 
 # Verify all stacks
-./scripts/test-deployment.sh status
+make status ENV=sandbox
+make verify-vpc ENV=sandbox
 
 # Destroy all stacks
-./scripts/test-deployment.sh destroy-all
-```
-
-## Dry-Run Testing
-
-Test the deployment process without creating AWS resources:
-
-```bash
-# Dry-run individual stack
-./scripts/test-deployment.sh --dry-run test-vpc
-
-# Dry-run full deployment
-./scripts/test-deployment.sh --dry-run test-all
-
-# Dry-run destruction
-./scripts/test-deployment.sh --dry-run destroy-all
+make destroy-all ENV=sandbox
 ```
 
 ## What to Verify
@@ -109,12 +106,18 @@ Test the deployment process without creating AWS resources:
 - [ ] VPC created with 10.200.0.0/16 CIDR
 - [ ] 5 subnets created (public, nginx, nlb, php-fpm, data)
 - [ ] Internet Gateway attached
-- [ ] NAT Gateway in public subnet
+- [ ] NO NAT Gateway (uses VPC Endpoints instead)
+- [ ] SES VPC Endpoint created and available
 - [ ] Route tables configured correctly
-- [ ] 7 Security Groups created with correct rules
+- [ ] 8 Security Groups created with locked-down egress rules
 - [ ] Exports created for cross-stack references
 
-**CLI Verification:**
+**Quick Verification:**
+```bash
+make verify-vpc ENV=sandbox
+```
+
+**Manual CLI Verification:**
 ```bash
 # List VPC resources
 aws ec2 describe-vpcs --filters "Name=tag:Name,Values=sandbox-vpc" --region us-east-1
@@ -127,6 +130,9 @@ aws ec2 describe-security-groups --filters "Name=tag:aws:cloudformation:stack-na
 
 # List CloudFormation exports
 aws cloudformation list-exports --region us-east-1 | jq '.Exports[] | select(.Name | startswith("sandbox"))'
+
+# Verify SES VPC Endpoint
+aws ec2 describe-vpc-endpoints --filters "Name=service-name,Values=com.amazonaws.us-east-1.email-smtp" --region us-east-1
 ```
 
 ### IAM Stack (cf-iam.yaml)
@@ -137,7 +143,12 @@ aws cloudformation list-exports --region us-east-1 | jq '.Exports[] | select(.Na
 - [ ] S3/RDS/Redis permissions for PHP-FPM
 - [ ] SSM permissions for Session Manager
 
-**CLI Verification:**
+**Quick Verification:**
+```bash
+make verify-iam ENV=sandbox
+```
+
+**Manual CLI Verification:**
 ```bash
 # List IAM roles
 aws iam list-roles --query 'Roles[?contains(RoleName, `sandbox`)]' --region us-east-1
@@ -154,7 +165,12 @@ aws iam list-role-policies --role-name sandbox-nginx-instance-role --region us-e
 - [ ] S3 bucket policy configured
 - [ ] Exports created for FSx/S3 references
 
-**CLI Verification:**
+**Quick Verification:**
+```bash
+make verify-storage ENV=sandbox
+```
+
+**Manual CLI Verification:**
 ```bash
 # List FSx filesystems
 aws fsx describe-file-systems --region us-east-1 | jq '.FileSystems[] | select(.Tags[] | select(.Key=="aws:cloudformation:stack-name" and (.Value | contains("sandbox"))))'
@@ -166,13 +182,6 @@ aws fsx describe-file-systems --region us-east-1 | jq '.FileSystems[] | select(.
 aws s3 ls | grep sandbox
 ```
 
-**Timing Test:**
-```bash
-# Time FSx deployment
-time ./scripts/test-deployment.sh test-storage
-# Should complete in < 2 minutes total (including CloudFormation overhead)
-```
-
 ### Database Stack (cf-database.yaml)
 - [ ] RDS PostgreSQL instance created
 - [ ] Single AZ deployment (no Multi-AZ)
@@ -180,10 +189,15 @@ time ./scripts/test-deployment.sh test-storage
 - [ ] 20GB storage allocated
 - [ ] DB subnet group created
 - [ ] Master password stored in Secrets Manager
-- [ ] Security group allows connections from PHP tier
+- [ ] Security group allows connections from PHP tier only
 - [ ] Automated backups configured (1 day retention)
 
-**CLI Verification:**
+**Quick Verification:**
+```bash
+make verify-database ENV=sandbox
+```
+
+**Manual CLI Verification:**
 ```bash
 # List RDS instances
 aws rds describe-db-instances --query 'DBInstances[?TagList[?Key==`aws:cloudformation:stack-name` && contains(Value, `sandbox`)]]' --region us-east-1
@@ -215,9 +229,14 @@ psql -h "$DB_ENDPOINT" -U dbadmin -d drupal -c "SELECT version();"
 - [ ] Encryption at rest enabled
 - [ ] Encryption in transit enabled
 - [ ] Auth token stored in Secrets Manager
-- [ ] Security group allows connections from PHP/NGINX tiers
+- [ ] Security group allows connections from NGINX tier only (not PHP)
 
-**CLI Verification:**
+**Quick Verification:**
+```bash
+make verify-cache ENV=sandbox
+```
+
+**Manual CLI Verification:**
 ```bash
 # List ElastiCache clusters
 aws elasticache describe-replication-groups --region us-east-1 | jq '.ReplicationGroups[] | select(.ReplicationGroupId | contains("sandbox"))'
@@ -257,6 +276,27 @@ aws cloudformation describe-stacks --stack-name cf-scalable-web-sandbox-storage 
 aws cloudformation describe-stacks --stack-name cf-scalable-web-sandbox-database --region us-east-1 | jq '.Stacks[0].Parameters[] | select(.ParameterValue | startswith("arn:aws:cloudformation"))'
 ```
 
+## Security Architecture
+
+The VPC implements defense-in-depth with locked-down security groups:
+
+| Component | Can Connect To | Cannot Connect To |
+|-----------|----------------|-------------------|
+| ALB | NGINX only | Everything else |
+| NGINX | NLB, Redis, FSx | RDS, Internet |
+| NLB | PHP only | Everything else |
+| PHP | RDS, FSx, SES Endpoint | Redis, Internet |
+| RDS | Nothing (receive only) | Everything |
+| Redis | Nothing (receive only) | Everything |
+| FSx | Nothing (receive only) | Everything |
+
+**Key Security Features:**
+- No NAT Gateway (instances cannot reach internet)
+- SES VPC Endpoint for email (private connectivity)
+- All egress rules locked to specific destinations
+- PHP cannot access Redis (NGINX-only for page cache)
+- Data tier has no outbound connectivity
+
 ## Known Issues and Limitations
 
 ### FSx for OpenZFS
@@ -275,8 +315,8 @@ aws cloudformation describe-stacks --stack-name cf-scalable-web-sandbox-database
 
 ### Security Groups
 - Security groups are configured for defense-in-depth
-- If testing from local machine, you'll need to add temporary rules
-- **Do not expose RDS/Redis directly to internet** - use Systems Manager Session Manager
+- If testing from local machine, you'll need EC2 Serial Console or temporary rules
+- **Do not expose RDS/Redis directly to internet**
 
 ## Troubleshooting
 
@@ -344,13 +384,51 @@ aws ce get-cost-and-usage \
 ### Cleanup After Testing
 ```bash
 # IMPORTANT: Destroy all stacks immediately after testing
-./scripts/test-deployment.sh destroy-all
+make destroy-all ENV=sandbox
 
 # Verify all resources deleted
-./scripts/test-deployment.sh status
+make status ENV=sandbox
 
 # Check for orphaned resources
 aws resourcegroupstaggingapi get-resources --tag-filters Key=Environment,Values=sandbox --region us-east-1
+```
+
+## Makefile Reference
+
+```bash
+# Show all available commands
+make help
+
+# Show parameters for an environment
+make show-params ENV=sandbox
+make show-params ENV=production
+
+# Deploy individual stacks
+make deploy-vpc ENV=sandbox
+make deploy-iam ENV=sandbox
+make deploy-storage ENV=sandbox
+make deploy-database ENV=sandbox
+make deploy-cache ENV=sandbox
+
+# Deploy all stacks in order
+make deploy-all ENV=sandbox
+
+# Verify deployments
+make verify-vpc ENV=sandbox
+make verify-iam ENV=sandbox
+make verify-storage ENV=sandbox
+make verify-database ENV=sandbox
+make verify-cache ENV=sandbox
+
+# Check status
+make status ENV=sandbox
+
+# Destroy stacks
+make destroy-vpc ENV=sandbox
+make destroy-all ENV=sandbox
+
+# Validate templates
+make validate
 ```
 
 ## Test Results Documentation
@@ -366,17 +444,17 @@ Create a log of test results in `PROMPT_LOGS/`:
 - Tester: Kurt Vanderwater
 
 ## Test 1: Sequential Deployment
-- VPC: ✓ SUCCESS (Duration: XXs)
-- IAM: ✓ SUCCESS (Duration: XXs)
-- Storage: ✓ SUCCESS (Duration: XXs, FSx: XXs)
-- Database: ✓ SUCCESS (Duration: XXs)
-- Cache: ✓ SUCCESS (Duration: XXs)
+- VPC: SUCCESS (Duration: XXs)
+- IAM: SUCCESS (Duration: XXs)
+- Storage: SUCCESS (Duration: XXs, FSx: XXs)
+- Database: SUCCESS (Duration: XXs)
+- Cache: SUCCESS (Duration: XXs)
 
 ## Test 2: Full Stack Deployment
-- All Stacks: ✓ SUCCESS (Total Duration: XXs)
+- All Stacks: SUCCESS (Total Duration: XXs)
 
 ## Test 3: Stack Destruction
-- Reverse Order: ✓ SUCCESS (Total Duration: XXs)
+- Reverse Order: SUCCESS (Total Duration: XXs)
 
 ## Issues Found
 [List any issues, errors, or unexpected behavior]

@@ -8,22 +8,40 @@
 # Purpose: Simplified deployment and management of CloudFormation stacks
 # Dependencies: aws-cli, cfn-lint, jq
 #
+# Usage:
+#   make deploy-vpc ENV=sandbox     Deploy VPC to sandbox
+#   make verify-vpc ENV=sandbox     Verify VPC deployment
+#   make destroy-vpc ENV=sandbox    Delete VPC stack
+#   make show-params ENV=sandbox    Show parameters for environment
+#   make status ENV=sandbox         Show all stack statuses
+#
 
-.PHONY: help validate deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
-        delete-all delete-vpc delete-iam delete-storage delete-database delete-cache \
+.PHONY: help validate show-params status \
+        deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
+        verify-vpc verify-iam verify-storage verify-database verify-cache \
+        destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         init-secrets list-secrets test clean
 
-# Default environment
-ENV ?= production
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+
+# Default to sandbox for safety (not production!)
+ENV ?= sandbox
 AWS_REGION ?= us-east-1
+
+# Stack naming convention: cf-scalable-web-{environment}-{component}
+STACK_PREFIX := cf-scalable-web-$(ENV)
+
+# Parameter file location
 PARAM_FILE := cloudformation/parameters/$(ENV).json
 
 # Stack names
-VPC_STACK := $(ENV)-vpc
-IAM_STACK := $(ENV)-iam
-STORAGE_STACK := $(ENV)-storage
-DATABASE_STACK := $(ENV)-database
-CACHE_STACK := $(ENV)-cache
+VPC_STACK := $(STACK_PREFIX)-vpc
+IAM_STACK := $(STACK_PREFIX)-iam
+STORAGE_STACK := $(STACK_PREFIX)-storage
+DATABASE_STACK := $(STACK_PREFIX)-database
+CACHE_STACK := $(STACK_PREFIX)-cache
 
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
@@ -32,202 +50,421 @@ STORAGE_TEMPLATE := cloudformation/cf-storage.yaml
 DATABASE_TEMPLATE := cloudformation/cf-database.yaml
 CACHE_TEMPLATE := cloudformation/cf-cache.yaml
 
+# AWS CLI environment
+export AWS_PAGER :=
+export AWS_CLI_AUTO_PROMPT := off
+
 # Colors
 RED := \033[0;31m
 GREEN := \033[0;32m
 YELLOW := \033[1;33m
 BLUE := \033[0;34m
-NC := \033[0m # No Color
+CYAN := \033[0;36m
+NC := \033[0m
 
-## help: Display this help message
-help:
+# -----------------------------------------------------------------------------
+# Default Target
+# -----------------------------------------------------------------------------
+
+.DEFAULT_GOAL := help
+
+help:  ## Show this help message
 	@echo "$(BLUE)cf-scalable-web Makefile$(NC)"
 	@echo ""
-	@echo "$(YELLOW)Environment:$(NC) ENV=$(ENV) AWS_REGION=$(AWS_REGION)"
+	@echo "$(CYAN)Current Environment:$(NC) ENV=$(ENV)"
+	@echo "$(CYAN)Parameter File:$(NC) $(PARAM_FILE)"
+	@echo "$(CYAN)Stack Prefix:$(NC) $(STACK_PREFIX)"
 	@echo ""
-	@echo "$(YELLOW)Validation:$(NC)"
-	@echo "  make validate                 - Validate all CloudFormation templates"
+	@echo "$(YELLOW)Validation & Info:$(NC)"
+	@echo "  make validate                 Validate all CloudFormation templates"
+	@echo "  make show-params              Show parameters for current ENV"
+	@echo "  make status                   Show status of all stacks"
 	@echo ""
-	@echo "$(YELLOW)Deployment:$(NC)"
-	@echo "  make deploy-all              - Deploy all stacks (ENV=production|staging|dev)"
-	@echo "  make deploy-vpc              - Deploy VPC stack only"
-	@echo "  make deploy-iam              - Deploy IAM stack only"
-	@echo "  make deploy-storage          - Deploy storage stack (FSx, S3)"
-	@echo "  make deploy-database         - Deploy database stack (RDS PostgreSQL)"
-	@echo "  make deploy-cache            - Deploy cache stack (ElastiCache Redis)"
+	@echo "$(YELLOW)Deployment (ENV=sandbox|staging|production):$(NC)"
+	@echo "  make deploy-vpc               Deploy VPC stack"
+	@echo "  make deploy-iam               Deploy IAM stack"
+	@echo "  make deploy-storage           Deploy storage stack (FSx, S3)"
+	@echo "  make deploy-database          Deploy database stack (RDS)"
+	@echo "  make deploy-cache             Deploy cache stack (ElastiCache)"
+	@echo "  make deploy-all               Deploy all stacks in order"
 	@echo ""
-	@echo "$(YELLOW)Deletion:$(NC)"
-	@echo "  make delete-cache            - Delete cache stack"
-	@echo "  make delete-database         - Delete database stack (WARNING: Data loss!)"
-	@echo "  make delete-storage          - Delete storage stack (WARNING: Data loss!)"
-	@echo "  make delete-iam              - Delete IAM stack"
-	@echo "  make delete-vpc              - Delete VPC stack"
-	@echo "  make delete-all              - Delete all stacks (WARNING: Complete teardown!)"
+	@echo "$(YELLOW)Verification:$(NC)"
+	@echo "  make verify-vpc               Verify VPC deployment"
+	@echo "  make verify-iam               Verify IAM deployment"
+	@echo "  make verify-storage           Verify storage deployment"
+	@echo "  make verify-database          Verify database deployment"
+	@echo "  make verify-cache             Verify cache deployment"
+	@echo ""
+	@echo "$(YELLOW)Destruction:$(NC)"
+	@echo "  make destroy-vpc              Delete VPC stack"
+	@echo "  make destroy-iam              Delete IAM stack"
+	@echo "  make destroy-storage          Delete storage stack"
+	@echo "  make destroy-database         Delete database stack"
+	@echo "  make destroy-cache            Delete cache stack"
+	@echo "  make destroy-all              Delete all stacks (reverse order)"
 	@echo ""
 	@echo "$(YELLOW)Secrets Management:$(NC)"
-	@echo "  make init-secrets            - Initialize required secrets"
-	@echo "  make list-secrets            - List all secrets for environment"
+	@echo "  make init-secrets             Initialize required secrets"
+	@echo "  make list-secrets             List all secrets for environment"
 	@echo ""
 	@echo "$(YELLOW)Testing & Maintenance:$(NC)"
-	@echo "  make test                    - Run test suite"
-	@echo "  make clean                   - Clean temporary files"
+	@echo "  make test                     Run test suite"
+	@echo "  make clean                    Clean temporary files"
 	@echo ""
 	@echo "$(YELLOW)Examples:$(NC)"
-	@echo "  make ENV=staging deploy-all  - Deploy staging environment"
-	@echo "  make ENV=dev deploy-vpc      - Deploy development VPC only"
+	@echo "  make ENV=sandbox deploy-vpc   Deploy VPC to sandbox"
+	@echo "  make ENV=sandbox verify-vpc   Verify sandbox VPC"
+	@echo "  make ENV=production status    Show production stack status"
 	@echo ""
 
-## validate: Validate all CloudFormation templates
-validate:
+# -----------------------------------------------------------------------------
+# Validation & Info Targets
+# -----------------------------------------------------------------------------
+
+validate:  ## Validate all CloudFormation templates
 	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@cfn-lint $(VPC_TEMPLATE)
-	@cfn-lint $(IAM_TEMPLATE)
-	@cfn-lint $(STORAGE_TEMPLATE)
-	@cfn-lint $(DATABASE_TEMPLATE)
-	@cfn-lint $(CACHE_TEMPLATE)
+	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE); do \
+		if [ -f "$$template" ]; then \
+			echo "  Validating $$template..."; \
+			cfn-lint "$$template" || exit 1; \
+		fi; \
+	done
 	@if [ -f $(PARAM_FILE) ]; then \
-		echo "$(BLUE)Validating parameter file...$(NC)"; \
-		jq empty $(PARAM_FILE); \
+		echo "  Validating $(PARAM_FILE)..."; \
+		jq empty $(PARAM_FILE) || exit 1; \
 	else \
-		echo "$(YELLOW)Warning: Parameter file not found: $(PARAM_FILE)$(NC)"; \
+		echo "$(YELLOW)  Warning: Parameter file not found: $(PARAM_FILE)$(NC)"; \
 	fi
 	@echo "$(GREEN)✓ All templates valid$(NC)"
 
-## check-params: Check if parameter file exists
-check-params:
-	@if [ ! -f $(PARAM_FILE) ]; then \
-		echo "$(RED)Error: Parameter file not found: $(PARAM_FILE)$(NC)" >&2; \
-		echo "Create it from the template: cp cloudformation/parameters/template.json $(PARAM_FILE)" >&2; \
+show-params:  ## Show parameters for current environment
+	@echo "$(BLUE)Parameters for ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)File: $(PARAM_FILE)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@if [ -f $(PARAM_FILE) ]; then \
+		jq -r '.Parameters | to_entries | .[] | "  \(.key): \(.value)"' $(PARAM_FILE); \
+	else \
+		echo "$(RED)Error: Parameter file not found: $(PARAM_FILE)$(NC)"; \
 		exit 1; \
 	fi
 
-## deploy-vpc: Deploy VPC stack
-deploy-vpc: validate check-params
+status:  ## Show status of all stacks for current environment
+	@echo "$(BLUE)Stack Status for ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK); do \
+		status=$$(aws cloudformation describe-stacks \
+			--stack-name "$$stack" \
+			--region $(AWS_REGION) \
+			--query 'Stacks[0].StackStatus' \
+			--output text 2>/dev/null || echo "NOT_EXISTS"); \
+		case "$$status" in \
+			*COMPLETE*) echo "  $$stack: $(GREEN)$$status$(NC)" ;; \
+			*FAILED*|*ROLLBACK*) echo "  $$stack: $(RED)$$status$(NC)" ;; \
+			NOT_EXISTS) echo "  $$stack: $(YELLOW)NOT_EXISTS$(NC)" ;; \
+			*) echo "  $$stack: $(YELLOW)$$status$(NC)" ;; \
+		esac; \
+	done
+
+# -----------------------------------------------------------------------------
+# Check Parameter File Exists
+# -----------------------------------------------------------------------------
+
+check-params:
+	@if [ ! -f $(PARAM_FILE) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(PARAM_FILE)$(NC)" >&2; \
+		echo "Create it: cp cloudformation/parameters/template.json $(PARAM_FILE)" >&2; \
+		exit 1; \
+	fi
+
+# -----------------------------------------------------------------------------
+# Deploy Targets
+# -----------------------------------------------------------------------------
+
+deploy-vpc: validate check-params  ## Deploy VPC stack
 	@echo "$(BLUE)Deploying VPC stack: $(VPC_STACK)$(NC)"
-	@aws cloudformation deploy \
+	@time aws cloudformation deploy \
 		--template-file $(VPC_TEMPLATE) \
 		--stack-name $(VPC_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ VPC stack deployed$(NC)"
+	@echo "$(GREEN)✓ VPC stack deployed: $(VPC_STACK)$(NC)"
 
-## deploy-iam: Deploy IAM stack
-deploy-iam: validate check-params
+deploy-iam: validate check-params  ## Deploy IAM stack
 	@echo "$(BLUE)Deploying IAM stack: $(IAM_STACK)$(NC)"
-	@aws cloudformation deploy \
+	@time aws cloudformation deploy \
 		--template-file $(IAM_TEMPLATE) \
 		--stack-name $(IAM_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ IAM stack deployed$(NC)"
+	@echo "$(GREEN)✓ IAM stack deployed: $(IAM_STACK)$(NC)"
 
-## deploy-storage: Deploy storage stack
-deploy-storage: validate check-params
+deploy-storage: validate check-params  ## Deploy storage stack
 	@echo "$(BLUE)Deploying storage stack: $(STORAGE_STACK)$(NC)"
-	@aws cloudformation deploy \
+	@time aws cloudformation deploy \
 		--template-file $(STORAGE_TEMPLATE) \
 		--stack-name $(STORAGE_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ Storage stack deployed$(NC)"
+	@echo "$(GREEN)✓ Storage stack deployed: $(STORAGE_STACK)$(NC)"
 
-## deploy-database: Deploy database stack
-deploy-database: validate check-params
+deploy-database: validate check-params  ## Deploy database stack
 	@echo "$(BLUE)Deploying database stack: $(DATABASE_STACK)$(NC)"
-	@aws cloudformation deploy \
+	@time aws cloudformation deploy \
 		--template-file $(DATABASE_TEMPLATE) \
 		--stack-name $(DATABASE_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ Database stack deployed$(NC)"
+	@echo "$(GREEN)✓ Database stack deployed: $(DATABASE_STACK)$(NC)"
 
-## deploy-cache: Deploy cache stack
-deploy-cache: validate check-params
+deploy-cache: validate check-params  ## Deploy cache stack
 	@echo "$(BLUE)Deploying cache stack: $(CACHE_STACK)$(NC)"
-	@aws cloudformation deploy \
+	@time aws cloudformation deploy \
 		--template-file $(CACHE_TEMPLATE) \
 		--stack-name $(CACHE_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ Cache stack deployed$(NC)"
+	@echo "$(GREEN)✓ Cache stack deployed: $(CACHE_STACK)$(NC)"
 
-## deploy-all: Deploy all foundation stacks
-deploy-all: deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache
-	@echo "$(GREEN)✓ All stacks deployed successfully$(NC)"
+deploy-all: deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache  ## Deploy all stacks
+	@echo "$(GREEN)✓ All stacks deployed for ENV=$(ENV)$(NC)"
 
-## delete-cache: Delete cache stack
-delete-cache:
-	@echo "$(YELLOW)Deleting cache stack: $(CACHE_STACK)$(NC)"
-	@aws cloudformation delete-stack --stack-name $(CACHE_STACK) --region $(AWS_REGION)
-	@aws cloudformation wait stack-delete-complete --stack-name $(CACHE_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ Cache stack deleted$(NC)"
+# -----------------------------------------------------------------------------
+# Verify Targets
+# -----------------------------------------------------------------------------
 
-## delete-database: Delete database stack
-delete-database:
-	@echo "$(RED)WARNING: This will delete the database and all data!$(NC)"
-	@read -p "Are you sure? (yes/no): " confirm; \
-	if [ "$$confirm" != "yes" ]; then \
-		echo "Cancelled"; \
-		exit 0; \
+verify-vpc:  ## Verify VPC deployment
+	@echo "$(BLUE)Verifying VPC stack: $(VPC_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. VPC:$(NC)"
+	@aws ec2 describe-vpcs \
+		--filters "Name=tag:Name,Values=$(ENV)-vpc" \
+		--query 'Vpcs[0].{VpcId:VpcId,CidrBlock:CidrBlock,State:State}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Subnets:$(NC)"
+	@aws ec2 describe-subnets \
+		--filters "Name=tag:aws:cloudformation:stack-name,Values=$(VPC_STACK)" \
+		--query 'Subnets[].{Name:Tags[?Key==`Name`].Value|[0],CidrBlock:CidrBlock,AZ:AvailabilityZone}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)3. Security Groups:$(NC)"
+	@aws ec2 describe-security-groups \
+		--filters "Name=tag:aws:cloudformation:stack-name,Values=$(VPC_STACK)" \
+		--query 'SecurityGroups[].{Name:Tags[?Key==`Name`].Value|[0],GroupId:GroupId}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)4. CloudFormation Exports:$(NC)"
+	@aws cloudformation list-exports \
+		--query 'Exports[?starts_with(Name, `$(ENV)`)].{Name:Name,Value:Value}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)5. VPC Endpoints:$(NC)"
+	@vpc_id=$$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=$(ENV)-vpc" --query 'Vpcs[0].VpcId' --output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ "$$vpc_id" != "None" ] && [ -n "$$vpc_id" ]; then \
+		aws ec2 describe-vpc-endpoints \
+			--filters "Name=vpc-id,Values=$$vpc_id" \
+			--query 'VpcEndpoints[].{ServiceName:ServiceName,State:State,EndpointId:VpcEndpointId}' \
+			--output table \
+			--region $(AWS_REGION) 2>/dev/null || echo "  None"; \
+	else \
+		echo "  $(RED)VPC not found$(NC)"; \
 	fi
-	@echo "$(YELLOW)Deleting database stack: $(DATABASE_STACK)$(NC)"
-	@aws cloudformation delete-stack --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
-	@aws cloudformation wait stack-delete-complete --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ Database stack deleted$(NC)"
+	@echo ""
+	@echo "$(CYAN)6. NAT Gateways:$(NC)"
+	@vpc_id=$$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=$(ENV)-vpc" --query 'Vpcs[0].VpcId' --output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ "$$vpc_id" != "None" ] && [ -n "$$vpc_id" ]; then \
+		result=$$(aws ec2 describe-nat-gateways \
+			--filter "Name=vpc-id,Values=$$vpc_id" "Name=state,Values=available,pending" \
+			--query 'NatGateways[].{NatGatewayId:NatGatewayId,State:State}' \
+			--output table \
+			--region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$result" ]; then \
+			echo "  $(GREEN)None (using VPC Endpoints instead)$(NC)"; \
+		else \
+			echo "$$result"; \
+		fi; \
+	else \
+		echo "  $(RED)VPC not found$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(GREEN)✓ VPC verification complete$(NC)"
 
-## delete-storage: Delete storage stack
-delete-storage:
-	@echo "$(RED)WARNING: This will delete FSx and S3 buckets with all data!$(NC)"
-	@read -p "Are you sure? (yes/no): " confirm; \
+verify-iam:  ## Verify IAM deployment
+	@echo "$(BLUE)Verifying IAM stack: $(IAM_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. IAM Roles:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(IAM_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::IAM::Role`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Instance Profiles:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(IAM_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::IAM::InstanceProfile`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ IAM verification complete$(NC)"
+
+verify-storage:  ## Verify storage deployment
+	@echo "$(BLUE)Verifying storage stack: $(STORAGE_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. FSx File Systems:$(NC)"
+	@aws fsx describe-file-systems \
+		--query 'FileSystems[?Tags[?Key==`aws:cloudformation:stack-name` && Value==`$(STORAGE_STACK)`]].{FileSystemId:FileSystemId,Type:FileSystemType,Lifecycle:Lifecycle}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. S3 Buckets:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(STORAGE_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::S3::Bucket`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Storage verification complete$(NC)"
+
+verify-database:  ## Verify database deployment
+	@echo "$(BLUE)Verifying database stack: $(DATABASE_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. RDS Instances:$(NC)"
+	@aws rds describe-db-instances \
+		--query 'DBInstances[?TagList[?Key==`aws:cloudformation:stack-name` && Value==`$(DATABASE_STACK)`]].{DBInstanceId:DBInstanceIdentifier,Engine:Engine,Status:DBInstanceStatus,Endpoint:Endpoint.Address}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. DB Subnet Groups:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(DATABASE_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::RDS::DBSubnetGroup`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Database verification complete$(NC)"
+
+verify-cache:  ## Verify cache deployment
+	@echo "$(BLUE)Verifying cache stack: $(CACHE_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. ElastiCache Clusters:$(NC)"
+	@aws elasticache describe-cache-clusters \
+		--query 'CacheClusters[].{CacheClusterId:CacheClusterId,Engine:Engine,Status:CacheClusterStatus,NodeType:CacheNodeType}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Replication Groups:$(NC)"
+	@aws elasticache describe-replication-groups \
+		--query 'ReplicationGroups[].{ReplicationGroupId:ReplicationGroupId,Status:Status,NodeGroups:NodeGroups[0].PrimaryEndpoint.Address}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Cache verification complete$(NC)"
+
+# -----------------------------------------------------------------------------
+# Destroy Targets
+# -----------------------------------------------------------------------------
+
+destroy-vpc:  ## Delete VPC stack
+	@echo "$(YELLOW)Deleting VPC stack: $(VPC_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(VPC_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(VPC_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ VPC stack deleted: $(VPC_STACK)$(NC)"
+
+destroy-iam:  ## Delete IAM stack
+	@echo "$(YELLOW)Deleting IAM stack: $(IAM_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(IAM_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(IAM_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ IAM stack deleted: $(IAM_STACK)$(NC)"
+
+destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
+	@echo "$(RED)WARNING: This will delete FSx and S3 with all data!$(NC)"
+	@read -p "Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" != "yes" ]; then \
 		echo "Cancelled"; \
 		exit 0; \
 	fi
 	@echo "$(YELLOW)Deleting storage stack: $(STORAGE_STACK)$(NC)"
-	@aws cloudformation delete-stack --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
+	@time aws cloudformation delete-stack --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
 	@aws cloudformation wait stack-delete-complete --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ Storage stack deleted$(NC)"
+	@echo "$(GREEN)✓ Storage stack deleted: $(STORAGE_STACK)$(NC)"
 
-## delete-iam: Delete IAM stack
-delete-iam:
-	@echo "$(YELLOW)Deleting IAM stack: $(IAM_STACK)$(NC)"
-	@aws cloudformation delete-stack --stack-name $(IAM_STACK) --region $(AWS_REGION)
-	@aws cloudformation wait stack-delete-complete --stack-name $(IAM_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ IAM stack deleted$(NC)"
+destroy-database:  ## Delete database stack (WARNING: Data loss!)
+	@echo "$(RED)WARNING: This will delete the database and all data!$(NC)"
+	@read -p "Type 'yes' to confirm: " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Cancelled"; \
+		exit 0; \
+	fi
+	@echo "$(YELLOW)Deleting database stack: $(DATABASE_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ Database stack deleted: $(DATABASE_STACK)$(NC)"
 
-## delete-vpc: Delete VPC stack
-delete-vpc:
-	@echo "$(YELLOW)Deleting VPC stack: $(VPC_STACK)$(NC)"
-	@aws cloudformation delete-stack --stack-name $(VPC_STACK) --region $(AWS_REGION)
-	@aws cloudformation wait stack-delete-complete --stack-name $(VPC_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ VPC stack deleted$(NC)"
+destroy-cache:  ## Delete cache stack
+	@echo "$(YELLOW)Deleting cache stack: $(CACHE_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(CACHE_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(CACHE_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ Cache stack deleted: $(CACHE_STACK)$(NC)"
 
-## delete-all: Delete all stacks (reverse order)
-delete-all: delete-cache delete-database delete-storage delete-iam delete-vpc
-	@echo "$(GREEN)✓ All stacks deleted$(NC)"
+destroy-all:  ## Delete all stacks (reverse order, with confirmation)
+	@echo "$(RED)========================================$(NC)"
+	@echo "$(RED)WARNING: This will DELETE ALL STACKS$(NC)"
+	@echo "$(RED)Environment: $(ENV)$(NC)"
+	@echo "$(RED)========================================$(NC)"
+	@read -p "Type 'yes' to confirm COMPLETE TEARDOWN: " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Cancelled"; \
+		exit 0; \
+	fi
+	@$(MAKE) destroy-cache ENV=$(ENV) || true
+	@$(MAKE) destroy-database ENV=$(ENV) || true
+	@$(MAKE) destroy-storage ENV=$(ENV) || true
+	@$(MAKE) destroy-iam ENV=$(ENV) || true
+	@$(MAKE) destroy-vpc ENV=$(ENV)
+	@echo "$(GREEN)✓ All stacks deleted for ENV=$(ENV)$(NC)"
 
-## init-secrets: Initialize secrets for deployment
-init-secrets:
+# -----------------------------------------------------------------------------
+# Secrets Management
+# -----------------------------------------------------------------------------
+
+init-secrets:  ## Initialize secrets for deployment
 	@echo "$(BLUE)Initializing secrets for $(ENV)...$(NC)"
 	@./scripts/manage-secrets.sh init worxco/$(ENV)
 
-## list-secrets: List all secrets
-list-secrets:
+list-secrets:  ## List all secrets
 	@echo "$(BLUE)Listing secrets for $(ENV)...$(NC)"
 	@./scripts/manage-secrets.sh list worxco/$(ENV)
 
-## test: Run test suite
-test:
+# -----------------------------------------------------------------------------
+# Testing & Maintenance
+# -----------------------------------------------------------------------------
+
+test:  ## Run test suite
 	@echo "$(BLUE)Running tests...$(NC)"
 	@if [ -d tests ]; then \
 		for test in tests/test-*.sh; do \
@@ -241,8 +478,7 @@ test:
 		echo "$(YELLOW)No tests found$(NC)"; \
 	fi
 
-## clean: Clean temporary files
-clean:
+clean:  ## Clean temporary files
 	@echo "$(BLUE)Cleaning temporary files...$(NC)"
 	@rm -f cloudformation/**/*.swp
 	@rm -f cloudformation/**/*~

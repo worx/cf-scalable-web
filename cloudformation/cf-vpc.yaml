@@ -68,6 +68,12 @@ Parameters:
     AllowedValues: [true, false]
     Default: false
 
+  EnableNATGateway:
+    Type: String
+    Description: Deploy NAT Gateway (false recommended - use VPC Endpoints instead)
+    AllowedValues: [true, false]
+    Default: false
+
   EnableNATGatewayHA:
     Type: String
     Description: Deploy NAT Gateway in each AZ (true) or only in first AZ (false, cost savings)
@@ -78,9 +84,15 @@ Conditions:
   HasTwoAZs: !Or [!Equals [!Ref AvailabilityZoneCount, 2], !Equals [!Ref AvailabilityZoneCount, 3]]
   HasThreeAZs: !Equals [!Ref AvailabilityZoneCount, 3]
   EnableFlowLogs: !Equals [!Ref EnableVPCFlowLogs, true]
+  NATGatewayEnabled: !Equals [!Ref EnableNATGateway, true]
   NATGatewayHA: !Equals [!Ref EnableNATGatewayHA, true]
-  NATGateway2: !And [Condition: HasTwoAZs, Condition: NATGatewayHA]
-  NATGateway3: !And [Condition: HasThreeAZs, Condition: NATGatewayHA]
+  NATGatewayNotHA: !Not [Condition: NATGatewayHA]
+  NATGateway1: !Condition NATGatewayEnabled
+  NATGateway2: !And [Condition: NATGatewayEnabled, Condition: HasTwoAZs, Condition: NATGatewayHA]
+  NATGateway3: !And [Condition: NATGatewayEnabled, Condition: HasThreeAZs, Condition: NATGatewayHA]
+  # Route conditions for fallback to NAT Gateway 1 when HA is disabled
+  NATRoute2Fallback: !And [Condition: NATGatewayEnabled, Condition: HasTwoAZs, Condition: NATGatewayNotHA]
+  NATRoute3Fallback: !And [Condition: NATGatewayEnabled, Condition: HasThreeAZs, Condition: NATGatewayNotHA]
 
 Resources:
   # ========================================
@@ -122,7 +134,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [0, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.1.0/24
+      CidrBlock: !Select [0, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: false
       Tags:
@@ -136,7 +148,7 @@ Resources:
     Condition: HasTwoAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [1, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.2.0/24
+      CidrBlock: !Select [1, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: false
       Tags:
@@ -150,7 +162,7 @@ Resources:
     Condition: HasThreeAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [2, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.3.0/24
+      CidrBlock: !Select [2, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.3.0/24
       AvailabilityZone: !Select [2, !GetAZs '']
       MapPublicIpOnLaunch: false
       Tags:
@@ -167,7 +179,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [3, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.11.0/24
+      CidrBlock: !Select [3, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.11.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
@@ -180,7 +192,7 @@ Resources:
     Condition: HasTwoAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [4, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.12.0/24
+      CidrBlock: !Select [4, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.12.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       Tags:
         - Key: Name
@@ -193,7 +205,7 @@ Resources:
     Condition: HasThreeAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [5, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.13.0/24
+      CidrBlock: !Select [5, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.13.0/24
       AvailabilityZone: !Select [2, !GetAZs '']
       Tags:
         - Key: Name
@@ -209,7 +221,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [6, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.21.0/24
+      CidrBlock: !Select [6, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.21.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
@@ -222,7 +234,7 @@ Resources:
     Condition: HasTwoAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [7, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.22.0/24
+      CidrBlock: !Select [7, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.22.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       Tags:
         - Key: Name
@@ -235,7 +247,7 @@ Resources:
     Condition: HasThreeAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [8, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.23.0/24
+      CidrBlock: !Select [8, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.23.0/24
       AvailabilityZone: !Select [2, !GetAZs '']
       Tags:
         - Key: Name
@@ -251,7 +263,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [9, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.31.0/24
+      CidrBlock: !Select [9, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.31.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
@@ -264,7 +276,7 @@ Resources:
     Condition: HasTwoAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [10, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.32.0/24
+      CidrBlock: !Select [10, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.32.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       Tags:
         - Key: Name
@@ -277,7 +289,7 @@ Resources:
     Condition: HasThreeAZs
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Select [11, !Cidr [!Ref VPCCidr, 12, 8]]  # e.g., 10.101.33.0/24
+      CidrBlock: !Select [11, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.33.0/24
       AvailabilityZone: !Select [2, !GetAZs '']
       Tags:
         - Key: Name
@@ -286,11 +298,54 @@ Resources:
           Value: private-php
 
   # ========================================
+  # Private Subnets - Tier 4 (Data: RDS, FSx, ElastiCache)
+  # ========================================
+
+  PrivateTier4Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [12, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.41.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-data-subnet-1'
+        - Key: Tier
+          Value: private-data
+
+  PrivateTier4Subnet2:
+    Type: AWS::EC2::Subnet
+    Condition: HasTwoAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [13, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.42.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-data-subnet-2'
+        - Key: Tier
+          Value: private-data
+
+  PrivateTier4Subnet3:
+    Type: AWS::EC2::Subnet
+    Condition: HasThreeAZs
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [14, !Cidr [!Ref VPCCidr, 16, 8]]  # e.g., 10.101.43.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-data-subnet-3'
+        - Key: Tier
+          Value: private-data
+
+  # ========================================
   # NAT Gateways and Elastic IPs
   # ========================================
 
   NATGateway1EIP:
     Type: AWS::EC2::EIP
+    Condition: NATGateway1
     DependsOn: AttachGateway
     Properties:
       Domain: vpc
@@ -300,6 +355,7 @@ Resources:
 
   NATGateway1:
     Type: AWS::EC2::NatGateway
+    Condition: NATGateway1
     Properties:
       AllocationId: !GetAtt NATGateway1EIP.AllocationId
       SubnetId: !Ref PublicSubnet1
@@ -401,6 +457,7 @@ Resources:
 
   PrivateRoute1:
     Type: AWS::EC2::Route
+    Condition: NATGateway1
     Properties:
       RouteTableId: !Ref PrivateRouteTable1
       DestinationCidrBlock: 0.0.0.0/0
@@ -424,6 +481,12 @@ Resources:
       SubnetId: !Ref PrivateTier3Subnet1
       RouteTableId: !Ref PrivateRouteTable1
 
+  PrivateTier4Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateTier4Subnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
   # ========================================
   # Route Tables - Private AZ2
   # ========================================
@@ -437,13 +500,23 @@ Resources:
         - Key: Name
           Value: !Sub '${EnvironmentName}-private-rt-2'
 
+  # HA route - uses dedicated NAT Gateway 2
   PrivateRoute2:
     Type: AWS::EC2::Route
-    Condition: HasTwoAZs
+    Condition: NATGateway2
     Properties:
       RouteTableId: !Ref PrivateRouteTable2
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !If [NATGateway2, !Ref NATGateway2, !Ref NATGateway1]
+      NatGatewayId: !Ref NATGateway2
+
+  # Fallback route - uses NAT Gateway 1 when HA is disabled
+  PrivateRoute2Fallback:
+    Type: AWS::EC2::Route
+    Condition: NATRoute2Fallback
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
 
   PrivateTier1Subnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -466,6 +539,13 @@ Resources:
       SubnetId: !Ref PrivateTier3Subnet2
       RouteTableId: !Ref PrivateRouteTable2
 
+  PrivateTier4Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasTwoAZs
+    Properties:
+      SubnetId: !Ref PrivateTier4Subnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
   # ========================================
   # Route Tables - Private AZ3
   # ========================================
@@ -479,13 +559,23 @@ Resources:
         - Key: Name
           Value: !Sub '${EnvironmentName}-private-rt-3'
 
+  # HA route - uses dedicated NAT Gateway 3
   PrivateRoute3:
     Type: AWS::EC2::Route
-    Condition: HasThreeAZs
+    Condition: NATGateway3
     Properties:
       RouteTableId: !Ref PrivateRouteTable3
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !If [NATGateway3, !Ref NATGateway3, !Ref NATGateway1]
+      NatGatewayId: !Ref NATGateway3
+
+  # Fallback route - uses NAT Gateway 1 when HA is disabled
+  PrivateRoute3Fallback:
+    Type: AWS::EC2::Route
+    Condition: NATRoute3Fallback
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
 
   PrivateTier1Subnet3RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -508,11 +598,19 @@ Resources:
       SubnetId: !Ref PrivateTier3Subnet3
       RouteTableId: !Ref PrivateRouteTable3
 
+  PrivateTier4Subnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThreeAZs
+    Properties:
+      SubnetId: !Ref PrivateTier4Subnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
   # ========================================
   # Security Groups
   # ========================================
 
   # ALB Security Group (Public-facing)
+  # Egress: Only to NGINX instances
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -530,15 +628,33 @@ Resources:
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: HTTPS from internet
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-alb-sg'
 
+  # ALB egress rules (added after NginxSecurityGroup is created)
+  ALBToNginxHTTP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      DestinationSecurityGroupId: !Ref NginxSecurityGroup
+      Description: HTTP to NGINX
+
+  ALBToNginxHTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref NginxSecurityGroup
+      Description: HTTPS to NGINX
+
   # NGINX Security Group
+  # Egress: NLB (PHP routing), Redis (page cache), FSx (static files)
   NginxSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -556,15 +672,73 @@ Resources:
           ToPort: 443
           SourceSecurityGroupId: !Ref ALBSecurityGroup
           Description: HTTPS from ALB
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-nginx-sg'
 
+  # NGINX egress rules (added after target SGs are created)
+  NginxToNLB:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1070
+      ToPort: 1099
+      DestinationSecurityGroupId: !Ref NLBSecurityGroup
+      Description: PHP-FPM routing via NLB
+
+  NginxToRedis:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      DestinationSecurityGroupId: !Ref ElastiCacheSecurityGroup
+      Description: Redis page cache
+
+  NginxToFSxNFS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS to FSx
+
+  NginxToFSxPortmapperTCP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 111
+      ToPort: 111
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS portmapper to FSx (TCP)
+
+  NginxToFSxPortmapperUDP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: udp
+      FromPort: 111
+      ToPort: 111
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS portmapper to FSx (UDP)
+
+  NginxToFSxMgmt:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 20001
+      ToPort: 20003
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: FSx management
+
   # NLB Security Group (Internal)
+  # Egress: Only to PHP-FPM instances
   NLBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -577,15 +751,23 @@ Resources:
           ToPort: 1099
           SourceSecurityGroupId: !Ref NginxSecurityGroup
           Description: PHP-FPM ports from NGINX
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-nlb-sg'
 
+  # NLB egress rule
+  NLBToPHP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NLBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 9000
+      DestinationSecurityGroupId: !Ref PHPSecurityGroup
+      Description: FastCGI to PHP-FPM
+
   # PHP-FPM Security Group
+  # Egress: RDS (database), FSx (files), SES VPC endpoint (email)
   PHPSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -598,15 +780,73 @@ Resources:
           ToPort: 9000
           SourceSecurityGroupId: !Ref NLBSecurityGroup
           Description: PHP-FPM from NLB
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-php-sg'
 
+  # PHP egress rules
+  PHPToRDS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref RDSSecurityGroup
+      Description: PostgreSQL to RDS
+
+  PHPToFSxNFS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS to FSx
+
+  PHPToFSxPortmapperTCP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 111
+      ToPort: 111
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS portmapper to FSx (TCP)
+
+  PHPToFSxPortmapperUDP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: udp
+      FromPort: 111
+      ToPort: 111
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: NFS portmapper to FSx (UDP)
+
+  PHPToFSxMgmt:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 20001
+      ToPort: 20003
+      DestinationSecurityGroupId: !Ref FSxSecurityGroup
+      Description: FSx management
+
+  PHPToSESEndpoint:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 587
+      ToPort: 587
+      DestinationSecurityGroupId: !Ref SESEndpointSecurityGroup
+      Description: SMTP to SES VPC endpoint
+
   # RDS Security Group
+  # Egress: None (managed service, no outbound needed)
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -619,10 +859,7 @@ Resources:
           ToPort: 5432
           SourceSecurityGroupId: !Ref PHPSecurityGroup
           Description: PostgreSQL from PHP-FPM
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
+      SecurityGroupEgress: []
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-rds-sg'
@@ -675,15 +912,14 @@ Resources:
           ToPort: 20003
           SourceSecurityGroupId: !Ref PHPSecurityGroup
           Description: FSx management from PHP-FPM
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
+      SecurityGroupEgress: []
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-fsx-sg'
 
   # ElastiCache Security Group
+  # Ingress: NGINX only (page caching)
+  # Egress: None (managed service, no outbound needed)
   ElastiCacheSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -695,19 +931,55 @@ Resources:
           FromPort: 6379
           ToPort: 6379
           SourceSecurityGroupId: !Ref NginxSecurityGroup
-          Description: Redis from NGINX
-        - IpProtocol: tcp
-          FromPort: 6379
-          ToPort: 6379
-          SourceSecurityGroupId: !Ref PHPSecurityGroup
-          Description: Redis from PHP-FPM
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound
+          Description: Redis from NGINX (page cache)
+      SecurityGroupEgress: []
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-elasticache-sg'
+
+  # ========================================
+  # VPC Endpoints
+  # ========================================
+
+  # SES VPC Endpoint Security Group
+  # Allows PHP instances to send email via SMTP without NAT Gateway
+  SESEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-ses-endpoint-sg'
+      GroupDescription: Security group for SES VPC Endpoint
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 587
+          ToPort: 587
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: SMTP from PHP-FPM
+        - IpProtocol: tcp
+          FromPort: 465
+          ToPort: 465
+          SourceSecurityGroupId: !Ref PHPSecurityGroup
+          Description: SMTPS from PHP-FPM
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ses-endpoint-sg'
+
+  # SES SMTP VPC Endpoint
+  # Enables email sending from private subnets without NAT Gateway
+  SESVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.email-smtp'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateTier3Subnet1
+        - !If [HasTwoAZs, !Ref PrivateTier3Subnet2, !Ref 'AWS::NoValue']
+        - !If [HasThreeAZs, !Ref PrivateTier3Subnet3, !Ref 'AWS::NoValue']
+      SecurityGroupIds:
+        - !Ref SESEndpointSecurityGroup
 
   # ========================================
   # VPC Flow Logs (Optional)
@@ -820,6 +1092,18 @@ Outputs:
     Export:
       Name: !Sub '${EnvironmentName}-php-subnets'
 
+  PrivateDataSubnets:
+    Description: Comma-delimited list of Data tier private subnet IDs (RDS, FSx, ElastiCache)
+    Value: !If
+      - HasThreeAZs
+      - !Sub '${PrivateTier4Subnet1},${PrivateTier4Subnet2},${PrivateTier4Subnet3}'
+      - !If
+        - HasTwoAZs
+        - !Sub '${PrivateTier4Subnet1},${PrivateTier4Subnet2}'
+        - !Ref PrivateTier4Subnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-data-subnets'
+
   ALBSecurityGroupId:
     Description: Security group ID for ALB
     Value: !Ref ALBSecurityGroup
@@ -861,6 +1145,18 @@ Outputs:
     Value: !Ref ElastiCacheSecurityGroup
     Export:
       Name: !Sub '${EnvironmentName}-elasticache-sg-id'
+
+  SESEndpointSecurityGroupId:
+    Description: Security group ID for SES VPC Endpoint
+    Value: !Ref SESEndpointSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-ses-endpoint-sg-id'
+
+  SESVPCEndpointId:
+    Description: SES SMTP VPC Endpoint ID
+    Value: !Ref SESVPCEndpoint
+    Export:
+      Name: !Sub '${EnvironmentName}-ses-endpoint-id'
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company

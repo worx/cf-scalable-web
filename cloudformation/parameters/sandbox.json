@@ -4,6 +4,7 @@
     "VPCCidr": "10.200.0.0/16",
     "AvailabilityZoneCount": "1",
     "EnableVPCFlowLogs": "false",
+    "EnableNATGateway": "false",
     "EnableNATGatewayHA": "false",
     "SecretNamePrefix": "worxco/sandbox",
     "EnableCompliance": "false",
