@@ -20,7 +20,7 @@ export
 
 .PHONY: help env-check validate show-params status \
         deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
-        verify-vpc verify-iam verify-storage verify-database verify-cache \
+        verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         init-secrets list-secrets test clean
 
@@ -31,6 +31,10 @@ export
 # Default to sandbox for safety (not production!)
 ENV ?= sandbox
 AWS_REGION ?= us-east-1
+
+# AWS CLI behavior (prevent hangs and pager issues)
+export AWS_CLI_AUTO_PROMPT ?= off
+export AWS_PAGER ?=
 
 # Stack naming convention: cf-scalable-web-{environment}-{component}
 STACK_PREFIX := cf-scalable-web-$(ENV)
@@ -111,6 +115,7 @@ help:  ## Show this help message
 	@echo "  make deploy-all               Deploy all stacks in order"
 	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
+	@echo "  make verify-all               Verify all stacks"
 	@echo "  make verify-vpc               Verify VPC deployment"
 	@echo "  make verify-iam               Verify IAM deployment"
 	@echo "  make verify-storage           Verify storage deployment"
@@ -437,6 +442,12 @@ verify-cache:  ## Verify cache deployment
 	@echo ""
 	@echo "$(GREEN)✓ Cache verification complete$(NC)"
 
+verify-all: verify-vpc verify-iam verify-storage verify-database verify-cache  ## Verify all stacks
+	@echo ""
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)✓ All stacks verified for ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
+
 # -----------------------------------------------------------------------------
 # Destroy Targets
 # -----------------------------------------------------------------------------
@@ -479,6 +490,12 @@ destroy-database:  ## Delete database stack (WARNING: Data loss!)
 			exit 0; \
 		fi; \
 	fi
+	@echo "$(BLUE)Disabling RDS deletion protection...$(NC)"
+	@aws rds modify-db-instance \
+		--db-instance-identifier $(ENV)-postgres \
+		--no-deletion-protection \
+		--apply-immediately \
+		--region $(AWS_REGION) >/dev/null 2>&1 || true
 	@echo "$(YELLOW)Deleting database stack: $(DATABASE_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"

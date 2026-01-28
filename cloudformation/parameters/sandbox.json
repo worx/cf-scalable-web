@@ -26,6 +26,7 @@
     "CacheNodeType": "cache.t4g.micro",
     "NumCacheNodes": "1",
     "EnableMultiAZ": "false",
+    "EnableDeletionProtection": "true",
     "RedisVersion": "7.1"
   }
 }

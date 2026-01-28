@@ -110,11 +110,18 @@ Parameters:
     AllowedValues: [true, false]
     Default: true
 
+  EnableDeletionProtection:
+    Type: String
+    Description: Enable deletion protection (disable for sandbox/dev)
+    AllowedValues: [true, false]
+    Default: true
+
 Conditions:
   PerformanceInsightsEnabled: !Equals [!Ref EnablePerformanceInsights, true]
   EnhancedMonitoringEnabled: !Equals [!Ref EnableEnhancedMonitoring, true]
   StorageAutoscalingEnabled: !Not [!Equals [!Ref DBMaxAllocatedStorage, 0]]
   MultiAZEnabled: !Equals [!Ref EnableMultiAZ, true]
+  DeletionProtectionEnabled: !Equals [!Ref EnableDeletionProtection, true]
 
 Resources:
   # ========================================
@@ -245,7 +252,7 @@ Resources:
       MonitoringRoleArn: !If [EnhancedMonitoringEnabled, !GetAtt EnhancedMonitoringRole.Arn, !Ref AWS::NoValue]
       EnableCloudwatchLogsExports:
         - postgresql
-      DeletionProtection: true
+      DeletionProtection: !If [DeletionProtectionEnabled, true, false]
       CopyTagsToSnapshot: true
       Tags:
         - Key: Name
