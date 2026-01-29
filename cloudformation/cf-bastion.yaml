@@ -1,0 +1,308 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Bastion Host
+#
+# Purpose: Creates a standalone bastion host in the default VPC for
+#          managing cf-scalable-web infrastructure deployments.
+#
+# Features:
+#   - Uses default VPC (survives project VPC teardowns)
+#   - Ubuntu 24.04 LTS on ARM (t4g.nano)
+#   - SSH access restricted to specified CIDR
+#   - SSM Session Manager for backup access
+#   - Elastic IP for stable addressing
+#   - Optional key pair creation (stored in SSM Parameter Store)
+#   - Pre-installed: AWS CLI, git, make, screen, tmux, vim, Claude Code
+#
+# Dependencies: None (standalone)
+#
+# Usage:
+#   make deploy-bastion
+#   make verify-bastion
+#   make destroy-bastion
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Standalone bastion host for cf-scalable-web infrastructure management'
+
+Parameters:
+  KeyPairName:
+    Type: String
+    Description: Existing EC2 key pair name (leave empty to create new)
+    Default: ''
+
+  AllowedSSHCidr:
+    Type: String
+    Description: CIDR block allowed to SSH (e.g., 203.0.113.50/32 for single IP)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid CIDR block (e.g., 192.168.1.0/24)
+
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t4g.nano
+    AllowedValues:
+      - t4g.nano
+      - t4g.micro
+      - t4g.small
+
+  UbuntuAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Ubuntu 24.04 LTS ARM64 AMI (resolved from SSM)
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+
+Conditions:
+  CreateKeyPair: !Equals [!Ref KeyPairName, '']
+
+Resources:
+  # ========================================
+  # Key Pair (Conditional)
+  # ========================================
+
+  BastionKeyPair:
+    Type: AWS::EC2::KeyPair
+    Condition: CreateKeyPair
+    Properties:
+      KeyName: !Sub '${AWS::StackName}-keypair'
+      KeyType: ed25519
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-keypair'
+        - Key: Purpose
+          Value: Bastion SSH access
+
+  # ========================================
+  # Security Group
+  # ========================================
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-sg'
+      GroupDescription: Security group for bastion host - SSH from allowed CIDR only
+      # Uses default VPC automatically
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+          Description: SSH from allowed CIDR
+      # Default egress allows all outbound (needed for package installs, AWS API calls)
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg'
+
+  # ========================================
+  # IAM Role for SSM Session Manager
+  # ========================================
+
+  BastionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM Session Manager access
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        # CloudFormation deployments (admin-like for infra management)
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-role'
+
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-profile'
+      Roles:
+        - !Ref BastionRole
+
+  # ========================================
+  # Elastic IP
+  # ========================================
+
+  BastionEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-eip'
+
+  # ========================================
+  # EC2 Instance
+  # ========================================
+
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAMI
+      InstanceType: !Ref InstanceType
+      KeyName: !If
+        - CreateKeyPair
+        - !Ref BastionKeyPair
+        - !Ref KeyPairName
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      SecurityGroupIds:
+        - !Ref BastionSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/bastion-bootstrap.log) 2>&1
+
+          echo "=== Bastion Bootstrap Starting $(date) ==="
+
+          # System updates
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get upgrade -y
+
+          # Core tools
+          apt-get install -y \
+            git \
+            make \
+            jq \
+            screen \
+            tmux \
+            tree \
+            vim \
+            unzip \
+            python3-pip \
+            python3-venv
+
+          # Make vim the default editor (not nano!)
+          update-alternatives --set editor /usr/bin/vim.basic
+          cat > /etc/profile.d/bastion-env.sh << 'ENVEOF'
+          export EDITOR=vim
+          export VISUAL=vim
+          export AWS_PAGER=""
+          export AWS_CLI_AUTO_PROMPT=off
+          ENVEOF
+
+          # Set vim as default for git
+          su - ubuntu -c 'git config --global core.editor vim'
+
+          # AWS CLI v2 (ARM64)
+          cd /tmp
+          curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          ./aws/install
+          rm -rf aws awscliv2.zip
+
+          # cfn-lint for template validation
+          pip3 install cfn-lint --break-system-packages
+
+          # Node.js 20.x LTS (for Claude Code)
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+
+          # Claude Code CLI
+          npm install -g @anthropic-ai/claude-code
+
+          # Ensure SSM Agent is running (usually pre-installed)
+          snap install amazon-ssm-agent --classic || true
+          systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+          systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+          # Create working directory
+          mkdir -p /home/ubuntu/projects
+          chown ubuntu:ubuntu /home/ubuntu/projects
+
+          # Create helpful motd
+          cat > /etc/update-motd.d/99-bastion << 'MOTDEOF'
+          #!/bin/bash
+          echo ""
+          echo "============================================"
+          echo "  cf-scalable-web Bastion Host"
+          echo "============================================"
+          echo ""
+          echo "Quick Start:"
+          echo "  cd ~/projects"
+          echo "  git clone <your-repo>"
+          echo "  cd cf-scalable-web"
+          echo "  screen -S deploy"
+          echo "  make deploy-all ENV=sandbox"
+          echo "  # Ctrl-A D to detach"
+          echo ""
+          echo "Installed: aws, git, make, screen, tmux, vim, claude"
+          echo ""
+          MOTDEOF
+          chmod +x /etc/update-motd.d/99-bastion
+
+          echo "=== Bastion Bootstrap Complete $(date) ==="
+          echo "SUCCESS" > /var/log/bastion-bootstrap-status
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+        - Key: Purpose
+          Value: Infrastructure management bastion
+
+  # ========================================
+  # EIP Association
+  # ========================================
+
+  BastionEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt BastionEIP.AllocationId
+      InstanceId: !Ref BastionInstance
+
+Outputs:
+  BastionPublicIP:
+    Description: Bastion Elastic IP address
+    Value: !Ref BastionEIP
+    Export:
+      Name: !Sub '${AWS::StackName}-ip'
+
+  BastionInstanceId:
+    Description: Bastion EC2 instance ID
+    Value: !Ref BastionInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-instance-id'
+
+  SSHCommand:
+    Description: SSH command to connect
+    Value: !Sub 'ssh -i ~/.ssh/bastion.pem ubuntu@${BastionEIP}'
+
+  SSMCommand:
+    Description: SSM Session Manager command (no SSH key needed)
+    Value: !Sub 'aws ssm start-session --target ${BastionInstance}'
+
+  KeyPairParameterPath:
+    Condition: CreateKeyPair
+    Description: SSM parameter path containing private key (retrieve once, then delete)
+    Value: !Sub '/ec2/keypair/${BastionKeyPair.KeyPairId}'
+
+  RetrieveKeyCommand:
+    Condition: CreateKeyPair
+    Description: Command to retrieve private key
+    Value: !Sub |
+      aws ssm get-parameter --name /ec2/keypair/${BastionKeyPair.KeyPairId} --with-decryption --query 'Parameter.Value' --output text > ~/.ssh/bastion.pem && chmod 600 ~/.ssh/bastion.pem
+
+  SecurityGroupId:
+    Description: Bastion security group ID (for VPC peering rules)
+    Value: !Ref BastionSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-sg-id'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

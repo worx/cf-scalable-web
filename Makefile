@@ -22,6 +22,7 @@ export
         deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
         verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
+        deploy-bastion verify-bastion destroy-bastion \
         init-secrets list-secrets test clean
 
 # -----------------------------------------------------------------------------
@@ -48,6 +49,11 @@ IAM_STACK := $(STACK_PREFIX)-iam
 STORAGE_STACK := $(STACK_PREFIX)-storage
 DATABASE_STACK := $(STACK_PREFIX)-database
 CACHE_STACK := $(STACK_PREFIX)-cache
+
+# Bastion (standalone, not environment-specific)
+BASTION_STACK := cf-bastion
+BASTION_TEMPLATE := cloudformation/cf-bastion.yaml
+BASTION_PARAMS := cloudformation/parameters/bastion.json
 
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
@@ -130,6 +136,11 @@ help:  ## Show this help message
 	@echo "  make destroy-cache            Delete cache stack"
 	@echo "  make destroy-all              Delete all stacks (reverse order)"
 	@echo ""
+	@echo "$(YELLOW)Bastion Host:$(NC)"
+	@echo "  make deploy-bastion           Deploy bastion host (standalone)"
+	@echo "  make verify-bastion           Show bastion connection info"
+	@echo "  make destroy-bastion          Delete bastion host"
+	@echo ""
 	@echo "$(YELLOW)Secrets Management:$(NC)"
 	@echo "  make init-secrets             Initialize required secrets"
 	@echo "  make list-secrets             List all secrets for environment"
@@ -150,7 +161,7 @@ help:  ## Show this help message
 
 validate:  ## Validate all CloudFormation templates
 	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE); do \
+	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			echo "  Validating $$template..."; \
 			cfn-lint "$$template" || exit 1; \
@@ -161,6 +172,10 @@ validate:  ## Validate all CloudFormation templates
 		jq empty $(PARAM_FILE) || exit 1; \
 	else \
 		echo "$(YELLOW)  Warning: Parameter file not found: $(PARAM_FILE)$(NC)"; \
+	fi
+	@if [ -f $(BASTION_PARAMS) ]; then \
+		echo "  Validating $(BASTION_PARAMS)..."; \
+		jq empty $(BASTION_PARAMS) || exit 1; \
 	fi
 	@echo "$(GREEN)✓ All templates valid$(NC)"
 
@@ -525,6 +540,59 @@ destroy-all:  ## Delete all stacks (reverse order, with confirmation)
 	@$(MAKE) destroy-iam ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-vpc ENV=$(ENV) CONFIRMED=yes
 	@echo "$(GREEN)✓ All stacks deleted for ENV=$(ENV)$(NC)"
+
+# -----------------------------------------------------------------------------
+# Bastion Host (Standalone)
+# -----------------------------------------------------------------------------
+
+deploy-bastion:  ## Deploy bastion host (standalone, uses default VPC)
+	@echo "$(BLUE)Deploying bastion stack: $(BASTION_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@time aws cloudformation deploy \
+		--template-file $(BASTION_TEMPLATE) \
+		--stack-name $(BASTION_STACK) \
+		--parameter-overrides file://$(BASTION_PARAMS) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION)
+	@echo "$(GREEN)✓ Bastion deployed$(NC)"
+	@$(MAKE) verify-bastion
+
+verify-bastion:  ## Show bastion connection info
+	@echo "$(BLUE)Bastion Connection Info$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Stack Outputs:$(NC)"
+	@aws cloudformation describe-stacks \
+		--stack-name $(BASTION_STACK) \
+		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Bastion stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)Instance Status:$(NC)"
+	@aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+		--query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,Type:InstanceType,IP:PublicIpAddress}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Instance not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Bastion verification complete$(NC)"
+
+destroy-bastion:  ## Delete bastion host
+	@echo "$(RED)WARNING: This will delete the bastion host!$(NC)"
+	@read -p "Type 'yes' to confirm: " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Cancelled"; \
+		exit 0; \
+	fi
+	@echo "$(YELLOW)Deleting bastion stack: $(BASTION_STACK)$(NC)"
+	@time aws cloudformation delete-stack \
+		--stack-name $(BASTION_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete \
+		--stack-name $(BASTION_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(GREEN)✓ Bastion deleted$(NC)"
 
 # -----------------------------------------------------------------------------
 # Secrets Management

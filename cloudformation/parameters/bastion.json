@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+    "KeyPairName": "",
+    "AllowedSSHCidr": "REPLACE_WITH_YOUR_IP/32",
+    "InstanceType": "t4g.nano"
+  }
+}

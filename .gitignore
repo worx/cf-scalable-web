@@ -34,6 +34,7 @@ venv/
 
 # Logs (but keep PROMPT_LOGS/ for audit trail)
 *.log
+PROMPT_LOGS/.current_session
 
 # Temporary files
 tmp/
