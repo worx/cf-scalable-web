@@ -2,52 +2,82 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
 # Author: Kurt Vanderwater <kurt@worxco.net>
-
 #
-# Function: prompt-logger
-# Purpose: Automated prompt logging for ISO 27001 audit trail
-# Parameters: Hook event name ($1), stdin for event data
-# Returns: 0 on success
-# Dependencies: jq, date
-# Created: 2026-01-28
+# Script Name: prompt-logger.sh
+# Purpose: Automated prompt logging for ISO 27001 audit trail (per-prompt model)
+# Requirements: jq, date
+# Dependencies: jq, date, git
+# Date Created: 2026-01-28
+#
+# Change Log:
+#   2026-01-28 - Initial version (session-based model)
+#   2026-02-02 - Rewritten to per-prompt model for reliability
+#
+# Each UserPromptSubmit creates a new log file. No session state dependency.
+# This eliminates stale pointer issues when SessionEnd doesn't fire.
 #
 
-set -euo pipefail
+set -o errexit
+set -o nounset
+set -o pipefail
 
 # Configuration
 DEVELOPER_INITIALS="KV"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 PROMPT_LOGS_DIR="${PROJECT_DIR}/PROMPT_LOGS"
-SESSION_LOG_FILE="${PROMPT_LOGS_DIR}/.current_session"
+CURRENT_PROMPT_FILE="${PROMPT_LOGS_DIR}/.current_prompt"
 
 # Ensure logs directory exists
 mkdir -p "$PROMPT_LOGS_DIR"
 
-# Generate filename based on WorxCo naming convention
+# Function: generate_filename
+# Purpose: Generate a unique filename based on WorxCo naming convention
+# Parameters: none
+# Returns: filename string (YYYYMMDD-WKNN-HHMMSS-KV.md)
+# Dependencies: date
+# Created: 2026-01-28
 generate_filename() {
-  local date_str=$(date +%Y%m%d)
-  local week_str="WK$(date +%V)"
-  local time_str=$(date +%H%M%S)
+  local date_str
+  local week_str
+  local time_str
+  date_str=$(date +%Y%m%d)
+  week_str="WK$(date +%V)"
+  time_str=$(date +%H%M%S)
   echo "${date_str}-${week_str}-${time_str}-${DEVELOPER_INITIALS}.md"
 }
 
-# Get or create session log file path
-get_session_log() {
-  if [ -f "$SESSION_LOG_FILE" ]; then
-    cat "$SESSION_LOG_FILE"
-  else
-    local filename=$(generate_filename)
-    local filepath="${PROMPT_LOGS_DIR}/${filename}"
-    echo "$filepath" > "$SESSION_LOG_FILE"
-    echo "$filepath"
+# Function: get_current_prompt_log
+# Purpose: Read the current prompt log file path from the pointer file
+# Parameters: none
+# Returns: filepath string, or empty if no current prompt
+# Dependencies: none
+# Created: 2026-02-02
+get_current_prompt_log() {
+  if [[ -f "$CURRENT_PROMPT_FILE" ]]; then
+    local filepath
+    filepath=$(cat "$CURRENT_PROMPT_FILE")
+    if [[ -f "$filepath" ]]; then
+      echo "$filepath"
+      return 0
+    fi
   fi
+  echo ""
+  return 0
 }
 
-# Initialize a new log file with header
+# Function: init_log_file
+# Purpose: Create a new log file with standard header metadata
+# Parameters: $1 = log file path, $2 = session_id (optional)
+# Returns: 0 on success
+# Dependencies: git, date, whoami, hostname
+# Created: 2026-01-28
 init_log_file() {
   local log_file="$1"
-  local project_name=$(basename "$PROJECT_DIR")
-  local git_branch=$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null || echo "N/A")
+  local session_id="${2:-unknown}"
+  local project_name
+  local git_branch
+  project_name=$(basename "$PROJECT_DIR")
+  git_branch=$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null || echo "N/A")
 
   cat > "$log_file" << EOF
 # AI Prompt Log
@@ -56,6 +86,7 @@ init_log_file() {
 **Week**: $(date +%V)
 **AI System**: Claude Opus 4.5
 **Project**: ${project_name}
+**Session ID**: ${session_id}
 
 ---
 
@@ -69,66 +100,111 @@ init_log_file() {
 
 ---
 
-## Session Log
+## Prompt Log
 
 EOF
 }
 
-# Append entry to log
+# Function: append_log
+# Purpose: Append a timestamped entry to a log file
+# Parameters: $1 = log file path, $2 = event type, $3 = content
+# Returns: 0 on success
+# Dependencies: date
+# Created: 2026-01-28
 append_log() {
   local log_file="$1"
   local event_type="$2"
   local content="$3"
-  local timestamp=$(date '+%H:%M:%S')
+  local timestamp
+  timestamp=$(date '+%H:%M:%S')
 
-  echo "### ${timestamp} - ${event_type}" >> "$log_file"
-  echo "" >> "$log_file"
-  echo "$content" >> "$log_file"
-  echo "" >> "$log_file"
-  echo "---" >> "$log_file"
-  echo "" >> "$log_file"
+  {
+    echo "### ${timestamp} - ${event_type}"
+    echo ""
+    echo "$content"
+    echo ""
+    echo "---"
+    echo ""
+  } >> "$log_file"
 }
 
-# Read event data from stdin (JSON format from Claude Code)
+# Function: finalize_log
+# Purpose: Append license footer to a log file
+# Parameters: $1 = log file path
+# Returns: 0 on success
+# Dependencies: none
+# Created: 2026-02-02
+finalize_log() {
+  local log_file="$1"
+  {
+    echo ""
+    echo "<sub>**License:** GPL-2.0-or-later | **Copyright:** 2026 The Worx Company | **Author:** Kurt Vanderwater <<kurt@worxco.net>></sub>"
+  } >> "$log_file"
+}
+
+# Function: read_event_data
+# Purpose: Read JSON event data from stdin (provided by Claude Code hooks)
+# Parameters: none (reads stdin)
+# Returns: JSON string
+# Dependencies: none
+# Created: 2026-01-28
 read_event_data() {
-  if [ -t 0 ]; then
+  if [[ -t 0 ]]; then
     echo "{}"
   else
     cat
   fi
 }
 
-# Main hook handler
+# Function: main
+# Purpose: Route hook events to appropriate handlers
+# Parameters: $1 = hook event name
+# Returns: 0 on success
+# Dependencies: all functions above, jq
+# Created: 2026-01-28
 main() {
   local hook_event="${1:-unknown}"
-  local event_data=$(read_event_data)
-  local log_file=$(get_session_log)
+  local event_data
+  event_data=$(read_event_data)
+
+  # Extract session_id from event data (all hook events provide this)
+  local session_id
+  session_id=$(echo "$event_data" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 
   case "$hook_event" in
-    "SessionStart")
-      # Create new log file for session
-      rm -f "$SESSION_LOG_FILE"
-      log_file=$(get_session_log)
-      init_log_file "$log_file"
-      append_log "$log_file" "Session Started" "New Claude Code session initialized."
-      ;;
-
     "UserPromptSubmit")
-      # Log user prompt
-      if [ ! -f "$log_file" ]; then
-        init_log_file "$log_file"
-      fi
-      local prompt=$(echo "$event_data" | jq -r '.prompt // "No prompt captured"' 2>/dev/null || echo "No prompt captured")
-      append_log "$log_file" "User Prompt" "\`\`\`\n${prompt}\n\`\`\`"
+      # Create a new log file for each prompt
+      local filename
+      local filepath
+      filename=$(generate_filename)
+      filepath="${PROMPT_LOGS_DIR}/${filename}"
+
+      # Initialize the new log file
+      init_log_file "$filepath" "$session_id"
+
+      # Save pointer to current prompt log
+      echo "$filepath" > "$CURRENT_PROMPT_FILE"
+
+      # Log the user prompt
+      local prompt
+      prompt=$(echo "$event_data" | jq -r '.prompt // "No prompt captured"' 2>/dev/null || echo "No prompt captured")
+      append_log "$filepath" "User Prompt" "\`\`\`
+${prompt}
+\`\`\`"
       ;;
 
     "PostToolUse")
-      # Log file modifications
-      if [ ! -f "$log_file" ]; then
-        init_log_file "$log_file"
+      # Append file modification info to current prompt log
+      local log_file
+      log_file=$(get_current_prompt_log)
+      if [[ -z "$log_file" ]]; then
+        return 0
       fi
-      local tool_name=$(echo "$event_data" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
-      local tool_input=$(echo "$event_data" | jq -r '.tool_input.file_path // .tool_input.command // "N/A"' 2>/dev/null || echo "N/A")
+
+      local tool_name
+      local tool_input
+      tool_name=$(echo "$event_data" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
+      tool_input=$(echo "$event_data" | jq -r '.tool_input.file_path // .tool_input.command // "N/A"' 2>/dev/null || echo "N/A")
 
       if [[ "$tool_name" == "Write" || "$tool_name" == "Edit" ]]; then
         append_log "$log_file" "File Modified ($tool_name)" "- \`${tool_input}\`"
@@ -136,31 +212,24 @@ main() {
       ;;
 
     "Stop")
-      # Log response completion
-      if [ ! -f "$log_file" ]; then
-        init_log_file "$log_file"
+      # Finalize the current prompt log
+      local log_file
+      log_file=$(get_current_prompt_log)
+      if [[ -z "$log_file" ]]; then
+        return 0
       fi
-      local stop_reason=$(echo "$event_data" | jq -r '.stop_reason // "completed"' 2>/dev/null || echo "completed")
-      append_log "$log_file" "Response Complete" "Stop reason: ${stop_reason}"
-      ;;
 
-    "SessionEnd")
-      # Finalize log
-      if [ -f "$log_file" ]; then
-        append_log "$log_file" "Session Ended" "Session closed."
-        echo "" >> "$log_file"
-        echo "---" >> "$log_file"
-        echo "" >> "$log_file"
-        echo "<sub>**License:** GPL-2.0-or-later | **Copyright:** 2026 The Worx Company | **Author:** Kurt Vanderwater <<kurt@worxco.net>></sub>" >> "$log_file"
-      fi
-      rm -f "$SESSION_LOG_FILE"
+      local stop_reason
+      stop_reason=$(echo "$event_data" | jq -r '.stop_reason // "completed"' 2>/dev/null || echo "completed")
+      append_log "$log_file" "Response Complete" "Stop reason: ${stop_reason}"
+      finalize_log "$log_file"
+
+      # Clean up pointer file
+      rm -f "$CURRENT_PROMPT_FILE"
       ;;
 
     *)
-      # Unknown event - log anyway
-      if [ -f "$log_file" ]; then
-        append_log "$log_file" "Unknown Event: $hook_event" "Event data: $(echo "$event_data" | head -c 500)"
-      fi
+      # Unknown event - ignore silently
       ;;
   esac
 }

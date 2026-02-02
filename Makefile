@@ -23,7 +23,7 @@ export
         verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         deploy-bastion verify-bastion destroy-bastion \
-        init-secrets list-secrets test clean
+        init-secrets list-secrets test clean consolidate-logs
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -36,6 +36,9 @@ AWS_REGION ?= us-east-1
 # AWS CLI behavior (prevent hangs and pager issues)
 export AWS_CLI_AUTO_PROMPT ?= off
 export AWS_PAGER ?=
+
+# Developer initials for prompt log filenames
+DEVELOPER_INITIALS ?= KV
 
 # Stack naming convention: cf-scalable-web-{environment}-{component}
 STACK_PREFIX := cf-scalable-web-$(ENV)
@@ -148,6 +151,7 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Testing & Maintenance:$(NC)"
 	@echo "  make test                     Run test suite"
 	@echo "  make clean                    Clean temporary files"
+	@echo "  make consolidate-logs         Merge daily prompt logs (DATE=YYYY-MM-DD)"
 	@echo ""
 	@echo "$(YELLOW)Examples:$(NC)"
 	@echo "  make ENV=sandbox deploy-vpc   Deploy VPC to sandbox"
@@ -630,6 +634,43 @@ clean:  ## Clean temporary files
 	@rm -f cloudformation/**/*~
 	@rm -rf tmp/
 	@echo "$(GREEN)✓ Clean complete$(NC)"
+
+# Default to today's date for log consolidation
+DATE ?= $(shell date +%Y-%m-%d)
+
+consolidate-logs:  ## Merge daily prompt logs into one file (DATE=YYYY-MM-DD)
+	@echo "$(BLUE)Consolidating prompt logs for $(DATE)...$(NC)"
+	@date_compact=$$(echo "$(DATE)" | tr -d '-'); \
+	files=$$(ls PROMPT_LOGS/$${date_compact}-*-$(DEVELOPER_INITIALS).md 2>/dev/null); \
+	if [ -z "$$files" ]; then \
+		echo "$(YELLOW)No prompt logs found for $(DATE)$(NC)"; \
+		exit 0; \
+	fi; \
+	count=$$(echo "$$files" | wc -w | tr -d ' '); \
+	if [ "$$count" -le 1 ]; then \
+		echo "$(YELLOW)Only one log file for $(DATE) - nothing to consolidate$(NC)"; \
+		exit 0; \
+	fi; \
+	outfile="PROMPT_LOGS/$${date_compact}-consolidated-$(DEVELOPER_INITIALS).md"; \
+	echo "# Consolidated AI Prompt Log" > "$$outfile"; \
+	echo "" >> "$$outfile"; \
+	echo "**Date**: $(DATE)" >> "$$outfile"; \
+	echo "**Prompts**: $$count" >> "$$outfile"; \
+	echo "**AI System**: Claude Opus 4.5" >> "$$outfile"; \
+	echo "" >> "$$outfile"; \
+	echo "---" >> "$$outfile"; \
+	echo "" >> "$$outfile"; \
+	for f in $$files; do \
+		echo "## $$(basename $$f)" >> "$$outfile"; \
+		echo "" >> "$$outfile"; \
+		cat "$$f" >> "$$outfile"; \
+		echo "" >> "$$outfile"; \
+		echo "---" >> "$$outfile"; \
+		echo "" >> "$$outfile"; \
+	done; \
+	echo "" >> "$$outfile"; \
+	echo '<sub>**License:** GPL-2.0-or-later | **Copyright:** 2026 The Worx Company | **Author:** Kurt Vanderwater <<kurt@worxco.net>></sub>' >> "$$outfile"; \
+	echo "$(GREEN)✓ Consolidated $$count logs into $$outfile$(NC)"
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
