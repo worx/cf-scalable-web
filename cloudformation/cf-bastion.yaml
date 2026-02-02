@@ -171,8 +171,12 @@ Resources:
 
           # System updates
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get upgrade -y
+          apt-get update -y
+
+          # Upgrade is best-effort: transient mirror 404s on fresh AMIs are common
+          apt-get upgrade -y || apt-get upgrade -y --fix-missing || {
+            echo "WARNING: apt-get upgrade failed (non-fatal, continuing)"
+          }
 
           # Core tools
           apt-get install -y \
@@ -206,8 +210,11 @@ Resources:
           ./aws/install
           rm -rf aws awscliv2.zip
 
-          # cfn-lint for template validation
-          pip3 install cfn-lint --break-system-packages
+          # cfn-lint for template validation (venv avoids system package conflicts
+          # and keeps memory usage low on t4g.nano's 512MB)
+          python3 -m venv /opt/cfn-lint --system-site-packages
+          /opt/cfn-lint/bin/pip install cfn-lint
+          ln -sf /opt/cfn-lint/bin/cfn-lint /usr/local/bin/cfn-lint
 
           # Node.js 20.x LTS (for Claude Code)
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
