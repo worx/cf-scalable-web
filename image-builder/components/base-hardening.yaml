@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: Base Hardening
+#
+# Purpose: System updates, SSH hardening, swap, AWS CLI v2, CloudWatch Agent,
+#          SSM Agent, NFS client, and /var/www mount point creation.
+#          Shared by all AMIs (NGINX and PHP-FPM).
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (BaseHardeningComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: None (base component, runs first)
+#
+
+name: BaseHardening
+description: System hardening, core packages, AWS tooling, and NFS client
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: SystemUpdate
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== System Update ==="
+              export DEBIAN_FRONTEND=noninteractive
+              for attempt in 1 2 3; do
+                echo "Attempt $attempt: apt-get update"
+                if apt-get update -y 2>&1; then
+                  break
+                fi
+                sleep 10
+              done
+              apt-get upgrade -y || true
+
+      - name: CreateSwap
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Create 2GB Swap ==="
+              if [ ! -f /swapfile ]; then
+                dd if=/dev/zero of=/swapfile bs=1M count=2048
+                chmod 600 /swapfile
+                mkswap /swapfile
+                swapon /swapfile
+                echo '/swapfile none swap sw 0 0' >> /etc/fstab
+              fi
+              sysctl vm.swappiness=10
+              echo 'vm.swappiness=10' >> /etc/sysctl.conf
+
+      - name: InstallCorePackages
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install Core Packages ==="
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get install -y \
+                software-properties-common \
+                net-tools \
+                jq \
+                curl \
+                vim \
+                unzip \
+                htop \
+                tree \
+                nfs-common \
+                python3-venv \
+                postfix \
+                mailutils
+
+      - name: InstallAwsCli
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install AWS CLI v2 (ARM64) ==="
+              cd /tmp
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o awscliv2.zip
+              unzip -q awscliv2.zip
+              ./aws/install --update
+              rm -rf aws awscliv2.zip
+              aws --version
+
+      - name: InstallCloudWatchAgent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install CloudWatch Agent ==="
+              cd /tmp
+              curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb" -o cw-agent.deb
+              dpkg -i cw-agent.deb || apt-get install -f -y
+              rm -f cw-agent.deb
+
+      - name: InstallSsmAgent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install SSM Agent ==="
+              snap install amazon-ssm-agent --classic || true
+              systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+      - name: SshHardening
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== SSH Hardening ==="
+              sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+              sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+              sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+
+      - name: SetEnvironment
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Set Environment Variables ==="
+              cat >> /etc/environment <<'ENVEOF'
+              AWS_PAGER=""
+              AWS_CLI_AUTO_PROMPT=off
+              EDITOR=vim
+              ENVEOF
+
+      - name: UnattendedUpgrades
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Configure Unattended Security Upgrades ==="
+              apt-get install -y unattended-upgrades
+              cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'UUEOF'
+              Unattended-Upgrade::Allowed-Origins {
+                "${distro_id}:${distro_codename}-security";
+              };
+              Unattended-Upgrade::Automatic-Reboot "false";
+              UUEOF
+
+      - name: CreateWebrootDir
+        action: CreateFolder
+        inputs:
+          - path: /var/www
+            owner: www-data
+            group: www-data
+            permissions: 0755
+            overwrite: false
+
+      - name: DownloadAuthorizedKeys
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/authorized_keys
+            destination: /root/.ssh/authorized_keys
+
+      - name: CopyAuthorizedKeys2
+        action: CopyFile
+        inputs:
+          - source: /root/.ssh/authorized_keys
+            destination: /root/.ssh/authorized_keys2
+
+      - name: CopyAuthorizedKeysBak
+        action: CopyFile
+        inputs:
+          - source: /root/.ssh/authorized_keys
+            destination: /root/.ssh/authorized_keys.bak
+
+      - name: SetSshKeyPermissions
+        action: SetFilePermissions
+        inputs:
+          - path: /root/.ssh/authorized_keys
+            permissions: 0600
+          - path: /root/.ssh/authorized_keys2
+            permissions: 0600
+          - path: /root/.ssh/authorized_keys.bak
+            permissions: 0600

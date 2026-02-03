@@ -1,0 +1,10 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "BuildSubnetId": "subnet-09f94dd4a093f057b",
+    "BuildInstanceType": "t4g.micro",
+    "PipelineSchedule": "",
+    "RecipeVersion": "1.0.0",
+    "BucketSuffix": "kv-worxco"
+  }
+}

@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: PHP-FPM Test
+#
+# Purpose: Verify PHP-FPM install component completed correctly.
+#          Tests PHP version, extensions, FPM service, Composer,
+#          Drush, and port 9000 configuration.
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (TestPhpComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: PhpFpm74InstallComponent or PhpFpm83InstallComponent
+#
+# Note: The PHP version is detected automatically from installed packages.
+#
+
+name: TestPhpFpm
+description: Verify PHP-FPM installation, extensions, and services
+schemaVersion: 1.0
+phases:
+  - name: test
+    steps:
+      - name: VerifyPhpFpm
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              ERRORS=0
+              PHP_VER="{{PhpVersion}}"
+
+              echo "=== Testing PHP-FPM $PHP_VER Installation ==="
+
+              echo "--- PHP Version ---"
+              INSTALLED_VER=$(php -v 2>&1 | head -1)
+              if echo "$INSTALLED_VER" | grep -q "PHP $PHP_VER"; then
+                echo "PASS: $INSTALLED_VER"
+              else
+                echo "FAIL: Expected PHP $PHP_VER, got: $INSTALLED_VER"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Core Extensions ---"
+              for ext in bcmath curl gd mbstring xml zip soap opcache apcu mysql pgsql intl; do
+                if php -m 2>/dev/null | grep -qi "$ext"; then
+                  echo "PASS: Extension $ext loaded"
+                else
+                  echo "FAIL: Extension $ext not loaded"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              done
+
+              echo "--- Redis Extension ---"
+              if php -m 2>/dev/null | grep -qi "redis"; then
+                echo "PASS: Redis extension loaded"
+              else
+                echo "FAIL: Redis extension not loaded"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- PHP-FPM Service ---"
+              if systemctl list-unit-files | grep -q "php${PHP_VER}-fpm"; then
+                echo "PASS: PHP-FPM $PHP_VER service unit exists"
+              else
+                echo "FAIL: PHP-FPM $PHP_VER service unit not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- FPM Pool Config ---"
+              if [ -f "/etc/php/$PHP_VER/fpm/pool.d/www.conf" ]; then
+                echo "PASS: www.conf exists"
+                if grep -q "listen = 0.0.0.0:9000" "/etc/php/$PHP_VER/fpm/pool.d/www.conf"; then
+                  echo "PASS: Listening on port 9000"
+                else
+                  echo "FAIL: Not configured to listen on port 9000"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              else
+                echo "FAIL: www.conf not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Composer ---"
+              if composer --version 2>&1 | grep -q "Composer version 2"; then
+                echo "PASS: Composer v2 installed"
+              else
+                echo "FAIL: Composer v2 not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Drush ---"
+              if drush --version 2>&1 | grep -qi "drush"; then
+                echo "PASS: Drush installed"
+              else
+                echo "FAIL: Drush not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Boot Script ---"
+              if [ -x /opt/worxco/configure-php.sh ]; then
+                echo "PASS: configure-php.sh exists and is executable"
+              else
+                echo "FAIL: configure-php.sh missing or not executable"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo ""
+              echo "=== PHP-FPM $PHP_VER Tests Complete: $ERRORS failures ==="
+              if [ "$ERRORS" -gt 0 ]; then
+                exit 1
+              fi

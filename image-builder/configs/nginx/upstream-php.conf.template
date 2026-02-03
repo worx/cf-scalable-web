@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# PHP upstream template for NGINX reverse proxy
+# Processed by /opt/worxco/configure-nginx.sh at boot time
+#
+# Port mapping convention:
+#   PHP 7.4 -> port 9074
+#   PHP 8.3 -> port 9083
+#
+# The configure-nginx.sh script reads the NLB endpoint from SSM
+# and generates upstream blocks pointing to the NLB on the correct ports.
+#
+# This template file is replaced at boot with actual upstream definitions.
+# Kept here as documentation of the expected format.
+#
+
+# upstream php74 {
+#   server {NLB_ENDPOINT}:9074;
+#   keepalive 16;
+# }
+
+# upstream php83 {
+#   server {NLB_ENDPOINT}:9083;
+#   keepalive 16;
+# }

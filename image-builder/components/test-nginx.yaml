@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: NGINX Test
+#
+# Purpose: Verify NGINX install component completed correctly.
+#          Tests nginx -t, CertBot, service enablement, config files,
+#          and shared config directory.
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (TestNginxComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: NginxInstallComponent
+#
+
+name: TestNginx
+description: Verify NGINX installation and configuration
+schemaVersion: 1.0
+phases:
+  - name: test
+    steps:
+      - name: VerifyNginx
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              ERRORS=0
+
+              echo "=== Testing NGINX Installation ==="
+
+              echo "--- NGINX Binary ---"
+              if nginx -v 2>&1; then
+                echo "PASS: NGINX installed"
+              else
+                echo "FAIL: NGINX not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- NGINX Config Test ---"
+              # Create a minimal sites-enabled dir so nginx -t passes
+              mkdir -p /etc/nginx/shared/sites-enabled
+              if nginx -t 2>&1; then
+                echo "PASS: NGINX config valid"
+              else
+                echo "FAIL: NGINX config invalid"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- NGINX Service ---"
+              if systemctl is-enabled nginx >/dev/null 2>&1; then
+                echo "PASS: NGINX service enabled"
+              else
+                echo "FAIL: NGINX service not enabled"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- CertBot ---"
+              if certbot --version 2>&1; then
+                echo "PASS: CertBot installed"
+              else
+                echo "FAIL: CertBot not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Shared Config Directory ---"
+              if [ -d /etc/nginx/shared ]; then
+                echo "PASS: /etc/nginx/shared exists"
+              else
+                echo "FAIL: /etc/nginx/shared does not exist"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- NGINX Config File ---"
+              if [ -f /etc/nginx/nginx.conf ]; then
+                echo "PASS: nginx.conf exists"
+              else
+                echo "FAIL: nginx.conf not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Boot Script ---"
+              if [ -x /opt/worxco/configure-nginx.sh ]; then
+                echo "PASS: configure-nginx.sh exists and is executable"
+              else
+                echo "FAIL: configure-nginx.sh missing or not executable"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- /var/www Mount Point ---"
+              if [ -d /var/www ]; then
+                echo "PASS: /var/www exists"
+              else
+                echo "FAIL: /var/www does not exist"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo ""
+              echo "=== NGINX Tests Complete: $ERRORS failures ==="
+              if [ "$ERRORS" -gt 0 ]; then
+                exit 1
+              fi

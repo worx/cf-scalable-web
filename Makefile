@@ -24,6 +24,10 @@ export
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         deploy-bastion verify-bastion destroy-bastion \
         stop-bastion start-bastion set-bastion-password \
+        deploy-image-builder verify-image-builder destroy-image-builder \
+        find-default-subnet upload-build-configs \
+        build-ami-nginx build-ami-php74 build-ami-php83 build-amis \
+        update-ami-param \
         init-secrets list-secrets test clean consolidate-logs
 
 # -----------------------------------------------------------------------------
@@ -66,6 +70,11 @@ IAM_TEMPLATE := cloudformation/cf-iam.yaml
 STORAGE_TEMPLATE := cloudformation/cf-storage.yaml
 DATABASE_TEMPLATE := cloudformation/cf-database.yaml
 CACHE_TEMPLATE := cloudformation/cf-cache.yaml
+
+# Image Builder
+IMAGE_BUILDER_STACK := $(STACK_PREFIX)-image-builder
+IMAGE_BUILDER_TEMPLATE := cloudformation/cf-image-builder.yaml
+IMAGE_BUILDER_PARAMS := cloudformation/parameters/image-builder-$(ENV).json
 
 # AWS CLI environment
 export AWS_PAGER :=
@@ -151,6 +160,18 @@ help:  ## Show this help message
 	@echo "  make set-bastion-password     Set root password in Secrets Manager"
 	@echo "  make destroy-bastion          Delete bastion host"
 	@echo ""
+	@echo "$(YELLOW)Image Builder (ENV=sandbox|staging|production):$(NC)"
+	@echo "  make find-default-subnet      Discover default VPC subnet IDs"
+	@echo "  make upload-build-configs     Sync configs to S3 image-builder bucket"
+	@echo "  make deploy-image-builder     Deploy Image Builder stack"
+	@echo "  make verify-image-builder     Show pipeline statuses and latest builds"
+	@echo "  make destroy-image-builder    Delete Image Builder stack (AMIs persist)"
+	@echo "  make build-ami-nginx          Trigger NGINX pipeline execution"
+	@echo "  make build-ami-php74          Trigger PHP 7.4 pipeline execution"
+	@echo "  make build-ami-php83          Trigger PHP 8.3 pipeline execution"
+	@echo "  make build-amis               Trigger all 3 pipelines"
+	@echo "  make update-ami-param         Write latest AMI to SSM (PIPELINE=nginx)"
+	@echo ""
 	@echo "$(CYAN)SSM Plugin (for 'aws ssm start-session'):$(NC)"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		echo "  brew install --cask session-manager-plugin"; \
@@ -179,7 +200,7 @@ help:  ## Show this help message
 
 validate:  ## Validate all CloudFormation templates
 	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE); do \
+	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			echo "  Validating $$template..."; \
 			cfn-lint "$$template" || exit 1; \
@@ -194,6 +215,10 @@ validate:  ## Validate all CloudFormation templates
 	@if [ -f $(BASTION_PARAMS) ]; then \
 		echo "  Validating $(BASTION_PARAMS)..."; \
 		jq empty $(BASTION_PARAMS) || exit 1; \
+	fi
+	@if [ -f $(IMAGE_BUILDER_PARAMS) ]; then \
+		echo "  Validating $(IMAGE_BUILDER_PARAMS)..."; \
+		jq empty $(IMAGE_BUILDER_PARAMS) || exit 1; \
 	fi
 	@echo "$(GREEN)✓ All templates valid$(NC)"
 
@@ -211,7 +236,7 @@ show-params:  ## Show parameters for current environment
 status:  ## Show status of all stacks for current environment
 	@echo "$(BLUE)Stack Status for ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK); do \
+	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK) $(IMAGE_BUILDER_STACK); do \
 		status=$$(aws cloudformation describe-stacks \
 			--stack-name "$$stack" \
 			--region $(AWS_REGION) \
@@ -718,6 +743,208 @@ set-bastion-password:  ## Set root password for bastion in Secrets Manager
 	fi; \
 	echo "  Secret: $(CYAN)$(BASTION_SECRET_PATH)$(NC)"; \
 	echo "  $(YELLOW)Note: Password applies on next deploy-bastion (UserData runs on first boot only)$(NC)"
+
+# -----------------------------------------------------------------------------
+# Image Builder
+# -----------------------------------------------------------------------------
+
+find-default-subnet:  ## Discover default VPC subnet IDs for BuildSubnetId parameter
+	@echo "$(BLUE)Default VPC Subnets$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@DEFAULT_VPC=$$(aws ec2 describe-vpcs \
+		--filters "Name=isDefault,Values=true" \
+		--query 'Vpcs[0].VpcId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$DEFAULT_VPC" ] || [ "$$DEFAULT_VPC" = "None" ]; then \
+		echo "$(RED)Error: No default VPC found in $(AWS_REGION)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  VPC: $(CYAN)$$DEFAULT_VPC$(NC)"; \
+	echo ""; \
+	aws ec2 describe-subnets \
+		--filters "Name=vpc-id,Values=$$DEFAULT_VPC" \
+		--query 'Subnets[].{SubnetId:SubnetId,AZ:AvailabilityZone,MapPublicIp:MapPublicIpOnLaunch,CidrBlock:CidrBlock}' \
+		--output table \
+		--region $(AWS_REGION); \
+	echo ""; \
+	echo "$(YELLOW)Copy a SubnetId to image-builder-$(ENV).json BuildSubnetId parameter$(NC)"
+
+upload-build-configs:  ## Sync image-builder/configs/ to S3 image-builder bucket
+	@echo "$(BLUE)Uploading build configs to S3...$(NC)"
+	@BUCKET=$$(aws ssm get-parameter \
+		--name "/$(ENV)/s3/image-builder-bucket" \
+		--query 'Parameter.Value' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$BUCKET" ] || [ "$$BUCKET" = "None" ]; then \
+		echo "$(RED)Error: Image builder bucket not found in SSM (deploy storage stack first)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  Bucket: $(CYAN)$$BUCKET$(NC)"; \
+	aws s3 sync image-builder/configs/ "s3://$$BUCKET/configs/" \
+		--region $(AWS_REGION) \
+		--delete; \
+	echo "$(GREEN)✓ Configs synced to s3://$$BUCKET/configs/$(NC)"
+
+deploy-image-builder:  ## Deploy Image Builder stack (depends on IAM + Storage)
+	@echo "$(BLUE)Deploying Image Builder stack: $(IMAGE_BUILDER_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@if [ ! -f $(IMAGE_BUILDER_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(IMAGE_BUILDER_PARAMS)$(NC)"; \
+		echo "Create it from the sandbox template and fill in BuildSubnetId"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(IMAGE_BUILDER_TEMPLATE) \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(IMAGE_BUILDER_PARAMS)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ Image Builder stack deployed: $(IMAGE_BUILDER_STACK)$(NC)"
+
+verify-image-builder:  ## Show pipeline statuses and latest build info
+	@echo "$(BLUE)Image Builder Status for ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. Stack Resources:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::ImageBuilder::ImagePipeline`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Pipeline Status:$(NC)"
+	@aws cloudformation describe-stacks \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--query 'Stacks[0].Outputs[?contains(OutputKey, `Pipeline`)].{Pipeline:OutputKey,ARN:OutputValue}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)3. Latest AMIs (owned by self):$(NC)"
+	@aws ec2 describe-images \
+		--owners self \
+		--filters "Name=name,Values=$(ENV)-*" \
+		--query 'Images | sort_by(@, &CreationDate) | [-3:].{Name:Name,ImageId:ImageId,Created:CreationDate,State:State}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(YELLOW)No AMIs found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Image Builder verification complete$(NC)"
+
+destroy-image-builder:  ## Delete Image Builder stack (AMIs persist independently)
+	@echo "$(RED)WARNING: This will delete the Image Builder stack!$(NC)"
+	@echo "$(YELLOW)Note: Existing AMIs will NOT be deleted.$(NC)"
+	@read -p "Type 'yes' to confirm: " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Cancelled"; \
+		exit 0; \
+	fi
+	@echo "$(YELLOW)Deleting Image Builder stack: $(IMAGE_BUILDER_STACK)$(NC)"
+	@time aws cloudformation delete-stack \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(GREEN)✓ Image Builder stack deleted (AMIs preserved)$(NC)"
+
+build-ami-nginx:  ## Trigger NGINX pipeline execution
+	@echo "$(BLUE)Triggering NGINX AMI build...$(NC)"
+	@PIPELINE_ARN=$$(aws cloudformation describe-stacks \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`NginxPipelineArn`].OutputValue' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$PIPELINE_ARN" ] || [ "$$PIPELINE_ARN" = "None" ]; then \
+		echo "$(RED)Error: NGINX pipeline not found (deploy image-builder stack first)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  Pipeline: $(CYAN)$$PIPELINE_ARN$(NC)"; \
+	aws imagebuilder start-image-pipeline-execution \
+		--image-pipeline-arn "$$PIPELINE_ARN" \
+		--region $(AWS_REGION) \
+		--output json | jq -r '.imageBuildVersionArn'; \
+	echo "$(GREEN)✓ NGINX build started$(NC)"; \
+	echo "$(YELLOW)Monitor in AWS Console > EC2 Image Builder > Image pipelines$(NC)"
+
+build-ami-php74:  ## Trigger PHP 7.4 pipeline execution
+	@echo "$(BLUE)Triggering PHP 7.4 AMI build...$(NC)"
+	@PIPELINE_ARN=$$(aws cloudformation describe-stacks \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`PhpFpm74PipelineArn`].OutputValue' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$PIPELINE_ARN" ] || [ "$$PIPELINE_ARN" = "None" ]; then \
+		echo "$(RED)Error: PHP 7.4 pipeline not found (deploy image-builder stack first)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  Pipeline: $(CYAN)$$PIPELINE_ARN$(NC)"; \
+	aws imagebuilder start-image-pipeline-execution \
+		--image-pipeline-arn "$$PIPELINE_ARN" \
+		--region $(AWS_REGION) \
+		--output json | jq -r '.imageBuildVersionArn'; \
+	echo "$(GREEN)✓ PHP 7.4 build started$(NC)"; \
+	echo "$(YELLOW)Monitor in AWS Console > EC2 Image Builder > Image pipelines$(NC)"
+
+build-ami-php83:  ## Trigger PHP 8.3 pipeline execution
+	@echo "$(BLUE)Triggering PHP 8.3 AMI build...$(NC)"
+	@PIPELINE_ARN=$$(aws cloudformation describe-stacks \
+		--stack-name $(IMAGE_BUILDER_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`PhpFpm83PipelineArn`].OutputValue' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$PIPELINE_ARN" ] || [ "$$PIPELINE_ARN" = "None" ]; then \
+		echo "$(RED)Error: PHP 8.3 pipeline not found (deploy image-builder stack first)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  Pipeline: $(CYAN)$$PIPELINE_ARN$(NC)"; \
+	aws imagebuilder start-image-pipeline-execution \
+		--image-pipeline-arn "$$PIPELINE_ARN" \
+		--region $(AWS_REGION) \
+		--output json | jq -r '.imageBuildVersionArn'; \
+	echo "$(GREEN)✓ PHP 8.3 build started$(NC)"; \
+	echo "$(YELLOW)Monitor in AWS Console > EC2 Image Builder > Image pipelines$(NC)"
+
+build-amis:  ## Trigger all 3 pipeline executions
+	@echo "$(BLUE)Triggering all AMI builds...$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@$(MAKE) build-ami-nginx ENV=$(ENV)
+	@$(MAKE) build-ami-php74 ENV=$(ENV)
+	@$(MAKE) build-ami-php83 ENV=$(ENV)
+	@echo ""
+	@echo "$(GREEN)✓ All 3 builds triggered$(NC)"
+
+# PIPELINE variable for update-ami-param (nginx, php74, php83)
+PIPELINE ?= nginx
+
+update-ami-param:  ## Write latest AMI ID to SSM (PIPELINE=nginx|php74|php83)
+	@echo "$(BLUE)Updating SSM with latest $(PIPELINE) AMI...$(NC)"
+	@case "$(PIPELINE)" in \
+		nginx) NAME_FILTER="$(ENV)-*nginx*" ;; \
+		php74) NAME_FILTER="$(ENV)-*php*74*" ;; \
+		php83) NAME_FILTER="$(ENV)-*php*83*" ;; \
+		*) echo "$(RED)Error: PIPELINE must be nginx, php74, or php83$(NC)"; exit 1 ;; \
+	esac; \
+	AMI_ID=$$(aws ec2 describe-images \
+		--owners self \
+		--filters "Name=name,Values=$$NAME_FILTER" "Name=state,Values=available" \
+		--query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$AMI_ID" ] || [ "$$AMI_ID" = "None" ]; then \
+		echo "$(RED)Error: No AMI found matching $$NAME_FILTER$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  AMI: $(CYAN)$$AMI_ID$(NC)"; \
+	aws ssm put-parameter \
+		--name "/$(ENV)/ami/$(PIPELINE)" \
+		--value "$$AMI_ID" \
+		--type String \
+		--overwrite \
+		--region $(AWS_REGION) >/dev/null; \
+	echo "$(GREEN)✓ SSM parameter /$(ENV)/ami/$(PIPELINE) = $$AMI_ID$(NC)"
 
 # -----------------------------------------------------------------------------
 # Secrets Management

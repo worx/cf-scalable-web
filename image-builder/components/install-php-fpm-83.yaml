@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: PHP-FPM 8.3 Install
+#
+# Purpose: Install PHP 8.3 FPM with extensions from Ondrej PPA,
+#          Composer v2, Drush 13, logrotate, and boot script.
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (PhpFpm83InstallComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: BaseHardeningComponent
+#
+
+name: PhpFpm83Install
+description: PHP 8.3 FPM with extensions, Composer, and Drush 13
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: DownloadExtensionsList
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/php/8.3/extensions.txt
+            destination: /tmp/php-extensions.txt
+
+      - name: DownloadWwwConf
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/php/8.3/www.conf
+            destination: /tmp/www.conf
+
+      - name: DownloadPhpIni
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/php/8.3/php.ini
+            destination: /tmp/php.ini
+
+      - name: AddOndrejPpa
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Add Ondrej PHP PPA ==="
+              export DEBIAN_FRONTEND=noninteractive
+              add-apt-repository -y ppa:ondrej/php
+              apt-get update -y
+
+      - name: InstallPhpExtensions
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install PHP 8.3 Extensions ==="
+              export DEBIAN_FRONTEND=noninteractive
+              # Read extensions list, skip comments and blank lines
+              PACKAGES=$(grep -v '^#' /tmp/php-extensions.txt | grep -v '^\s*$' | tr '\n' ' ')
+              echo "Installing: $PACKAGES"
+              apt-get install -y $PACKAGES
+
+      - name: CreatePoolDir
+        action: CreateFolder
+        inputs:
+          - path: /etc/php/8.3/fpm/pool.d
+            owner: root
+            group: root
+            permissions: 0755
+            overwrite: false
+
+      - name: InstallWwwConf
+        action: CopyFile
+        inputs:
+          - source: /tmp/www.conf
+            destination: /etc/php/8.3/fpm/pool.d/www.conf
+
+      - name: InstallPhpIni
+        action: CopyFile
+        inputs:
+          - source: /tmp/php.ini
+            destination: /etc/php/8.3/fpm/php.ini
+
+      - name: SetPhpConfigPermissions
+        action: SetFilePermissions
+        inputs:
+          - path: /etc/php/8.3/fpm/pool.d/www.conf
+            permissions: 0644
+          - path: /etc/php/8.3/fpm/php.ini
+            permissions: 0644
+
+      - name: InstallComposer
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install Composer v2 ==="
+              cd /tmp
+              EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+              php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+              ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+              if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+                echo "ERROR: Composer installer checksum mismatch"
+                rm -f composer-setup.php
+                exit 1
+              fi
+              php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+              rm -f composer-setup.php
+              composer --version
+
+      - name: InstallDrush
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install Drush 13 (PHP 8.3 compatible) ==="
+              composer global require drush/drush:^13 --no-interaction
+              ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
+              drush --version
+
+      - name: ConfigureLogrotate
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Configure PHP-FPM Logrotate ==="
+              cat > /etc/logrotate.d/php8.3-fpm <<'LREOF'
+              /var/log/php8.3-fpm*.log {
+                daily
+                missingok
+                rotate 14
+                compress
+                delaycompress
+                notifempty
+                create 0640 www-data adm
+                postrotate
+                  [ -f /run/php/php8.3-fpm.pid ] && kill -USR1 $(cat /run/php/php8.3-fpm.pid)
+                endscript
+              }
+              LREOF
+
+      - name: CreateBootScript
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Create Boot Configuration Script ==="
+              mkdir -p /opt/worxco
+              cat > /opt/worxco/configure-php.sh <<'BOOTEOF'
+              #!/bin/bash
+              # SPDX-License-Identifier: GPL-2.0-or-later
+              # Copyright (C) 2026 The Worx Company
+              #
+              # Purpose: Configure PHP-FPM at boot time
+              # - Mount /var/www from FSx
+              # - Configure Redis session handler from SSM
+              # - Configure database connection from SSM
+              # - Start PHP-FPM
+              #
+              set -euo pipefail
+              PHP_VER="8.3"
+              REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+              ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
+                --query 'Parameter.Value' --output text 2>/dev/null || echo "sandbox")
+
+              echo "[configure-php] Starting PHP $PHP_VER configuration for $ENV"
+
+              # Mount FSx webroot
+              FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
+                --query 'Parameter.Value' --output text)
+              if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                echo "[configure-php] Mounting /var/www from $FSX_DNS"
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                  "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
+              fi
+
+              # Configure Redis session handler
+              REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+                --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+              if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
+                echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
+                cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
+              ; Redis session handler (configured at boot)
+              session.save_handler = redis
+              session.save_path = "tcp://$REDIS_ENDPOINT:6379"
+              REDISEOF
+              fi
+
+              # Start PHP-FPM
+              systemctl start php$PHP_VER-fpm
+              echo "[configure-php] PHP-FPM $PHP_VER started successfully"
+              BOOTEOF
+              chmod 755 /opt/worxco/configure-php.sh
+
+      - name: FstabTemplate
+        action: AppendFile
+        inputs:
+          - path: /etc/fstab
+            content: |
+              # FSx NFS mount (activated at boot by configure-php.sh)
+              # {fsx_dns}:/fsx /var/www nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0

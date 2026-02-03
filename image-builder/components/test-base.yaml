@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: Base Test
+#
+# Purpose: Verify base hardening component installed correctly.
+#          Tests AWS CLI, SSM Agent, CloudWatch Agent, NFS client,
+#          swap, SSH hardening, and environment variables.
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (TestBaseComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: BaseHardeningComponent
+#
+
+name: TestBase
+description: Verify base hardening and core packages
+schemaVersion: 1.0
+phases:
+  - name: test
+    steps:
+      - name: VerifyBase
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              ERRORS=0
+
+              echo "=== Testing Base Hardening ==="
+
+              echo "--- AWS CLI ---"
+              if aws --version 2>&1 | grep -q "aws-cli/2"; then
+                echo "PASS: AWS CLI v2 installed"
+              else
+                echo "FAIL: AWS CLI v2 not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- SSM Agent ---"
+              if snap list amazon-ssm-agent >/dev/null 2>&1; then
+                echo "PASS: SSM Agent installed"
+              else
+                echo "FAIL: SSM Agent not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- CloudWatch Agent ---"
+              if dpkg -l amazon-cloudwatch-agent >/dev/null 2>&1; then
+                echo "PASS: CloudWatch Agent installed"
+              else
+                echo "FAIL: CloudWatch Agent not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- NFS Client ---"
+              if dpkg -l nfs-common >/dev/null 2>&1; then
+                echo "PASS: NFS client installed"
+              else
+                echo "FAIL: NFS client not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Swap ---"
+              SWAP_MB=$(free -m | awk '/Swap:/ {print $2}')
+              if [ "$SWAP_MB" -ge 1900 ]; then
+                echo "PASS: Swap is ${SWAP_MB}MB (>= 1900MB)"
+              else
+                echo "FAIL: Swap is ${SWAP_MB}MB (expected >= 1900MB)"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- SSH Hardening ---"
+              if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config; then
+                echo "PASS: Root login disabled"
+              else
+                echo "FAIL: Root login not disabled"
+                ERRORS=$((ERRORS + 1))
+              fi
+              if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
+                echo "PASS: Password authentication disabled"
+              else
+                echo "FAIL: Password authentication not disabled"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- /var/www Mount Point ---"
+              if [ -d /var/www ]; then
+                echo "PASS: /var/www exists"
+              else
+                echo "FAIL: /var/www does not exist"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo "--- Authorized Keys ---"
+              if [ -f /root/.ssh/authorized_keys ]; then
+                echo "PASS: authorized_keys exists"
+              else
+                echo "FAIL: authorized_keys not found"
+                ERRORS=$((ERRORS + 1))
+              fi
+
+              echo ""
+              echo "=== Base Tests Complete: $ERRORS failures ==="
+              if [ "$ERRORS" -gt 0 ]; then
+                exit 1
+              fi

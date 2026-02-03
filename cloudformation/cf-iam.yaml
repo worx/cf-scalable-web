@@ -273,10 +273,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:PutObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder'
-                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder/*'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder*'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder*/*'
         - PolicyName: SecretsManagerAccess
           PolicyDocument:
             Version: '2012-10-17'

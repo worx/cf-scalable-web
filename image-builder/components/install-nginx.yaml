@@ -1,0 +1,207 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# EC2 Image Builder Component: NGINX Install
+#
+# Purpose: Install NGINX stable from official repo, CertBot with Route53 plugin,
+#          configure shared NFS mount points, logrotate, and boot script.
+#
+# Canonical source: cloudformation/cf-image-builder.yaml (NginxInstallComponent)
+# This file is a reference copy for documentation purposes.
+#
+# Dependencies: BaseHardeningComponent
+#
+
+name: NginxInstall
+description: NGINX reverse proxy with CertBot and shared config mount
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: AddNginxRepo
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Add NGINX Official Stable Repo ==="
+              export DEBIAN_FRONTEND=noninteractive
+              curl -fsSL https://nginx.org/keys/nginx_signing.key | \
+                gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg arch=arm64] \
+                http://nginx.org/packages/ubuntu noble nginx" \
+                > /etc/apt/sources.list.d/nginx.list
+              # Pin NGINX packages to official repo
+              cat > /etc/apt/preferences.d/99nginx <<'PINEOF'
+              Package: *
+              Pin: origin nginx.org
+              Pin-Priority: 900
+              PINEOF
+              apt-get update -y
+
+      - name: InstallNginx
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install NGINX ==="
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get install -y nginx
+              systemctl enable nginx
+
+      - name: InstallCertbot
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Install CertBot + Route53 Plugin ==="
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get install -y certbot python3-certbot-dns-route53
+
+      - name: RemoveDefaultSite
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Remove Default NGINX Site ==="
+              rm -f /etc/nginx/conf.d/default.conf
+              rm -f /etc/nginx/sites-enabled/default
+
+      - name: CreateSharedConfigDir
+        action: CreateFolder
+        inputs:
+          - path: /etc/nginx/shared
+            owner: root
+            group: root
+            permissions: 0755
+            overwrite: false
+
+      - name: CreateSharedSitesEnabled
+        action: CreateFolder
+        inputs:
+          - path: /etc/nginx/shared/sites-enabled
+            owner: root
+            group: root
+            permissions: 0755
+            overwrite: false
+
+      - name: DownloadNginxConf
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/nginx/nginx.conf
+            destination: /etc/nginx/nginx.conf
+
+      - name: DownloadUpstreamTemplate
+        action: S3Download
+        inputs:
+          - source: s3://{{BucketName}}/configs/nginx/upstream-php.conf.template
+            destination: /etc/nginx/conf.d/upstream-php.conf.template
+
+      - name: SetNginxConfPermissions
+        action: SetFilePermissions
+        inputs:
+          - path: /etc/nginx/nginx.conf
+            permissions: 0644
+          - path: /etc/nginx/conf.d/upstream-php.conf.template
+            permissions: 0644
+
+      - name: ConfigureLogrotate
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Configure NGINX Logrotate ==="
+              cat > /etc/logrotate.d/nginx <<'LREOF'
+              /var/log/nginx/*.log {
+                daily
+                missingok
+                rotate 14
+                compress
+                delaycompress
+                notifempty
+                create 0640 www-data adm
+                sharedscripts
+                postrotate
+                  [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
+                endscript
+              }
+              LREOF
+
+      - name: CreateBootScript
+        action: ExecuteBash
+        inputs:
+          commands:
+            - |
+              set -euo pipefail
+              echo "=== Create Boot Configuration Script ==="
+              mkdir -p /opt/worxco
+              cat > /opt/worxco/configure-nginx.sh <<'BOOTEOF'
+              #!/bin/bash
+              # SPDX-License-Identifier: GPL-2.0-or-later
+              # Copyright (C) 2026 The Worx Company
+              #
+              # Purpose: Configure NGINX at boot time
+              # - Mount /var/www from FSx (webroot)
+              # - Mount /etc/nginx/shared from FSx (shared NGINX config)
+              # - Generate upstream PHP config from SSM parameters
+              # - Start NGINX
+              #
+              set -euo pipefail
+              REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+              ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
+                --query 'Parameter.Value' --output text 2>/dev/null || echo "sandbox")
+
+              echo "[configure-nginx] Starting configuration for $ENV"
+
+              # Mount FSx webroot
+              FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
+                --query 'Parameter.Value' --output text)
+              if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                echo "[configure-nginx] Mounting /var/www from $FSX_DNS"
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                  "$FSX_DNS:/fsx" /var/www || echo "[configure-nginx] WARNING: Failed to mount /var/www"
+              fi
+
+              # Mount shared NGINX config
+              if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                echo "[configure-nginx] Mounting /etc/nginx/shared from $FSX_DNS"
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                  "$FSX_DNS:/fsx/nginx" /etc/nginx/shared || echo "[configure-nginx] WARNING: Failed to mount /etc/nginx/shared"
+              fi
+
+              # Generate upstream PHP config
+              NLB_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/nlb/endpoint" --region "$REGION" \
+                --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+              if [ -n "$NLB_ENDPOINT" ] && [ "$NLB_ENDPOINT" != "None" ]; then
+                echo "[configure-nginx] Generating upstream config for NLB: $NLB_ENDPOINT"
+                cat > /etc/nginx/conf.d/upstream-php.conf <<UPEOF
+              upstream php74 {
+                server $NLB_ENDPOINT:9074;
+                keepalive 16;
+              }
+              upstream php83 {
+                server $NLB_ENDPOINT:9083;
+                keepalive 16;
+              }
+              UPEOF
+              fi
+
+              # Validate and start NGINX
+              nginx -t && systemctl start nginx
+              echo "[configure-nginx] NGINX started successfully"
+              BOOTEOF
+              chmod 755 /opt/worxco/configure-nginx.sh
+
+      - name: FstabTemplates
+        action: AppendFile
+        inputs:
+          - path: /etc/fstab
+            content: |
+              # FSx NFS mounts (activated at boot by configure-nginx.sh)
+              # {fsx_dns}:/fsx        /var/www          nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+              # {fsx_dns}:/fsx/nginx  /etc/nginx/shared nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0

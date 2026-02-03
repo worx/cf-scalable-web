@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# SSH authorized_keys for AMI builds
+# Add public keys below (one per line)
+# These keys will be installed to /root/.ssh/authorized_keys on all AMIs
+#
+# WARNING: Do not commit private keys. Only public keys (.pub) belong here.
+#
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCNLQ959f7Kf+FjhudIE6M/CAJntoHwAOnk63f162DXnsid4UnDntJhtV1RLaUk5ecJ2p1vDQVvawLgV7Z97xqr1ITv1BOgAeZXafdkARLV1TClTfN+tLRBBawXHUnX9X0RChd/KH76Odq67x+vg6xIWFKqJ9SA6OJ9Bafh3lpYEhCdgvT4xSM2Dkes4n+2w8i7gE8wSZbgbE75Jv8N1x2ktbkAs1i6Xkk0IYZkeTY17R99gAabWLGp5qizkDvQibScO++qAvw4GN54ngIHnX/lWO4dZA+74R2Knd7OobenvdMtX9iDuxe74FUpfG1zoAtzf8r4DwKVPqePCjTA7tNB kurt02
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCsP0vVAt2DVa8KNEsV/xc1ojjvyfrJJIDUab2zroM9V6iM+I69RvtRUFoQnlK4dEDozi6eK8RUMeFyi4sTt+LWG9OlVXZPqTYMExHX9ZExT+ZXE1Z/7F+jbzEeWeYg0I+XCF5qYC1mEiZwN/ng01fdxU9owiZMFzIVfQgNLPdgn2OGGxUSDdZHbweYco1owj/mCQ1/8C+has0TD4eFAZZhkMvy5YVWgbj4eo0WZBUbt6Fn9+GVDLMDxSDyP6f4dwqNEG7F0xwO85JhZWwI9fQlpQbG2Yj4wWM8E0IekXS9TemzNLC9tmYMiyfqsNAIv0xBJj4M+9m9JvwPTreWVMD5 drakythe@Tims-MacBook-Air.local
+ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAtd4I56v2QQqGTc8Vv9AGtnEbgnEm0yCMd6L4Q8yDSTtZfMRRezxfNPxi4DUrF8DXp8XE5RIiLIuItSrcnLdtNHTlCm0NlU3LRGWLzWLoi9unQkDZK6/xhozastmJhNcSgQ8Kugj8oRnSdVvTGul3L6LsqgVx0DEJIkBfiX8qXRYWgQvyEWWG4RkTwsv/tV8kUXwjesqmbOLeA1d3B2+hdeFiTvJIquUO/uVQX13vRNMZOFzz30N+W116pIrnOio2t3AkbcPKj9Ngv4rSV4xZW/tS5Fi4MEa88K8HSyt9NJCPJfUKxXNuSxwPLgTkTziPSjs9KSnVV8Z3KVn9cK78KQ== kurt@pres1
+

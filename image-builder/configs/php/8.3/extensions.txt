@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# PHP 8.3 extension packages for Ubuntu 24.04 (Ondrej PPA)
+# One package per line. Lines starting with # are ignored.
+# The install component reads this file and installs all listed packages.
+#
+php8.3-fpm
+php8.3-cli
+php8.3-common
+php8.3-bcmath
+php8.3-curl
+php8.3-gd
+php8.3-mbstring
+php8.3-xml
+php8.3-zip
+php8.3-soap
+php8.3-opcache
+php8.3-apcu
+php8.3-mysql
+php8.3-pgsql
+php8.3-intl
+php8.3-imagick
+php8.3-igbinary
+php8.3-readline
+php8.3-sqlite3
+php8.3-yaml
+php8.3-dev
+php-redis
+php-ssh2

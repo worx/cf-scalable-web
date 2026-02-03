@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# PHP 7.4 extension packages for Ubuntu 24.04 (Ondrej PPA)
+# One package per line. Lines starting with # are ignored.
+# The install component reads this file and installs all listed packages.
+#
+# NOTE: PHP 7.4 is EOL (Nov 2022). Available via Ondrej PPA only.
+# Some extensions (igbinary, readline, sqlite3, yaml) are NOT available
+# for PHP 7.4 on the PPA for Ubuntu 24.04.
+#
+php7.4-fpm
+php7.4-cli
+php7.4-common
+php7.4-bcmath
+php7.4-curl
+php7.4-gd
+php7.4-mbstring
+php7.4-xml
+php7.4-zip
+php7.4-soap
+php7.4-opcache
+php7.4-apcu
+php7.4-mysql
+php7.4-pgsql
+php7.4-intl
+php7.4-imagick
+php7.4-imap
+php7.4-json
+php7.4-dev
+php-redis
+php-ssh2

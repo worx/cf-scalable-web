@@ -1,0 +1,1318 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: EC2 Image Builder Pipelines
+#
+# Purpose: Creates Image Builder pipelines to produce ARM64 Ubuntu 24.04 AMIs
+#          for NGINX reverse proxy and PHP-FPM (7.4, 8.3) instances.
+#
+# Pipelines:
+#   - NGINX AMI (reverse proxy + CertBot + NFS client + shared config mount)
+#   - PHP 7.4 FPM AMI (Ondrej PPA + Composer + Drush 11)
+#   - PHP 8.3 FPM AMI (Ondrej PPA + Composer + Drush 13)
+#
+# Build Environment:
+#   Builds run in the default VPC (free internet, no NAT cost).
+#   Resulting AMIs are launched by future ASGs in the project VPC.
+#
+# Dependencies:
+#   - cf-iam.yaml (instance profile, service role)
+#   - cf-storage.yaml (S3 bucket for configs and build logs)
+#
+# Config Files:
+#   Stored in S3 under configs/ prefix. Upload with:
+#     make upload-build-configs ENV=sandbox
+#
+# Usage:
+#   make deploy-image-builder ENV=sandbox
+#   make build-ami-nginx ENV=sandbox
+#   make build-amis ENV=sandbox
+#   make verify-image-builder ENV=sandbox
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Image Builder pipelines for NGINX and PHP-FPM AMIs'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: sandbox
+
+  BuildSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Default VPC public subnet for Image Builder builds
+
+  BuildInstanceType:
+    Type: String
+    Description: ARM64 instance type for builds (1GB + swap is sufficient for apt packages)
+    Default: t4g.micro
+    AllowedValues:
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+
+  PipelineSchedule:
+    Type: String
+    Description: >-
+      Optional cron expression for scheduled builds (empty = manual only).
+      Example: cron(0 6 * * ? *) for daily at 6am UTC
+    Default: ''
+
+  RecipeVersion:
+    Type: String
+    Description: Recipe version (bump when component content changes)
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+    Default: '1.0.0'
+
+  BucketSuffix:
+    Type: String
+    Description: Suffix for the Image Builder S3 bucket (must match cf-storage.yaml)
+    Default: change-me
+
+Conditions:
+  HasSchedule: !Not [!Equals [!Ref PipelineSchedule, '']]
+
+Resources:
+  # ========================================
+  # Shared Infrastructure
+  # ========================================
+
+  BuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Image Builder build instances - ${EnvironmentName}'
+      GroupName: !Sub '${EnvironmentName}-image-builder-sg'
+      # No VpcId -- uses default VPC (default allows all outbound)
+      SecurityGroupIngress: []
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-image-builder-sg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  InfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub '${EnvironmentName}-infra-config'
+      Description: !Sub 'Build infrastructure for ${EnvironmentName} AMIs'
+      InstanceProfileName:
+        Fn::ImportValue: !Sub '${EnvironmentName}-image-builder-instance-profile-arn'
+      InstanceTypes:
+        - !Ref BuildInstanceType
+      SubnetId: !Ref BuildSubnetId
+      SecurityGroupIds:
+        - !GetAtt BuildSecurityGroup.GroupId
+      TerminateInstanceOnFailure: true
+      Logging:
+        S3Logs:
+          S3BucketName: !Sub '${EnvironmentName}-image-builder-${BucketSuffix}'
+          S3KeyPrefix: build-logs
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  DistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Sub '${EnvironmentName}-distribution-config'
+      Description: !Sub 'AMI distribution for ${EnvironmentName}'
+      Distributions:
+        - Region: !Ref 'AWS::Region'
+          AmiDistributionConfiguration:
+            Name: !Sub '${EnvironmentName}-{{imagebuilder:buildVersion}}-{{imagebuilder:buildDate}}'
+            Description: !Sub 'Built by ${EnvironmentName} Image Builder pipeline'
+            AmiTags:
+              Environment: !Ref EnvironmentName
+              ManagedBy: image-builder
+              BuildDate: '{{imagebuilder:buildDate}}'
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Components: Base Hardening
+  # ========================================
+
+  BaseHardeningComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${EnvironmentName}-base-hardening'
+      Description: System hardening, core packages, AWS tooling, NFS client
+      Platform: Linux
+      Version: !Ref RecipeVersion
+      Data: !Sub |
+        name: BaseHardening
+        description: System hardening, core packages, AWS tooling, and NFS client
+        schemaVersion: 1.0
+        parameters:
+          - BucketName:
+              type: string
+              default: '${EnvironmentName}-image-builder-${BucketSuffix}'
+              description: S3 bucket for config files
+        phases:
+          - name: build
+            steps:
+              - name: SystemUpdate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== System Update ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      for attempt in 1 2 3; do
+                        echo "Attempt $attempt: apt-get update"
+                        if apt-get update -y 2>&1; then
+                          break
+                        fi
+                        sleep 10
+                      done
+                      apt-get upgrade -y || true
+
+              - name: CreateSwap
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create 2GB Swap ==="
+                      if [ ! -f /swapfile ]; then
+                        dd if=/dev/zero of=/swapfile bs=1M count=2048
+                        chmod 600 /swapfile
+                        mkswap /swapfile
+                        swapon /swapfile
+                        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+                      fi
+                      sysctl vm.swappiness=10
+                      echo 'vm.swappiness=10' >> /etc/sysctl.conf
+
+              - name: InstallCorePackages
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Core Packages ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      apt-get install -y \
+                        software-properties-common \
+                        net-tools \
+                        jq \
+                        curl \
+                        vim \
+                        unzip \
+                        htop \
+                        tree \
+                        nfs-common \
+                        python3-venv \
+                        postfix \
+                        mailutils
+
+              - name: InstallAwsCli
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install AWS CLI v2 (ARM64) ==="
+                      cd /tmp
+                      curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o awscliv2.zip
+                      unzip -q awscliv2.zip
+                      ./aws/install --update
+                      rm -rf aws awscliv2.zip
+                      aws --version
+
+              - name: InstallCloudWatchAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install CloudWatch Agent ==="
+                      cd /tmp
+                      curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb" -o cw-agent.deb
+                      dpkg -i cw-agent.deb || apt-get install -f -y
+                      rm -f cw-agent.deb
+
+              - name: InstallSsmAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install SSM Agent ==="
+                      snap install amazon-ssm-agent --classic || true
+                      systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+              - name: SshHardening
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== SSH Hardening ==="
+                      sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+                      sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+                      sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+
+              - name: SetEnvironment
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Set Environment Variables ==="
+                      cat >> /etc/environment <<'ENVEOF'
+                      AWS_PAGER=""
+                      AWS_CLI_AUTO_PROMPT=off
+                      EDITOR=vim
+                      ENVEOF
+
+              - name: UnattendedUpgrades
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Configure Unattended Security Upgrades ==="
+                      apt-get install -y unattended-upgrades
+                      cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'UUEOF'
+                      Unattended-Upgrade::Allowed-Origins {
+                        "${!distro_id}:${!distro_codename}-security";
+                      };
+                      Unattended-Upgrade::Automatic-Reboot "false";
+                      UUEOF
+
+              - name: CreateWebrootDir
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create /var/www Mount Point ==="
+                      mkdir -p /var/www
+                      chown www-data:www-data /var/www
+                      chmod 755 /var/www
+
+              - name: DownloadAuthorizedKeys
+                action: S3Download
+                inputs:
+                  - source: 's3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/authorized_keys'
+                    destination: /root/.ssh/authorized_keys
+
+              - name: SetSshKeyPermissions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Set SSH Key Permissions ==="
+                      cp /root/.ssh/authorized_keys /root/.ssh/authorized_keys2
+                      cp /root/.ssh/authorized_keys /root/.ssh/authorized_keys.bak
+                      chmod 600 /root/.ssh/authorized_keys
+                      chmod 600 /root/.ssh/authorized_keys2
+                      chmod 600 /root/.ssh/authorized_keys.bak
+
+          - name: test
+            steps:
+              - name: VerifyBase
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      ERRORS=0
+                      echo "=== Testing Base Hardening ==="
+
+                      echo "--- AWS CLI ---"
+                      if aws --version 2>&1 | grep -q "aws-cli/2"; then
+                        echo "PASS: AWS CLI v2 installed"
+                      else
+                        echo "FAIL: AWS CLI v2 not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- SSM Agent ---"
+                      if snap list amazon-ssm-agent >/dev/null 2>&1; then
+                        echo "PASS: SSM Agent installed"
+                      else
+                        echo "FAIL: SSM Agent not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- CloudWatch Agent ---"
+                      if dpkg -l amazon-cloudwatch-agent >/dev/null 2>&1; then
+                        echo "PASS: CloudWatch Agent installed"
+                      else
+                        echo "FAIL: CloudWatch Agent not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- NFS Client ---"
+                      if dpkg -l nfs-common >/dev/null 2>&1; then
+                        echo "PASS: NFS client installed"
+                      else
+                        echo "FAIL: NFS client not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Swap ---"
+                      SWAP_MB=$(free -m | awk '/Swap:/ {print $2}')
+                      if [ "$SWAP_MB" -ge 1900 ]; then
+                        echo "PASS: Swap is ${!SWAP_MB}MB"
+                      else
+                        echo "FAIL: Swap is ${!SWAP_MB}MB (expected >= 1900MB)"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- SSH Hardening ---"
+                      if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config; then
+                        echo "PASS: Root login disabled"
+                      else
+                        echo "FAIL: Root login not disabled"; ERRORS=$((ERRORS + 1))
+                      fi
+                      if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
+                        echo "PASS: Password authentication disabled"
+                      else
+                        echo "FAIL: Password authentication not disabled"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- /var/www ---"
+                      if [ -d /var/www ]; then
+                        echo "PASS: /var/www exists"
+                      else
+                        echo "FAIL: /var/www does not exist"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "=== Base Tests: $ERRORS failures ==="
+                      [ "$ERRORS" -eq 0 ] || exit 1
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Components: NGINX Install
+  # ========================================
+
+  NginxInstallComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${EnvironmentName}-nginx-install'
+      Description: NGINX reverse proxy with CertBot and shared config mount
+      Platform: Linux
+      Version: !Ref RecipeVersion
+      Data: !Sub |
+        name: NginxInstall
+        description: NGINX reverse proxy with CertBot and shared config mount
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: AddNginxRepo
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add NGINX Official Stable Repo ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      curl -fsSL https://nginx.org/keys/nginx_signing.key | \
+                        gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+                      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg arch=arm64] http://nginx.org/packages/ubuntu noble nginx" \
+                        > /etc/apt/sources.list.d/nginx.list
+                      cat > /etc/apt/preferences.d/99nginx <<'PINEOF'
+                      Package: *
+                      Pin: origin nginx.org
+                      Pin-Priority: 900
+                      PINEOF
+                      apt-get update -y
+
+              - name: InstallNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install NGINX ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      apt-get install -y nginx
+                      systemctl enable nginx
+
+              - name: InstallCertbot
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install CertBot + Route53 Plugin ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      apt-get install -y certbot python3-certbot-dns-route53
+
+              - name: RemoveDefaultSite
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Remove Default NGINX Site ==="
+                      rm -f /etc/nginx/conf.d/default.conf
+                      rm -f /etc/nginx/sites-enabled/default
+
+              - name: CreateSharedDirs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create Shared Config Directories ==="
+                      mkdir -p /etc/nginx/shared/sites-enabled
+                      chmod 755 /etc/nginx/shared
+                      chmod 755 /etc/nginx/shared/sites-enabled
+
+              - name: DownloadNginxConf
+                action: S3Download
+                inputs:
+                  - source: 's3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/nginx/nginx.conf'
+                    destination: /etc/nginx/nginx.conf
+
+              - name: DownloadUpstreamTemplate
+                action: S3Download
+                inputs:
+                  - source: 's3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/nginx/upstream-php.conf.template'
+                    destination: /etc/nginx/conf.d/upstream-php.conf.template
+
+              - name: SetNginxConfPermissions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      chmod 644 /etc/nginx/nginx.conf
+                      chmod 644 /etc/nginx/conf.d/upstream-php.conf.template
+
+              - name: ConfigureLogrotate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Configure NGINX Logrotate ==="
+                      cat > /etc/logrotate.d/nginx <<'LREOF'
+                      /var/log/nginx/*.log {
+                        daily
+                        missingok
+                        rotate 14
+                        compress
+                        delaycompress
+                        notifempty
+                        create 0640 www-data adm
+                        sharedscripts
+                        postrotate
+                          [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
+                        endscript
+                      }
+                      LREOF
+
+              - name: CreateBootScript
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create Boot Configuration Script ==="
+                      mkdir -p /opt/worxco
+                      cat > /opt/worxco/configure-nginx.sh <<'BOOTEOF'
+                      #!/bin/bash
+                      # SPDX-License-Identifier: GPL-2.0-or-later
+                      # Copyright (C) 2026 The Worx Company
+                      #
+                      # Purpose: Configure NGINX at boot time
+                      # - Mount /var/www from FSx (webroot)
+                      # - Mount /etc/nginx/shared from FSx (shared NGINX config)
+                      # - Generate upstream PHP config from SSM parameters
+                      # - Start NGINX
+                      #
+                      set -euo pipefail
+                      REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+                      ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "sandbox")
+
+                      echo "[configure-nginx] Starting configuration for $ENV"
+
+                      # Mount FSx webroot
+                      FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text)
+                      if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                        echo "[configure-nginx] Mounting /var/www from $FSX_DNS"
+                        mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                          "$FSX_DNS:/fsx" /var/www || echo "[configure-nginx] WARNING: Failed to mount /var/www"
+                      fi
+
+                      # Mount shared NGINX config
+                      if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                        echo "[configure-nginx] Mounting /etc/nginx/shared from $FSX_DNS"
+                        mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                          "$FSX_DNS:/fsx/nginx" /etc/nginx/shared || echo "[configure-nginx] WARNING: Failed to mount /etc/nginx/shared"
+                      fi
+
+                      # Generate upstream PHP config
+                      NLB_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/nlb/endpoint" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+                      if [ -n "$NLB_ENDPOINT" ] && [ "$NLB_ENDPOINT" != "None" ]; then
+                        echo "[configure-nginx] Generating upstream config for NLB: $NLB_ENDPOINT"
+                        cat > /etc/nginx/conf.d/upstream-php.conf <<UPEOF
+                      upstream php74 {
+                        server $NLB_ENDPOINT:9074;
+                        keepalive 16;
+                      }
+                      upstream php83 {
+                        server $NLB_ENDPOINT:9083;
+                        keepalive 16;
+                      }
+                      UPEOF
+                      fi
+
+                      # Validate and start NGINX
+                      nginx -t && systemctl start nginx
+                      echo "[configure-nginx] NGINX started successfully"
+                      BOOTEOF
+                      chmod 755 /opt/worxco/configure-nginx.sh
+
+              - name: FstabTemplates
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add fstab Templates ==="
+                      cat >> /etc/fstab <<'FSTABEOF'
+                      # FSx NFS mounts (activated at boot by configure-nginx.sh)
+                      # {fsx_dns}:/fsx        /var/www          nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+                      # {fsx_dns}:/fsx/nginx  /etc/nginx/shared nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+                      FSTABEOF
+
+          - name: test
+            steps:
+              - name: VerifyNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      ERRORS=0
+                      echo "=== Testing NGINX Installation ==="
+
+                      echo "--- NGINX Binary ---"
+                      if nginx -v 2>&1; then
+                        echo "PASS: NGINX installed"
+                      else
+                        echo "FAIL: NGINX not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- NGINX Config Test ---"
+                      mkdir -p /etc/nginx/shared/sites-enabled
+                      if nginx -t 2>&1; then
+                        echo "PASS: NGINX config valid"
+                      else
+                        echo "FAIL: NGINX config invalid"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- NGINX Service ---"
+                      if systemctl is-enabled nginx >/dev/null 2>&1; then
+                        echo "PASS: NGINX service enabled"
+                      else
+                        echo "FAIL: NGINX service not enabled"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- CertBot ---"
+                      if certbot --version 2>&1; then
+                        echo "PASS: CertBot installed"
+                      else
+                        echo "FAIL: CertBot not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Shared Config Directory ---"
+                      if [ -d /etc/nginx/shared ]; then
+                        echo "PASS: /etc/nginx/shared exists"
+                      else
+                        echo "FAIL: /etc/nginx/shared does not exist"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Boot Script ---"
+                      if [ -x /opt/worxco/configure-nginx.sh ]; then
+                        echo "PASS: configure-nginx.sh exists and is executable"
+                      else
+                        echo "FAIL: configure-nginx.sh missing or not executable"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "=== NGINX Tests: $ERRORS failures ==="
+                      [ "$ERRORS" -eq 0 ] || exit 1
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Components: PHP-FPM 7.4 Install
+  # ========================================
+
+  PhpFpm74InstallComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-74-install'
+      Description: PHP 7.4 FPM with extensions, Composer, and Drush 11
+      Platform: Linux
+      Version: !Ref RecipeVersion
+      Data: !Sub |
+        name: PhpFpm74Install
+        description: PHP 7.4 FPM with extensions, Composer, and Drush 11
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: DownloadConfigs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Download PHP 7.4 Config Files from S3 ==="
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/7.4/extensions.txt" /tmp/php-extensions.txt
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/7.4/www.conf" /tmp/www.conf
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/7.4/php.ini" /tmp/php.ini
+
+              - name: AddOndrejPpa
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add Ondrej PHP PPA ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      add-apt-repository -y ppa:ondrej/php
+                      apt-get update -y
+
+              - name: InstallPhpExtensions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install PHP 7.4 Extensions ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      # Read extensions list, skip comments and blank lines
+                      PACKAGES=$(grep -v '^#' /tmp/php-extensions.txt | grep -v '^\s*$' | tr '\n' ' ')
+                      echo "Installing: $PACKAGES"
+                      # Check availability first (PHP 7.4 is EOL, some may be missing)
+                      INSTALL_LIST=""
+                      for pkg in $PACKAGES; do
+                        if apt-cache show "$pkg" >/dev/null 2>&1; then
+                          INSTALL_LIST="$INSTALL_LIST $pkg"
+                        else
+                          echo "WARNING: Package $pkg not available on PPA, skipping"
+                        fi
+                      done
+                      if [ -n "$INSTALL_LIST" ]; then
+                        apt-get install -y $INSTALL_LIST
+                      fi
+
+              - name: InstallConfigs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install PHP 7.4 Configuration Files ==="
+                      mkdir -p /etc/php/7.4/fpm/pool.d
+                      cp /tmp/www.conf /etc/php/7.4/fpm/pool.d/www.conf
+                      cp /tmp/php.ini /etc/php/7.4/fpm/php.ini
+                      chmod 644 /etc/php/7.4/fpm/pool.d/www.conf
+                      chmod 644 /etc/php/7.4/fpm/php.ini
+
+              - name: InstallComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Composer v2 ==="
+                      cd /tmp
+                      EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+                      php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+                      ACTUAL_CHECKSUM="$(php -r "echo hash_file('"'"'sha384'"'"', '"'"'composer-setup.php'"'"');")"
+                      if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+                        echo "ERROR: Composer installer checksum mismatch"
+                        rm -f composer-setup.php
+                        exit 1
+                      fi
+                      php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+                      rm -f composer-setup.php
+                      composer --version
+
+              - name: InstallDrush
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Drush 11 (PHP 7.4 compatible) ==="
+                      export COMPOSER_ALLOW_SUPERUSER=1
+                      composer global require drush/drush:^11 --no-interaction
+                      ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
+                      drush --version
+
+              - name: ConfigureLogrotate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Configure PHP-FPM 7.4 Logrotate ==="
+                      cat > /etc/logrotate.d/php7.4-fpm <<'LREOF'
+                      /var/log/php7.4-fpm*.log {
+                        daily
+                        missingok
+                        rotate 14
+                        compress
+                        delaycompress
+                        notifempty
+                        create 0640 www-data adm
+                        postrotate
+                          [ -f /run/php/php7.4-fpm.pid ] && kill -USR1 $(cat /run/php/php7.4-fpm.pid)
+                        endscript
+                      }
+                      LREOF
+
+              - name: CreateBootScript
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create Boot Configuration Script ==="
+                      mkdir -p /opt/worxco
+                      cat > /opt/worxco/configure-php.sh <<'BOOTEOF'
+                      #!/bin/bash
+                      # SPDX-License-Identifier: GPL-2.0-or-later
+                      # Copyright (C) 2026 The Worx Company
+                      set -euo pipefail
+                      PHP_VER="7.4"
+                      REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+                      ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "sandbox")
+                      echo "[configure-php] Starting PHP $PHP_VER configuration for $ENV"
+                      FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text)
+                      if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                        echo "[configure-php] Mounting /var/www from $FSX_DNS"
+                        mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                          "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
+                      fi
+                      REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+                      if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
+                        echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
+                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
+                      ; Redis session handler (configured at boot)
+                      session.save_handler = redis
+                      session.save_path = "tcp://$REDIS_ENDPOINT:6379"
+                      REDISEOF
+                      fi
+                      systemctl start php$PHP_VER-fpm
+                      echo "[configure-php] PHP-FPM $PHP_VER started successfully"
+                      BOOTEOF
+                      chmod 755 /opt/worxco/configure-php.sh
+
+              - name: FstabTemplate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add fstab Template ==="
+                      cat >> /etc/fstab <<'FSTABEOF'
+                      # FSx NFS mount (activated at boot by configure-php.sh)
+                      # {fsx_dns}:/fsx /var/www nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+                      FSTABEOF
+
+          - name: test
+            steps:
+              - name: VerifyPhpFpm74
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      ERRORS=0
+                      PHP_VER="7.4"
+                      echo "=== Testing PHP-FPM $PHP_VER Installation ==="
+
+                      echo "--- PHP Version ---"
+                      INSTALLED=$(php -v 2>&1 | head -1)
+                      if echo "$INSTALLED" | grep -q "PHP $PHP_VER"; then
+                        echo "PASS: $INSTALLED"
+                      else
+                        echo "FAIL: Expected PHP $PHP_VER, got: $INSTALLED"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Core Extensions ---"
+                      for ext in bcmath curl gd mbstring xml zip soap opcache apcu mysql pgsql intl; do
+                        if php -m 2>/dev/null | grep -qi "$ext"; then
+                          echo "PASS: $ext loaded"
+                        else
+                          echo "FAIL: $ext not loaded"; ERRORS=$((ERRORS + 1))
+                        fi
+                      done
+
+                      echo "--- Redis Extension ---"
+                      if php -m 2>/dev/null | grep -qi "redis"; then
+                        echo "PASS: Redis extension loaded"
+                      else
+                        echo "FAIL: Redis extension not loaded"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- FPM Pool Config ---"
+                      if [ -f "/etc/php/$PHP_VER/fpm/pool.d/www.conf" ]; then
+                        if grep -q "listen = 0.0.0.0:9000" "/etc/php/$PHP_VER/fpm/pool.d/www.conf"; then
+                          echo "PASS: Listening on port 9000"
+                        else
+                          echo "FAIL: Not configured for port 9000"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: www.conf not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Composer ---"
+                      if composer --version 2>&1 | grep -q "Composer version 2"; then
+                        echo "PASS: Composer v2 installed"
+                      else
+                        echo "FAIL: Composer v2 not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Drush ---"
+                      if drush --version 2>&1 | grep -qi "drush"; then
+                        echo "PASS: Drush installed"
+                      else
+                        echo "FAIL: Drush not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Boot Script ---"
+                      if [ -x /opt/worxco/configure-php.sh ]; then
+                        echo "PASS: configure-php.sh executable"
+                      else
+                        echo "FAIL: configure-php.sh missing"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "=== PHP-FPM $PHP_VER Tests: $ERRORS failures ==="
+                      [ "$ERRORS" -eq 0 ] || exit 1
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Components: PHP-FPM 8.3 Install
+  # ========================================
+
+  PhpFpm83InstallComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-83-install'
+      Description: PHP 8.3 FPM with extensions, Composer, and Drush 13
+      Platform: Linux
+      Version: !Ref RecipeVersion
+      Data: !Sub |
+        name: PhpFpm83Install
+        description: PHP 8.3 FPM with extensions, Composer, and Drush 13
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: DownloadConfigs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Download PHP 8.3 Config Files from S3 ==="
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/8.3/extensions.txt" /tmp/php-extensions.txt
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/8.3/www.conf" /tmp/www.conf
+                      aws s3 cp "s3://${EnvironmentName}-image-builder-${BucketSuffix}/configs/php/8.3/php.ini" /tmp/php.ini
+
+              - name: AddOndrejPpa
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add Ondrej PHP PPA ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      add-apt-repository -y ppa:ondrej/php
+                      apt-get update -y
+
+              - name: InstallPhpExtensions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install PHP 8.3 Extensions ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      PACKAGES=$(grep -v '^#' /tmp/php-extensions.txt | grep -v '^\s*$' | tr '\n' ' ')
+                      echo "Installing: $PACKAGES"
+                      apt-get install -y $PACKAGES
+
+              - name: InstallConfigs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install PHP 8.3 Configuration Files ==="
+                      mkdir -p /etc/php/8.3/fpm/pool.d
+                      cp /tmp/www.conf /etc/php/8.3/fpm/pool.d/www.conf
+                      cp /tmp/php.ini /etc/php/8.3/fpm/php.ini
+                      chmod 644 /etc/php/8.3/fpm/pool.d/www.conf
+                      chmod 644 /etc/php/8.3/fpm/php.ini
+
+              - name: InstallComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Composer v2 ==="
+                      cd /tmp
+                      EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+                      php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+                      ACTUAL_CHECKSUM="$(php -r "echo hash_file('"'"'sha384'"'"', '"'"'composer-setup.php'"'"');")"
+                      if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+                        echo "ERROR: Composer installer checksum mismatch"
+                        rm -f composer-setup.php
+                        exit 1
+                      fi
+                      php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+                      rm -f composer-setup.php
+                      composer --version
+
+              - name: InstallDrush
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Drush 13 (PHP 8.3 compatible) ==="
+                      export COMPOSER_ALLOW_SUPERUSER=1
+                      composer global require drush/drush:^13 --no-interaction
+                      ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
+                      drush --version
+
+              - name: ConfigureLogrotate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Configure PHP-FPM 8.3 Logrotate ==="
+                      cat > /etc/logrotate.d/php8.3-fpm <<'LREOF'
+                      /var/log/php8.3-fpm*.log {
+                        daily
+                        missingok
+                        rotate 14
+                        compress
+                        delaycompress
+                        notifempty
+                        create 0640 www-data adm
+                        postrotate
+                          [ -f /run/php/php8.3-fpm.pid ] && kill -USR1 $(cat /run/php/php8.3-fpm.pid)
+                        endscript
+                      }
+                      LREOF
+
+              - name: CreateBootScript
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Create Boot Configuration Script ==="
+                      mkdir -p /opt/worxco
+                      cat > /opt/worxco/configure-php.sh <<'BOOTEOF'
+                      #!/bin/bash
+                      # SPDX-License-Identifier: GPL-2.0-or-later
+                      # Copyright (C) 2026 The Worx Company
+                      set -euo pipefail
+                      PHP_VER="8.3"
+                      REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+                      ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "sandbox")
+                      echo "[configure-php] Starting PHP $PHP_VER configuration for $ENV"
+                      FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
+                        --query 'Parameter.Value' --output text)
+                      if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
+                        echo "[configure-php] Mounting /var/www from $FSX_DNS"
+                        mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                          "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
+                      fi
+                      REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+                        --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+                      if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
+                        echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
+                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
+                      ; Redis session handler (configured at boot)
+                      session.save_handler = redis
+                      session.save_path = "tcp://$REDIS_ENDPOINT:6379"
+                      REDISEOF
+                      fi
+                      systemctl start php$PHP_VER-fpm
+                      echo "[configure-php] PHP-FPM $PHP_VER started successfully"
+                      BOOTEOF
+                      chmod 755 /opt/worxco/configure-php.sh
+
+              - name: FstabTemplate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Add fstab Template ==="
+                      cat >> /etc/fstab <<'FSTABEOF'
+                      # FSx NFS mount (activated at boot by configure-php.sh)
+                      # {fsx_dns}:/fsx /var/www nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+                      FSTABEOF
+
+          - name: test
+            steps:
+              - name: VerifyPhpFpm83
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      ERRORS=0
+                      PHP_VER="8.3"
+                      echo "=== Testing PHP-FPM $PHP_VER Installation ==="
+
+                      echo "--- PHP Version ---"
+                      INSTALLED=$(php -v 2>&1 | head -1)
+                      if echo "$INSTALLED" | grep -q "PHP $PHP_VER"; then
+                        echo "PASS: $INSTALLED"
+                      else
+                        echo "FAIL: Expected PHP $PHP_VER, got: $INSTALLED"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Core Extensions ---"
+                      for ext in bcmath curl gd mbstring xml zip soap opcache apcu mysql pgsql intl igbinary; do
+                        if php -m 2>/dev/null | grep -qi "$ext"; then
+                          echo "PASS: $ext loaded"
+                        else
+                          echo "FAIL: $ext not loaded"; ERRORS=$((ERRORS + 1))
+                        fi
+                      done
+
+                      echo "--- Redis Extension ---"
+                      if php -m 2>/dev/null | grep -qi "redis"; then
+                        echo "PASS: Redis extension loaded"
+                      else
+                        echo "FAIL: Redis extension not loaded"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- FPM Pool Config ---"
+                      if [ -f "/etc/php/$PHP_VER/fpm/pool.d/www.conf" ]; then
+                        if grep -q "listen = 0.0.0.0:9000" "/etc/php/$PHP_VER/fpm/pool.d/www.conf"; then
+                          echo "PASS: Listening on port 9000"
+                        else
+                          echo "FAIL: Not configured for port 9000"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: www.conf not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Composer ---"
+                      if composer --version 2>&1 | grep -q "Composer version 2"; then
+                        echo "PASS: Composer v2 installed"
+                      else
+                        echo "FAIL: Composer v2 not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Drush ---"
+                      if drush --version 2>&1 | grep -qi "drush"; then
+                        echo "PASS: Drush installed"
+                      else
+                        echo "FAIL: Drush not found"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Boot Script ---"
+                      if [ -x /opt/worxco/configure-php.sh ]; then
+                        echo "PASS: configure-php.sh executable"
+                      else
+                        echo "FAIL: configure-php.sh missing"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "=== PHP-FPM $PHP_VER Tests: $ERRORS failures ==="
+                      [ "$ERRORS" -eq 0 ] || exit 1
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Image Recipes
+  # ========================================
+
+  NginxImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub '${EnvironmentName}-nginx-recipe'
+      Description: NGINX reverse proxy AMI recipe
+      Version: !Ref RecipeVersion
+      ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-24-lts-arm64/x.x.x'
+      Components:
+        - ComponentArn: !Ref BaseHardeningComponent
+        - ComponentArn: !Ref NginxInstallComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: nginx
+
+  PhpFpm74ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-74-recipe'
+      Description: PHP 7.4 FPM AMI recipe
+      Version: !Ref RecipeVersion
+      ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-24-lts-arm64/x.x.x'
+      Components:
+        - ComponentArn: !Ref BaseHardeningComponent
+        - ComponentArn: !Ref PhpFpm74InstallComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: php-fpm-74
+
+  PhpFpm83ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-83-recipe'
+      Description: PHP 8.3 FPM AMI recipe
+      Version: !Ref RecipeVersion
+      ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/ubuntu-server-24-lts-arm64/x.x.x'
+      Components:
+        - ComponentArn: !Ref BaseHardeningComponent
+        - ComponentArn: !Ref PhpFpm83InstallComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: php-fpm-83
+
+  # ========================================
+  # Pipelines
+  # ========================================
+
+  NginxPipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Sub '${EnvironmentName}-nginx-pipeline'
+      Description: Builds NGINX reverse proxy AMI
+      ImageRecipeArn: !Ref NginxImageRecipe
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+      DistributionConfigurationArn: !Ref DistributionConfiguration
+      Status: ENABLED
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+      Schedule: !If
+        - HasSchedule
+        - ScheduleExpression: !Ref PipelineSchedule
+          PipelineExecutionStartCondition: EXPRESSION_MATCH_ONLY
+        - !Ref 'AWS::NoValue'
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: nginx
+
+  PhpFpm74Pipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-74-pipeline'
+      Description: Builds PHP 7.4 FPM AMI
+      ImageRecipeArn: !Ref PhpFpm74ImageRecipe
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+      DistributionConfigurationArn: !Ref DistributionConfiguration
+      Status: ENABLED
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+      Schedule: !If
+        - HasSchedule
+        - ScheduleExpression: !Ref PipelineSchedule
+          PipelineExecutionStartCondition: EXPRESSION_MATCH_ONLY
+        - !Ref 'AWS::NoValue'
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: php-fpm-74
+
+  PhpFpm83Pipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Sub '${EnvironmentName}-php-fpm-83-pipeline'
+      Description: Builds PHP 8.3 FPM AMI
+      ImageRecipeArn: !Ref PhpFpm83ImageRecipe
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+      DistributionConfigurationArn: !Ref DistributionConfiguration
+      Status: ENABLED
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+      Schedule: !If
+        - HasSchedule
+        - ScheduleExpression: !Ref PipelineSchedule
+          PipelineExecutionStartCondition: EXPRESSION_MATCH_ONLY
+        - !Ref 'AWS::NoValue'
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: php-fpm-83
+
+Outputs:
+  NginxPipelineArn:
+    Description: ARN of NGINX Image Builder pipeline
+    Value: !Ref NginxPipeline
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-pipeline-arn'
+
+  PhpFpm74PipelineArn:
+    Description: ARN of PHP 7.4 FPM Image Builder pipeline
+    Value: !Ref PhpFpm74Pipeline
+    Export:
+      Name: !Sub '${EnvironmentName}-php-fpm-74-pipeline-arn'
+
+  PhpFpm83PipelineArn:
+    Description: ARN of PHP 8.3 FPM Image Builder pipeline
+    Value: !Ref PhpFpm83Pipeline
+    Export:
+      Name: !Sub '${EnvironmentName}-php-fpm-83-pipeline-arn'
+
+  BuildSecurityGroupId:
+    Description: Security group ID for Image Builder build instances
+    Value: !Ref BuildSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-image-builder-sg-id'
+
+  InfrastructureConfigurationArn:
+    Description: ARN of Image Builder infrastructure configuration
+    Value: !Ref InfrastructureConfiguration
+    Export:
+      Name: !Sub '${EnvironmentName}-image-builder-infra-config-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
