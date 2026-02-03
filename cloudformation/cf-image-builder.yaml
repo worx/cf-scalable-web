@@ -724,6 +724,18 @@ Resources:
                       chmod 644 /etc/php/7.4/fpm/pool.d/www.conf
                       chmod 644 /etc/php/7.4/fpm/php.ini
 
+              - name: SetDefaultPhpVersion
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Set PHP 7.4 as default CLI version ==="
+                      update-alternatives --set php /usr/bin/php7.4
+                      update-alternatives --set phpize /usr/bin/phpize7.4 2>/dev/null || true
+                      update-alternatives --set php-config /usr/bin/php-config7.4 2>/dev/null || true
+                      echo "Default PHP: $(php -v | head -1)"
+
               - name: ConfigureLogrotate
                 action: ExecuteBash
                 inputs:
@@ -922,6 +934,18 @@ Resources:
                       chmod 644 /etc/php/8.3/fpm/pool.d/www.conf
                       chmod 644 /etc/php/8.3/fpm/php.ini
 
+              - name: SetDefaultPhpVersion
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Set PHP 8.3 as default CLI version ==="
+                      update-alternatives --set php /usr/bin/php8.3
+                      update-alternatives --set phpize /usr/bin/phpize8.3 2>/dev/null || true
+                      update-alternatives --set php-config /usr/bin/php-config8.3 2>/dev/null || true
+                      echo "Default PHP: $(php -v | head -1)"
+
               - name: ConfigureLogrotate
                 action: ExecuteBash
                 inputs:
@@ -1093,7 +1117,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 20
+            VolumeSize: 8
             VolumeType: gp3
             Encrypted: true
             DeleteOnTermination: true
@@ -1114,7 +1138,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 20
+            VolumeSize: 8
             VolumeType: gp3
             Encrypted: true
             DeleteOnTermination: true
