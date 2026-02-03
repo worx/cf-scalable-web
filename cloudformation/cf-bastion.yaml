@@ -96,7 +96,7 @@ Resources:
           Value: !Sub '${AWS::StackName}-sg'
 
   # ========================================
-  # IAM Role for SSM Session Manager
+  # IAM Role (Admin + SSM)
   # ========================================
 
   BastionRole:
@@ -113,8 +113,10 @@ Resources:
       ManagedPolicyArns:
         # SSM Session Manager access
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        # CloudFormation deployments (admin-like for infra management)
-        - arn:aws:iam::aws:policy/PowerUserAccess
+        # Full infrastructure management (PowerUserAccess excludes IAM
+        # operations, but this bastion must create IAM roles/policies
+        # for the compute and storage stacks it deploys)
+        - arn:aws:iam::aws:policy/AdministratorAccess
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-role'
