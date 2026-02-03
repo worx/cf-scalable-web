@@ -5,8 +5,8 @@
 # EC2 Image Builder Component: PHP-FPM Test
 #
 # Purpose: Verify PHP-FPM install component completed correctly.
-#          Tests PHP version, extensions, FPM service, Composer,
-#          Drush, and port 9000 configuration.
+#          Tests PHP version, extensions, FPM service, and port 9000
+#          configuration.
 #
 # Canonical source: cloudformation/cf-image-builder.yaml (TestPhpComponent)
 # This file is a reference copy for documentation purposes.
@@ -79,22 +79,6 @@ phases:
                 fi
               else
                 echo "FAIL: www.conf not found"
-                ERRORS=$((ERRORS + 1))
-              fi
-
-              echo "--- Composer ---"
-              if composer --version 2>&1 | grep -q "Composer version 2"; then
-                echo "PASS: Composer v2 installed"
-              else
-                echo "FAIL: Composer v2 not found"
-                ERRORS=$((ERRORS + 1))
-              fi
-
-              echo "--- Drush ---"
-              if drush --version 2>&1 | grep -qi "drush"; then
-                echo "PASS: Drush installed"
-              else
-                echo "FAIL: Drush not found"
                 ERRORS=$((ERRORS + 1))
               fi
 

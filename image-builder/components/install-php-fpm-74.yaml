@@ -5,7 +5,7 @@
 # EC2 Image Builder Component: PHP-FPM 7.4 Install
 #
 # Purpose: Install PHP 7.4 FPM with extensions from Ondrej PPA,
-#          Composer v2, Drush 11, logrotate, and boot script.
+#          logrotate, and boot script.
 #
 # Canonical source: cloudformation/cf-image-builder.yaml (PhpFpm74InstallComponent)
 # This file is a reference copy for documentation purposes.
@@ -16,7 +16,7 @@
 #
 
 name: PhpFpm74Install
-description: PHP 7.4 FPM with extensions, Composer, and Drush 11
+description: PHP 7.4 FPM with extensions
 schemaVersion: 1.0
 phases:
   - name: build
@@ -98,37 +98,6 @@ phases:
             permissions: 0644
           - path: /etc/php/7.4/fpm/php.ini
             permissions: 0644
-
-      - name: InstallComposer
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -euo pipefail
-              echo "=== Install Composer v2 ==="
-              cd /tmp
-              EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-              php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-              ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
-              if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-                echo "ERROR: Composer installer checksum mismatch"
-                rm -f composer-setup.php
-                exit 1
-              fi
-              php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-              rm -f composer-setup.php
-              composer --version
-
-      - name: InstallDrush
-        action: ExecuteBash
-        inputs:
-          commands:
-            - |
-              set -euo pipefail
-              echo "=== Install Drush 11 (PHP 7.4 compatible) ==="
-              composer global require drush/drush:^11 --no-interaction
-              ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
-              drush --version
 
       - name: ConfigureLogrotate
         action: ExecuteBash

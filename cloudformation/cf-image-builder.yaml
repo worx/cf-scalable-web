@@ -10,8 +10,8 @@
 #
 # Pipelines:
 #   - NGINX AMI (reverse proxy + CertBot + NFS client + shared config mount)
-#   - PHP 7.4 FPM AMI (Ondrej PPA + Composer + Drush 11)
-#   - PHP 8.3 FPM AMI (Ondrej PPA + Composer + Drush 13)
+#   - PHP 7.4 FPM AMI (Ondrej PPA + extensions)
+#   - PHP 8.3 FPM AMI (Ondrej PPA + extensions)
 #
 # Build Environment:
 #   Builds run in the default VPC (free internet, no NAT cost).
@@ -655,12 +655,12 @@ Resources:
     Type: AWS::ImageBuilder::Component
     Properties:
       Name: !Sub '${EnvironmentName}-php-fpm-74-install'
-      Description: PHP 7.4 FPM with extensions, Composer, and Drush 11
+      Description: PHP 7.4 FPM with extensions
       Platform: Linux
       Version: !Ref RecipeVersion
       Data: !Sub |
         name: PhpFpm74Install
-        description: PHP 7.4 FPM with extensions, Composer, and Drush 11
+        description: PHP 7.4 FPM with extensions
         schemaVersion: 1.0
         phases:
           - name: build
@@ -723,38 +723,6 @@ Resources:
                       cp /tmp/php.ini /etc/php/7.4/fpm/php.ini
                       chmod 644 /etc/php/7.4/fpm/pool.d/www.conf
                       chmod 644 /etc/php/7.4/fpm/php.ini
-
-              - name: InstallComposer
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - |
-                      set -euo pipefail
-                      echo "=== Install Composer v2 ==="
-                      cd /tmp
-                      EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-                      php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-                      ACTUAL_CHECKSUM="$(php -r "echo hash_file('"'"'sha384'"'"', '"'"'composer-setup.php'"'"');")"
-                      if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-                        echo "ERROR: Composer installer checksum mismatch"
-                        rm -f composer-setup.php
-                        exit 1
-                      fi
-                      php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-                      rm -f composer-setup.php
-                      composer --version
-
-              - name: InstallDrush
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - |
-                      set -euo pipefail
-                      echo "=== Install Drush 11 (PHP 7.4 compatible) ==="
-                      export COMPOSER_ALLOW_SUPERUSER=1
-                      composer global require drush/drush:^11 --no-interaction
-                      ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
-                      drush --version
 
               - name: ConfigureLogrotate
                 action: ExecuteBash
@@ -877,20 +845,6 @@ Resources:
                         echo "FAIL: www.conf not found"; ERRORS=$((ERRORS + 1))
                       fi
 
-                      echo "--- Composer ---"
-                      if composer --version 2>&1 | grep -q "Composer version 2"; then
-                        echo "PASS: Composer v2 installed"
-                      else
-                        echo "FAIL: Composer v2 not found"; ERRORS=$((ERRORS + 1))
-                      fi
-
-                      echo "--- Drush ---"
-                      if drush --version 2>&1 | grep -qi "drush"; then
-                        echo "PASS: Drush installed"
-                      else
-                        echo "FAIL: Drush not found"; ERRORS=$((ERRORS + 1))
-                      fi
-
                       echo "--- Boot Script ---"
                       if [ -x /opt/worxco/configure-php.sh ]; then
                         echo "PASS: configure-php.sh executable"
@@ -911,12 +865,12 @@ Resources:
     Type: AWS::ImageBuilder::Component
     Properties:
       Name: !Sub '${EnvironmentName}-php-fpm-83-install'
-      Description: PHP 8.3 FPM with extensions, Composer, and Drush 13
+      Description: PHP 8.3 FPM with extensions
       Platform: Linux
       Version: !Ref RecipeVersion
       Data: !Sub |
         name: PhpFpm83Install
-        description: PHP 8.3 FPM with extensions, Composer, and Drush 13
+        description: PHP 8.3 FPM with extensions
         schemaVersion: 1.0
         phases:
           - name: build
@@ -967,38 +921,6 @@ Resources:
                       cp /tmp/php.ini /etc/php/8.3/fpm/php.ini
                       chmod 644 /etc/php/8.3/fpm/pool.d/www.conf
                       chmod 644 /etc/php/8.3/fpm/php.ini
-
-              - name: InstallComposer
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - |
-                      set -euo pipefail
-                      echo "=== Install Composer v2 ==="
-                      cd /tmp
-                      EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-                      php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-                      ACTUAL_CHECKSUM="$(php -r "echo hash_file('"'"'sha384'"'"', '"'"'composer-setup.php'"'"');")"
-                      if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-                        echo "ERROR: Composer installer checksum mismatch"
-                        rm -f composer-setup.php
-                        exit 1
-                      fi
-                      php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-                      rm -f composer-setup.php
-                      composer --version
-
-              - name: InstallDrush
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - |
-                      set -euo pipefail
-                      echo "=== Install Drush 13 (PHP 8.3 compatible) ==="
-                      export COMPOSER_ALLOW_SUPERUSER=1
-                      composer global require drush/drush:^13 --no-interaction
-                      ln -sf /root/.config/composer/vendor/bin/drush /usr/local/bin/drush
-                      drush --version
 
               - name: ConfigureLogrotate
                 action: ExecuteBash
@@ -1119,20 +1041,6 @@ Resources:
                         fi
                       else
                         echo "FAIL: www.conf not found"; ERRORS=$((ERRORS + 1))
-                      fi
-
-                      echo "--- Composer ---"
-                      if composer --version 2>&1 | grep -q "Composer version 2"; then
-                        echo "PASS: Composer v2 installed"
-                      else
-                        echo "FAIL: Composer v2 not found"; ERRORS=$((ERRORS + 1))
-                      fi
-
-                      echo "--- Drush ---"
-                      if drush --version 2>&1 | grep -qi "drush"; then
-                        echo "PASS: Drush installed"
-                      else
-                        echo "FAIL: Drush not found"; ERRORS=$((ERRORS + 1))
                       fi
 
                       echo "--- Boot Script ---"
