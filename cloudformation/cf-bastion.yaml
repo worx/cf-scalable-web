@@ -10,10 +10,10 @@
 #
 # Features:
 #   - Uses default VPC (survives project VPC teardowns)
-#   - Ubuntu 24.04 LTS on ARM (t4g.nano)
+#   - Ubuntu 24.04 LTS on ARM (t4g.micro, 1GB RAM + 2GB swap)
 #   - SSH access restricted to specified CIDR
 #   - SSM Session Manager for backup access
-#   - Elastic IP for stable addressing
+#   - Dynamic public IP (no EIP cost when stopped)
 #   - Optional key pair creation (stored in SSM Parameter Store)
 #   - Pre-installed: AWS CLI, git, make, screen, tmux, vim, Claude Code
 #
@@ -43,7 +43,7 @@ Parameters:
   InstanceType:
     Type: String
     Description: EC2 instance type
-    Default: t4g.nano
+    Default: t4g.micro
     AllowedValues:
       - t4g.nano
       - t4g.micro
@@ -127,18 +127,6 @@ Resources:
         - !Ref BastionRole
 
   # ========================================
-  # Elastic IP
-  # ========================================
-
-  BastionEIP:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-eip'
-
-  # ========================================
   # EC2 Instance
   # ========================================
 
@@ -168,6 +156,16 @@ Resources:
           exec > >(tee /var/log/bastion-bootstrap.log) 2>&1
 
           echo "=== Bastion Bootstrap Starting $(date) ==="
+
+          # Create 2GB swap (supplements t4g.micro's 1GB RAM)
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          sysctl vm.swappiness=10
+          echo 'vm.swappiness=10' >> /etc/sysctl.conf
+          echo "Swap enabled: $(swapon --show) (swappiness=10)"
 
           # System updates
           export DEBIAN_FRONTEND=noninteractive
@@ -259,10 +257,12 @@ Resources:
           echo "  cd ~/projects"
           echo "  git clone <your-repo>"
           echo "  cd cf-scalable-web"
+          echo "  cp .env.example .env        # <-- required before make"
           echo "  screen -S deploy"
           echo "  make deploy-all ENV=sandbox"
           echo "  # Ctrl-A D to detach"
           echo ""
+          echo "AWS: Instance role provides credentials (no ~/.aws/ needed)"
           echo "Installed: aws, git, make, screen, tmux, vim, claude"
           echo ""
           MOTDEOF
@@ -277,22 +277,10 @@ Resources:
         - Key: Purpose
           Value: Infrastructure management bastion
 
-  # ========================================
-  # EIP Association
-  # ========================================
-
-  BastionEIPAssociation:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      AllocationId: !GetAtt BastionEIP.AllocationId
-      InstanceId: !Ref BastionInstance
-
 Outputs:
   BastionPublicIP:
-    Description: Bastion Elastic IP address
-    Value: !Ref BastionEIP
-    Export:
-      Name: !Sub '${AWS::StackName}-ip'
+    Description: Bastion public IP (dynamic, changes on stop/start - use verify-bastion)
+    Value: !GetAtt BastionInstance.PublicIp
 
   BastionInstanceId:
     Description: Bastion EC2 instance ID
@@ -301,8 +289,8 @@ Outputs:
       Name: !Sub '${AWS::StackName}-instance-id'
 
   SSHCommand:
-    Description: SSH command to connect
-    Value: !Sub 'ssh -i ~/.ssh/bastion.pem ubuntu@${BastionEIP}'
+    Description: SSH command to connect (IP changes on stop/start - use verify-bastion)
+    Value: !Sub 'ssh -i ~/.ssh/bastion.pem ubuntu@${BastionInstance.PublicIp}'
 
   SSMCommand:
     Description: SSM Session Manager command (no SSH key needed)

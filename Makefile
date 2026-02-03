@@ -15,7 +15,7 @@
 #   make show-params ENV=sandbox    Show parameters for environment
 #   make status ENV=sandbox         Show all stack statuses
 #
-include .env
+-include .env
 export
 
 .PHONY: help env-check validate show-params status \
@@ -88,6 +88,11 @@ NC := \033[0m
 env-check:  ## Display current AWS environment variables
 	@echo "$(BLUE)AWS Environment Check$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
+	@if [ ! -f .env ]; then \
+		echo "  $(YELLOW).env file:       missing (run: cp .env.example .env)$(NC)"; \
+	else \
+		echo "  $(GREEN).env file:       loaded$(NC)"; \
+	fi
 	@echo "  AWS_PROFILE:         $(CYAN)$${AWS_PROFILE:-<not set>}$(NC)"
 	@echo "  AWS_REGION:          $(CYAN)$${AWS_REGION:-$(AWS_REGION)}$(NC)"
 	@echo "  AWS_PAGER:           $(CYAN)$${AWS_PAGER:-<not set>}$(NC)"
@@ -97,12 +102,9 @@ env-check:  ## Display current AWS environment variables
 	@echo "  PARAM_FILE:          $(CYAN)$(PARAM_FILE)$(NC)"
 	@echo "  STACK_PREFIX:        $(CYAN)$(STACK_PREFIX)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@if [ -n "$${AWS_PROFILE}" ]; then \
-		echo "$(BLUE)Verifying credentials...$(NC)"; \
-		aws sts get-caller-identity --output table 2>/dev/null || echo "$(RED)  Failed to get caller identity$(NC)"; \
-	else \
-		echo "$(YELLOW)  AWS_PROFILE not set - skipping credential check$(NC)"; \
-	fi
+	@echo "$(BLUE)Verifying credentials...$(NC)"
+	@aws sts get-caller-identity --output table --region $(AWS_REGION) 2>/dev/null \
+		|| echo "$(RED)  Failed to get caller identity$(NC)"
 
 help:  ## Show this help message
 	@echo "$(BLUE)cf-scalable-web Makefile$(NC)"

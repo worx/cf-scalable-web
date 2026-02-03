@@ -14,6 +14,7 @@
 secrets/
 .env
 .env.*
+!.env.example
 
 # AWS
 .aws/
