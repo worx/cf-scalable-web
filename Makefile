@@ -23,6 +23,7 @@ export
         verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         deploy-bastion verify-bastion destroy-bastion \
+        stop-bastion start-bastion set-bastion-password \
         init-secrets list-secrets test clean consolidate-logs
 
 # -----------------------------------------------------------------------------
@@ -57,6 +58,7 @@ CACHE_STACK := $(STACK_PREFIX)-cache
 BASTION_STACK := cf-bastion
 BASTION_TEMPLATE := cloudformation/cf-bastion.yaml
 BASTION_PARAMS := cloudformation/parameters/bastion.json
+BASTION_SECRET_PATH := worxco/bastion/root-password
 
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
@@ -142,7 +144,17 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Bastion Host:$(NC)"
 	@echo "  make deploy-bastion           Deploy bastion host (standalone)"
 	@echo "  make verify-bastion           Show bastion connection info"
+	@echo "  make stop-bastion             Stop bastion (EIP persists)"
+	@echo "  make start-bastion            Start bastion instance"
+	@echo "  make set-bastion-password     Set root password in Secrets Manager"
 	@echo "  make destroy-bastion          Delete bastion host"
+	@echo ""
+	@echo "$(CYAN)SSM Plugin (for 'aws ssm start-session'):$(NC)"
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "  brew install --cask session-manager-plugin"; \
+	else \
+		echo "  See: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"; \
+	fi
 	@echo ""
 	@echo "$(YELLOW)Secrets Management:$(NC)"
 	@echo "  make init-secrets             Initialize required secrets"
@@ -597,6 +609,113 @@ destroy-bastion:  ## Delete bastion host
 		--stack-name $(BASTION_STACK) \
 		--region $(AWS_REGION)
 	@echo "$(GREEN)✓ Bastion deleted$(NC)"
+
+stop-bastion:  ## Stop bastion instance (EIP persists)
+	@echo "$(BLUE)Stopping bastion instance...$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@INSTANCE_ID=$$(aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+			"Name=instance-state-name,Values=pending,running,stopping,stopped" \
+		--query 'Reservations[].Instances[0].InstanceId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
+		echo "$(RED)Error: Bastion instance not found$(NC)"; \
+		exit 1; \
+	fi; \
+	CURRENT_STATE=$$(aws ec2 describe-instances \
+		--instance-ids "$$INSTANCE_ID" \
+		--query 'Reservations[].Instances[0].State.Name' \
+		--output text \
+		--region $(AWS_REGION)); \
+	echo "  Instance: $(CYAN)$$INSTANCE_ID$(NC)"; \
+	echo "  Current state: $(CYAN)$$CURRENT_STATE$(NC)"; \
+	if [ "$$CURRENT_STATE" = "stopped" ]; then \
+		echo "$(YELLOW)Instance is already stopped$(NC)"; \
+		exit 0; \
+	fi; \
+	echo ""; \
+	aws ec2 stop-instances \
+		--instance-ids "$$INSTANCE_ID" \
+		--region $(AWS_REGION) \
+		--output json | jq -r '.StoppingInstances[0].CurrentState.Name'; \
+	echo "$(BLUE)Waiting for instance to stop...$(NC)"; \
+	aws ec2 wait instance-stopped \
+		--instance-ids "$$INSTANCE_ID" \
+		--region $(AWS_REGION); \
+	echo "$(GREEN)✓ Bastion stopped (EIP remains associated)$(NC)"
+
+start-bastion:  ## Start bastion instance
+	@echo "$(BLUE)Starting bastion instance...$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@INSTANCE_ID=$$(aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+			"Name=instance-state-name,Values=pending,running,stopping,stopped" \
+		--query 'Reservations[].Instances[0].InstanceId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
+		echo "$(RED)Error: Bastion instance not found$(NC)"; \
+		exit 1; \
+	fi; \
+	CURRENT_STATE=$$(aws ec2 describe-instances \
+		--instance-ids "$$INSTANCE_ID" \
+		--query 'Reservations[].Instances[0].State.Name' \
+		--output text \
+		--region $(AWS_REGION)); \
+	echo "  Instance: $(CYAN)$$INSTANCE_ID$(NC)"; \
+	echo "  Current state: $(CYAN)$$CURRENT_STATE$(NC)"; \
+	if [ "$$CURRENT_STATE" = "running" ]; then \
+		echo "$(YELLOW)Instance is already running$(NC)"; \
+		exit 0; \
+	fi; \
+	echo ""; \
+	aws ec2 start-instances \
+		--instance-ids "$$INSTANCE_ID" \
+		--region $(AWS_REGION) \
+		--output json | jq -r '.StartingInstances[0].CurrentState.Name'; \
+	echo "$(BLUE)Waiting for instance to start...$(NC)"; \
+	aws ec2 wait instance-running \
+		--instance-ids "$$INSTANCE_ID" \
+		--region $(AWS_REGION); \
+	echo "$(GREEN)✓ Bastion started$(NC)"
+	@echo ""
+	@$(MAKE) verify-bastion
+
+set-bastion-password:  ## Set root password for bastion in Secrets Manager
+	@echo "$(BLUE)Set Bastion Root Password$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "This password will be applied on next bastion deploy."
+	@echo ""
+	@read -s -p "Enter root password: " PASS1; echo ""; \
+	read -s -p "Confirm root password: " PASS2; echo ""; \
+	if [ "$$PASS1" != "$$PASS2" ]; then \
+		echo "$(RED)Error: Passwords do not match$(NC)"; \
+		exit 1; \
+	fi; \
+	if [ -z "$$PASS1" ]; then \
+		echo "$(RED)Error: Password cannot be empty$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(BLUE)Storing password in Secrets Manager...$(NC)"; \
+	if aws secretsmanager describe-secret \
+		--secret-id "$(BASTION_SECRET_PATH)" \
+		--region $(AWS_REGION) >/dev/null 2>&1; then \
+		aws secretsmanager put-secret-value \
+			--secret-id "$(BASTION_SECRET_PATH)" \
+			--secret-string "$$PASS1" \
+			--region $(AWS_REGION) >/dev/null; \
+		echo "$(GREEN)✓ Password updated in Secrets Manager$(NC)"; \
+	else \
+		aws secretsmanager create-secret \
+			--name "$(BASTION_SECRET_PATH)" \
+			--description "Root password for bastion host" \
+			--secret-string "$$PASS1" \
+			--region $(AWS_REGION) >/dev/null; \
+		echo "$(GREEN)✓ Password created in Secrets Manager$(NC)"; \
+	fi; \
+	echo "  Secret: $(CYAN)$(BASTION_SECRET_PATH)$(NC)"; \
+	echo "  $(YELLOW)Note: Password applies on next deploy-bastion (UserData runs on first boot only)$(NC)"
 
 # -----------------------------------------------------------------------------
 # Secrets Management

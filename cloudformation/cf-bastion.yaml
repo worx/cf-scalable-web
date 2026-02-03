@@ -210,6 +210,21 @@ Resources:
           ./aws/install
           rm -rf aws awscliv2.zip
 
+          # Root password from Secrets Manager (optional, non-fatal)
+          echo "=== Setting root password from Secrets Manager ==="
+          ROOT_PASS=$(aws secretsmanager get-secret-value \
+            --secret-id "worxco/bastion/root-password" \
+            --region us-east-1 \
+            --query 'SecretString' \
+            --output text 2>/dev/null) || true
+          if [ -n "$ROOT_PASS" ]; then
+            echo "root:$ROOT_PASS" | chpasswd
+            echo "Root password set from Secrets Manager"
+            unset ROOT_PASS
+          else
+            echo "WARNING: worxco/bastion/root-password not found in Secrets Manager - skipping"
+          fi
+
           # cfn-lint for template validation (venv avoids system package conflicts
           # and keeps memory usage low on t4g.nano's 512MB)
           python3 -m venv /opt/cfn-lint --system-site-packages
