@@ -101,8 +101,7 @@ Resources:
     Properties:
       Name: !Sub '${EnvironmentName}-infra-config'
       Description: !Sub 'Build infrastructure for ${EnvironmentName} AMIs'
-      InstanceProfileName:
-        Fn::ImportValue: !Sub '${EnvironmentName}-image-builder-instance-profile-arn'
+      InstanceProfileName: !Sub '${EnvironmentName}-image-builder-instance-profile'
       InstanceTypes:
         - !Ref BuildInstanceType
       SubnetId: !Ref BuildSubnetId
