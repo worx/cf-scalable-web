@@ -795,9 +795,20 @@ deploy-image-builder:  ## Deploy Image Builder stack (depends on IAM + Storage)
 		echo "Create it from the sandbox template and fill in BuildSubnetId"; \
 		exit 1; \
 	fi
-	@time aws cloudformation deploy \
+	@BUCKET=$$(aws ssm get-parameter \
+		--name "/$(ENV)/s3/image-builder-bucket" \
+		--query "Parameter.Value" --output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$BUCKET" ] || [ "$$BUCKET" = "None" ]; then \
+		echo "$(RED)Error: Image builder bucket not found in SSM (deploy storage stack first)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  Using S3 bucket for template: $(CYAN)$$BUCKET$(NC)"; \
+	time aws cloudformation deploy \
 		--template-file $(IMAGE_BUILDER_TEMPLATE) \
 		--stack-name $(IMAGE_BUILDER_STACK) \
+		--s3-bucket "$$BUCKET" \
+		--s3-prefix "cloudformation" \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(IMAGE_BUILDER_PARAMS)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
