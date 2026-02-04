@@ -27,5 +27,5 @@ php8.3-readline
 php8.3-sqlite3
 php8.3-yaml
 php8.3-dev
-php-redis
-php-ssh2
+php8.3-redis
+php8.3-ssh2

@@ -29,5 +29,5 @@ php7.4-imagick
 php7.4-imap
 php7.4-json
 php7.4-dev
-php-redis
-php-ssh2
+php7.4-redis
+php7.4-ssh2
