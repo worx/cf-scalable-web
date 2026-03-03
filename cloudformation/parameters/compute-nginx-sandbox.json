@@ -1,0 +1,13 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "NginxInstanceType": "t4g.micro",
+    "NginxMinInstances": "2",
+    "NginxMaxInstances": "4",
+    "NginxVolumeSize": "20",
+    "CPUScaleOutThreshold": "60",
+    "CPUScaleInThreshold": "30",
+    "RequestScaleOutThreshold": "1000",
+    "RequestScaleInThreshold": "500"
+  }
+}

@@ -1,0 +1,219 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Application Load Balancer (Compute Layer)
+#
+# Purpose: Creates the public-facing ALB, NGINX target group, HTTP/HTTPS listeners,
+#          and the /environment/name SSM parameter used by all boot scripts.
+#
+# Architecture:
+#   - Internet-facing ALB in public subnets
+#   - HTTP listener redirects to HTTPS (301)
+#   - HTTPS listener forwards to NGINX target group (conditional on ACM cert)
+#   - SSM Parameter /environment/name for boot script environment discovery
+#
+# Dependencies: cf-vpc.yaml (subnets, security groups, VPC ID)
+#
+# Outputs: ALB ARN, DNS name, Hosted Zone ID, NGINX Target Group ARN
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Application Load Balancer for scalable web infrastructure'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "ALB Configuration"
+        Parameters:
+          - ALBIdleTimeout
+          - HealthCheckPath
+          - HealthCheckInterval
+          - ACMCertificateArn
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  ALBIdleTimeout:
+    Type: Number
+    Description: Idle timeout for ALB connections (seconds)
+    MinValue: 1
+    MaxValue: 4000
+    Default: 60
+
+  HealthCheckPath:
+    Type: String
+    Description: Health check path for NGINX target group
+    Default: /health
+
+  HealthCheckInterval:
+    Type: Number
+    Description: Health check interval (seconds)
+    MinValue: 5
+    MaxValue: 300
+    Default: 30
+
+  ACMCertificateArn:
+    Type: String
+    Description: ACM certificate ARN for HTTPS listener (empty = HTTP-only for sandbox)
+    Default: ''
+
+Conditions:
+  HasACMCertificate: !Not [!Equals [!Ref ACMCertificateArn, '']]
+
+Resources:
+  # ========================================
+  # SSM Parameter: Environment Name
+  # ========================================
+
+  # Global parameter (not env-prefixed) for boot script environment discovery.
+  # Acceptable since each environment uses a separate AWS account.
+  # Created here because the ALB stack deploys first in the compute layer.
+  EnvironmentNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /environment/name
+      Type: String
+      Value: !Ref EnvironmentName
+      Description: Environment name for boot script discovery
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  # ========================================
+  # Application Load Balancer
+  # ========================================
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${EnvironmentName}-alb'
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-alb-sg-id'
+      Subnets: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-public-subnets'
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: !Ref ALBIdleTimeout
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+        - Key: routing.http2.enabled
+          Value: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-alb'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Target Group
+  # ========================================
+
+  NginxTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${EnvironmentName}-nginx-tg'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-vpc-id'
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: !Ref HealthCheckInterval
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '120'
+      Matcher:
+        HttpCode: '200'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nginx-tg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Listeners
+  # ========================================
+
+  # HTTP listener always redirects to HTTPS
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasACMCertificate
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: '443'
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref NginxTargetGroup
+
+  # HTTPS listener (only when ACM certificate is provided)
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasACMCertificate
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NginxTargetGroup
+
+Outputs:
+  ALBArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub '${EnvironmentName}-alb-arn'
+
+  ALBDnsName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${EnvironmentName}-alb-dns-name'
+
+  ALBHostedZoneId:
+    Description: Hosted zone ID of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${EnvironmentName}-alb-hosted-zone-id'
+
+  NginxTargetGroupArn:
+    Description: ARN of the NGINX target group
+    Value: !Ref NginxTargetGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-target-group-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

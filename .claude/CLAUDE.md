@@ -7,7 +7,7 @@ This project provides a complete CloudFormation-based infrastructure for scalabl
 **Key Features:**
 - Multi-tier VPC architecture (defense in depth)
 - NGINX reverse proxies with SSL termination (CertBot DNS-01)
-- PHP-FPM pools with port-based routing (1074→PHP 7.4, 1083→8.3, etc.)
+- PHP-FPM pools with port-based routing (9074→PHP 7.4, 9083→8.3, etc.)
 - RDS PostgreSQL Multi-AZ, FSx OpenZFS shared storage, ElastiCache Redis
 - Auto-scaling with 7-day instance lifecycle (immutable infrastructure)
 - EC2 Image Builder for automated AMI creation
@@ -73,7 +73,7 @@ tests/                   # Test suite
 3. **Deploy** foundation: `make deploy-vpc deploy-iam deploy-storage`
 4. **Deploy** data layer: `make deploy-database deploy-cache`
 5. **Build** AMIs: `make build-amis`
-6. **Deploy** compute: `make deploy-nginx deploy-php`
+6. **Deploy** compute: `make deploy-compute` (ALB → NLB → NGINX → PHP)
 7. **Health check**: `make health-check`
 
 ### Before Committing

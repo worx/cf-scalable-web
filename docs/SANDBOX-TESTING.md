@@ -89,12 +89,13 @@ make destroy-all ENV=sandbox
 After sequential testing passes, test all stacks together:
 
 ```bash
-# Deploy all stacks in order
+# Deploy all stacks in order (foundation + compute)
 make deploy-all ENV=sandbox
 
 # Verify all stacks
 make status ENV=sandbox
 make verify-vpc ENV=sandbox
+make verify-compute ENV=sandbox
 
 # Destroy all stacks
 make destroy-all ENV=sandbox
@@ -264,6 +265,83 @@ REDIS_AUTH=$(aws secretsmanager get-secret-value --secret-id worxco/sandbox/redi
 redis-cli -h "$REDIS_ENDPOINT" -p "$REDIS_PORT" --tls -a "$REDIS_AUTH" PING
 ```
 
+### Compute Layer (Phase 2)
+
+After Phase 1 stacks are deployed, test the compute layer:
+
+```bash
+# 7. Deploy ALB
+make deploy-compute-alb ENV=sandbox
+make verify-compute-alb ENV=sandbox
+
+# 8. Deploy NLB
+make deploy-compute-nlb ENV=sandbox
+make verify-compute-nlb ENV=sandbox
+
+# 9. Deploy NGINX ASG
+make deploy-compute-nginx ENV=sandbox
+make verify-compute-nginx ENV=sandbox
+
+# 10. Deploy PHP-FPM ASGs
+make deploy-compute-php ENV=sandbox
+make verify-compute-php ENV=sandbox
+```
+
+Or deploy all compute stacks at once:
+```bash
+make deploy-compute ENV=sandbox
+make verify-compute ENV=sandbox
+```
+
+### Compute Stack Verification Checklist
+
+#### ALB (cf-compute-alb.yaml)
+- [ ] ALB created in public subnets (internet-facing)
+- [ ] HTTP listener redirects to HTTPS (301)
+- [ ] HTTPS listener active (if ACM certificate provided)
+- [ ] NGINX target group created with health checks
+- [ ] SSM parameter `/environment/name` created
+- [ ] Exports created for cross-stack references
+
+#### NLB (cf-compute-nlb.yaml)
+- [ ] NLB created in NLB-tier subnets (internal)
+- [ ] TCP listener on port 9074 (PHP 7.4)
+- [ ] TCP listener on port 9083 (PHP 8.3)
+- [ ] PHP74 and PHP83 target groups created
+- [ ] Cross-zone load balancing enabled
+- [ ] SSM parameter `/nlb/endpoint` created
+
+#### NGINX ASG (cf-compute-nginx.yaml)
+- [ ] Launch template uses latest NGINX AMI
+- [ ] IMDSv2 required (HttpTokens: required)
+- [ ] EBS volumes encrypted (gp3)
+- [ ] ASG min/max instances correct (sandbox: 1/2)
+- [ ] MaxInstanceLifetime = 604800 (7 days)
+- [ ] Registered with ALB target group
+- [ ] CPU scaling policy active (>60% out, <30% in)
+- [ ] Request-count scaling policy active
+
+#### PHP-FPM ASG (cf-compute-php.yaml)
+- [ ] PHP 8.3 ASG created (if EnablePHP83=true)
+- [ ] PHP 7.4 ASG created (if EnablePHP74=true)
+- [ ] Each ASG registered with correct NLB target group
+- [ ] MaxInstanceLifetime = 604800 (7 days)
+- [ ] Flow-count scaling policies active
+- [ ] IMDSv2 and EBS encryption enforced
+
+**Port Routing Verification:**
+```bash
+# Verify NLB listeners
+aws elbv2 describe-listeners \
+  --load-balancer-arn $(aws elbv2 describe-load-balancers \
+    --names sandbox-nlb --query 'LoadBalancers[0].LoadBalancerArn' --output text) \
+  --query 'Listeners[].{Port:Port,Protocol:Protocol}' --output table
+
+# Verify SSM parameters
+aws ssm get-parameter --name /environment/name --query 'Parameter.Value' --output text
+aws ssm get-parameter --name /nlb/endpoint --query 'Parameter.Value' --output text
+```
+
 ## Cross-Stack Integration Testing
 
 Verify that stacks reference each other correctly:
@@ -419,11 +497,13 @@ make verify-iam ENV=sandbox
 make verify-storage ENV=sandbox
 make verify-database ENV=sandbox
 make verify-cache ENV=sandbox
+make verify-compute ENV=sandbox
 
 # Check status
 make status ENV=sandbox
 
 # Destroy stacks
+make destroy-compute ENV=sandbox   # PHP → NGINX → NLB → ALB
 make destroy-vpc ENV=sandbox
 make destroy-all ENV=sandbox
 
@@ -465,11 +545,11 @@ Create a log of test results in `PROMPT_LOGS/`:
 
 ## Next Steps
 
-After successful Phase 1 testing:
+After successful testing:
 1. Document any issues found
 2. Create bug fixes if needed
 3. Update templates based on findings
-4. Proceed to Phase 2: Compute Layer (EC2 Image Builder, NGINX, PHP-FPM)
+4. Phase 3: SSL & Routing (CertBot DNS-01, health checks, end-to-end testing)
 
 ---
 

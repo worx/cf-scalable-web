@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Network Load Balancer (Compute Layer)
+#
+# Purpose: Creates the internal NLB with port-based routing to PHP-FPM target groups.
+#          Port 9074 routes to PHP 7.4, port 9083 routes to PHP 8.3.
+#          All target groups forward to PHP-FPM on port 9000.
+#
+# Architecture:
+#   - Internal NLB in NLB-tier private subnets
+#   - TCP listeners on ports 9074 and 9083
+#   - Target groups forward to PHP-FPM on port 9000
+#   - SSM parameter stores NLB DNS name for NGINX upstream configuration
+#
+# Dependencies: cf-vpc.yaml (subnets, security groups, VPC ID)
+#
+# Outputs: NLB ARN, DNS name, PHP 7.4/8.3 Target Group ARNs
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Internal Network Load Balancer with port-based PHP routing'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "NLB Configuration"
+        Parameters:
+          - EnableCrossZoneLoadBalancing
+          - DeregistrationDelay
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  EnableCrossZoneLoadBalancing:
+    Type: String
+    Description: Enable cross-zone load balancing for NLB
+    AllowedValues: [true, false]
+    Default: true
+
+  DeregistrationDelay:
+    Type: Number
+    Description: Deregistration delay for target groups (seconds)
+    MinValue: 0
+    MaxValue: 3600
+    Default: 120
+
+Resources:
+  # ========================================
+  # Network Load Balancer
+  # ========================================
+
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${EnvironmentName}-nlb'
+      Scheme: internal
+      Type: network
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-nlb-sg-id'
+      Subnets: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-nlb-subnets'
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: !Ref EnableCrossZoneLoadBalancing
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nlb'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Target Groups
+  # ========================================
+
+  PHP74TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${EnvironmentName}-php74-tg'
+      Port: 9000
+      Protocol: TCP
+      VpcId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-vpc-id'
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '9000'
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: !Ref DeregistrationDelay
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php74-tg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: PHPVersion
+          Value: '7.4'
+
+  PHP83TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${EnvironmentName}-php83-tg'
+      Port: 9000
+      Protocol: TCP
+      VpcId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-vpc-id'
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '9000'
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: !Ref DeregistrationDelay
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php83-tg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: PHPVersion
+          Value: '8.3'
+
+  # ========================================
+  # Listeners (Port-based routing)
+  # ========================================
+
+  PHP74Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Port: 9074
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PHP74TargetGroup
+
+  PHP83Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Port: 9083
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PHP83TargetGroup
+
+  # ========================================
+  # SSM Parameter: NLB Endpoint
+  # ========================================
+
+  NLBEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/nlb/endpoint'
+      Type: String
+      Value: !GetAtt NetworkLoadBalancer.DNSName
+      Description: NLB DNS name for NGINX upstream configuration
+      Tags:
+        Environment: !Ref EnvironmentName
+
+Outputs:
+  NLBArn:
+    Description: ARN of the Network Load Balancer
+    Value: !Ref NetworkLoadBalancer
+    Export:
+      Name: !Sub '${EnvironmentName}-nlb-arn'
+
+  NLBDnsName:
+    Description: DNS name of the Network Load Balancer
+    Value: !GetAtt NetworkLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${EnvironmentName}-nlb-dns-name'
+
+  PHP74TargetGroupArn:
+    Description: ARN of the PHP 7.4 target group
+    Value: !Ref PHP74TargetGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-php74-target-group-arn'
+
+  PHP83TargetGroupArn:
+    Description: ARN of the PHP 8.3 target group
+    Value: !Ref PHP83TargetGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-php83-target-group-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

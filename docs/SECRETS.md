@@ -231,6 +231,7 @@ flowchart LR
 
 ### SSM Parameters Created
 
+**Data Layer (created by foundation stacks):**
 ```
 /{env}/rds/endpoint      → RDS hostname
 /{env}/rds/port          → 5432
@@ -241,6 +242,12 @@ flowchart LR
 /{env}/fsx/mount         → FSx mount path
 /{env}/s3/media          → Media bucket name
 /{env}/s3/backup         → Backup bucket name
+```
+
+**Compute Layer (created by compute stacks):**
+```
+/environment/name        → Environment name (created by cf-compute-alb.yaml)
+/nlb/endpoint            → NLB DNS name for NGINX upstream config (created by cf-compute-nlb.yaml)
 ```
 
 ## Secret Rotation

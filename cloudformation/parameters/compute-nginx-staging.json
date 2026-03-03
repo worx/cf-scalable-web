@@ -1,0 +1,13 @@
+{
+  "Parameters": {
+    "EnvironmentName": "staging",
+    "NginxInstanceType": "t4g.small",
+    "NginxMinInstances": "2",
+    "NginxMaxInstances": "4",
+    "NginxVolumeSize": "20",
+    "CPUScaleOutThreshold": "60",
+    "CPUScaleInThreshold": "30",
+    "RequestScaleOutThreshold": "1000",
+    "RequestScaleInThreshold": "500"
+  }
+}

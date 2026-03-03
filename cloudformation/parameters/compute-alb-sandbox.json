@@ -1,0 +1,9 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "ALBIdleTimeout": "60",
+    "HealthCheckPath": "/health",
+    "HealthCheckInterval": "30",
+    "ACMCertificateArn": ""
+  }
+}

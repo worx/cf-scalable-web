@@ -1,0 +1,16 @@
+{
+  "Parameters": {
+    "EnvironmentName": "production",
+    "EnablePHP74": "true",
+    "EnablePHP83": "true",
+    "PHP74InstanceType": "t4g.small",
+    "PHP83InstanceType": "t4g.small",
+    "PHP74MinInstances": "2",
+    "PHP74MaxInstances": "8",
+    "PHP83MinInstances": "2",
+    "PHP83MaxInstances": "8",
+    "PHPVolumeSize": "8",
+    "FlowCountScaleOutThreshold": "8",
+    "FlowCountScaleInThreshold": "3"
+  }
+}

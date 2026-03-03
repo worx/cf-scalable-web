@@ -20,8 +20,11 @@ export
 
 .PHONY: help env-check validate show-params status \
         deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
+        deploy-compute deploy-compute-alb deploy-compute-nlb deploy-compute-nginx deploy-compute-php \
         verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
+        verify-compute verify-compute-alb verify-compute-nlb verify-compute-nginx verify-compute-php \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
+        destroy-compute destroy-compute-alb destroy-compute-nlb destroy-compute-nginx destroy-compute-php \
         deploy-bastion verify-bastion destroy-bastion \
         stop-bastion start-bastion set-bastion-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
@@ -75,6 +78,22 @@ CACHE_TEMPLATE := cloudformation/cf-cache.yaml
 IMAGE_BUILDER_STACK := $(STACK_PREFIX)-image-builder
 IMAGE_BUILDER_TEMPLATE := cloudformation/cf-image-builder.yaml
 IMAGE_BUILDER_PARAMS := cloudformation/parameters/image-builder-$(ENV).json
+
+# Compute Layer
+COMPUTE_ALB_STACK := $(STACK_PREFIX)-compute-alb
+COMPUTE_NLB_STACK := $(STACK_PREFIX)-compute-nlb
+COMPUTE_NGINX_STACK := $(STACK_PREFIX)-compute-nginx
+COMPUTE_PHP_STACK := $(STACK_PREFIX)-compute-php
+
+COMPUTE_ALB_TEMPLATE := cloudformation/cf-compute-alb.yaml
+COMPUTE_NLB_TEMPLATE := cloudformation/cf-compute-nlb.yaml
+COMPUTE_NGINX_TEMPLATE := cloudformation/cf-compute-nginx.yaml
+COMPUTE_PHP_TEMPLATE := cloudformation/cf-compute-php.yaml
+
+COMPUTE_ALB_PARAMS := cloudformation/parameters/compute-alb-$(ENV).json
+COMPUTE_NLB_PARAMS := cloudformation/parameters/compute-nlb-$(ENV).json
+COMPUTE_NGINX_PARAMS := cloudformation/parameters/compute-nginx-$(ENV).json
+COMPUTE_PHP_PARAMS := cloudformation/parameters/compute-php-$(ENV).json
 
 # AWS CLI environment
 export AWS_PAGER :=
@@ -134,6 +153,11 @@ help:  ## Show this help message
 	@echo "  make deploy-storage           Deploy storage stack (FSx, S3)"
 	@echo "  make deploy-database          Deploy database stack (RDS)"
 	@echo "  make deploy-cache             Deploy cache stack (ElastiCache)"
+	@echo "  make deploy-compute-alb       Deploy ALB stack"
+	@echo "  make deploy-compute-nlb       Deploy NLB stack"
+	@echo "  make deploy-compute-nginx     Deploy NGINX compute stack"
+	@echo "  make deploy-compute-php       Deploy PHP compute stack"
+	@echo "  make deploy-compute           Deploy all compute stacks in order"
 	@echo "  make deploy-all               Deploy all stacks in order"
 	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
@@ -143,6 +167,11 @@ help:  ## Show this help message
 	@echo "  make verify-storage           Verify storage deployment"
 	@echo "  make verify-database          Verify database deployment"
 	@echo "  make verify-cache             Verify cache deployment"
+	@echo "  make verify-compute-alb       Verify ALB deployment"
+	@echo "  make verify-compute-nlb       Verify NLB deployment"
+	@echo "  make verify-compute-nginx     Verify NGINX compute deployment"
+	@echo "  make verify-compute-php       Verify PHP compute deployment"
+	@echo "  make verify-compute           Verify all compute stacks"
 	@echo ""
 	@echo "$(YELLOW)Destruction:$(NC)"
 	@echo "  make destroy-vpc              Delete VPC stack"
@@ -150,6 +179,11 @@ help:  ## Show this help message
 	@echo "  make destroy-storage          Delete storage stack"
 	@echo "  make destroy-database         Delete database stack"
 	@echo "  make destroy-cache            Delete cache stack"
+	@echo "  make destroy-compute-php      Delete PHP compute stack"
+	@echo "  make destroy-compute-nginx    Delete NGINX compute stack"
+	@echo "  make destroy-compute-nlb      Delete NLB stack"
+	@echo "  make destroy-compute-alb      Delete ALB stack"
+	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
 	@echo "  make destroy-all              Delete all stacks (reverse order)"
 	@echo ""
 	@echo "$(YELLOW)Bastion Host:$(NC)"
@@ -200,7 +234,7 @@ help:  ## Show this help message
 
 validate:  ## Validate all CloudFormation templates
 	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE); do \
+	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			echo "  Validating $$template..."; \
 			cfn-lint "$$template" || exit 1; \
@@ -220,6 +254,12 @@ validate:  ## Validate all CloudFormation templates
 		echo "  Validating $(IMAGE_BUILDER_PARAMS)..."; \
 		jq empty $(IMAGE_BUILDER_PARAMS) || exit 1; \
 	fi
+	@for params in $(COMPUTE_ALB_PARAMS) $(COMPUTE_NLB_PARAMS) $(COMPUTE_NGINX_PARAMS) $(COMPUTE_PHP_PARAMS); do \
+		if [ -f "$$params" ]; then \
+			echo "  Validating $$params..."; \
+			jq empty "$$params" || exit 1; \
+		fi; \
+	done
 	@echo "$(GREEN)✓ All templates valid$(NC)"
 
 show-params:  ## Show parameters for current environment
@@ -236,7 +276,7 @@ show-params:  ## Show parameters for current environment
 status:  ## Show status of all stacks for current environment
 	@echo "$(BLUE)Stack Status for ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK) $(IMAGE_BUILDER_STACK); do \
+	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK) $(IMAGE_BUILDER_STACK) $(COMPUTE_ALB_STACK) $(COMPUTE_NLB_STACK) $(COMPUTE_NGINX_STACK) $(COMPUTE_PHP_STACK); do \
 		status=$$(aws cloudformation describe-stacks \
 			--stack-name "$$stack" \
 			--region $(AWS_REGION) \
@@ -320,7 +360,7 @@ deploy-cache: validate check-params  ## Deploy cache stack
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ Cache stack deployed: $(CACHE_STACK)$(NC)"
 
-deploy-all: deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache  ## Deploy all stacks
+deploy-all: deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache deploy-compute  ## Deploy all stacks
 	@echo "$(GREEN)✓ All stacks deployed for ENV=$(ENV)$(NC)"
 
 # -----------------------------------------------------------------------------
@@ -577,12 +617,235 @@ destroy-all:  ## Delete all stacks (reverse order, with confirmation)
 		echo "Cancelled"; \
 		exit 0; \
 	fi
+	@$(MAKE) destroy-compute ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-cache ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-database ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-storage ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-iam ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-vpc ENV=$(ENV) CONFIRMED=yes
 	@echo "$(GREEN)✓ All stacks deleted for ENV=$(ENV)$(NC)"
+
+# -----------------------------------------------------------------------------
+# Compute Layer Deploy Targets
+# -----------------------------------------------------------------------------
+
+deploy-compute-alb: validate  ## Deploy ALB stack
+	@echo "$(BLUE)Deploying ALB stack: $(COMPUTE_ALB_STACK)$(NC)"
+	@if [ ! -f $(COMPUTE_ALB_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(COMPUTE_ALB_PARAMS)$(NC)"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(COMPUTE_ALB_TEMPLATE) \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_ALB_PARAMS)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ ALB stack deployed: $(COMPUTE_ALB_STACK)$(NC)"
+
+deploy-compute-nlb: validate  ## Deploy NLB stack
+	@echo "$(BLUE)Deploying NLB stack: $(COMPUTE_NLB_STACK)$(NC)"
+	@if [ ! -f $(COMPUTE_NLB_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(COMPUTE_NLB_PARAMS)$(NC)"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(COMPUTE_NLB_TEMPLATE) \
+		--stack-name $(COMPUTE_NLB_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_NLB_PARAMS)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ NLB stack deployed: $(COMPUTE_NLB_STACK)$(NC)"
+
+deploy-compute-nginx: validate  ## Deploy NGINX compute stack
+	@echo "$(BLUE)Deploying NGINX compute stack: $(COMPUTE_NGINX_STACK)$(NC)"
+	@if [ ! -f $(COMPUTE_NGINX_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(COMPUTE_NGINX_PARAMS)$(NC)"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(COMPUTE_NGINX_TEMPLATE) \
+		--stack-name $(COMPUTE_NGINX_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_NGINX_PARAMS)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ NGINX compute stack deployed: $(COMPUTE_NGINX_STACK)$(NC)"
+
+deploy-compute-php: validate  ## Deploy PHP compute stack
+	@echo "$(BLUE)Deploying PHP compute stack: $(COMPUTE_PHP_STACK)$(NC)"
+	@if [ ! -f $(COMPUTE_PHP_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(COMPUTE_PHP_PARAMS)$(NC)"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(COMPUTE_PHP_TEMPLATE) \
+		--stack-name $(COMPUTE_PHP_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_PHP_PARAMS)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ PHP compute stack deployed: $(COMPUTE_PHP_STACK)$(NC)"
+
+deploy-compute: deploy-compute-alb deploy-compute-nlb deploy-compute-nginx deploy-compute-php  ## Deploy all compute stacks in order
+	@echo "$(GREEN)✓ All compute stacks deployed for ENV=$(ENV)$(NC)"
+
+# -----------------------------------------------------------------------------
+# Compute Layer Verify Targets
+# -----------------------------------------------------------------------------
+
+verify-compute-alb:  ## Verify ALB deployment
+	@echo "$(BLUE)Verifying ALB stack: $(COMPUTE_ALB_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. Load Balancer:$(NC)"
+	@aws elbv2 describe-load-balancers \
+		--names "$(ENV)-alb" \
+		--query 'LoadBalancers[0].{DNSName:DNSName,State:State.Code,Scheme:Scheme}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Target Groups:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::ElasticLoadBalancingV2::TargetGroup`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)3. SSM Parameter (/environment/name):$(NC)"
+	@aws ssm get-parameter \
+		--name "/environment/name" \
+		--query 'Parameter.{Name:Name,Value:Value}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ ALB verification complete$(NC)"
+
+verify-compute-nlb:  ## Verify NLB deployment
+	@echo "$(BLUE)Verifying NLB stack: $(COMPUTE_NLB_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. Load Balancer:$(NC)"
+	@aws elbv2 describe-load-balancers \
+		--names "$(ENV)-nlb" \
+		--query 'LoadBalancers[0].{DNSName:DNSName,State:State.Code,Scheme:Scheme}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Target Groups:$(NC)"
+	@aws cloudformation describe-stack-resources \
+		--stack-name $(COMPUTE_NLB_STACK) \
+		--query 'StackResources[?ResourceType==`AWS::ElasticLoadBalancingV2::TargetGroup`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)3. Listeners:$(NC)"
+	@NLB_ARN=$$(aws elbv2 describe-load-balancers \
+		--names "$(ENV)-nlb" \
+		--query 'LoadBalancers[0].LoadBalancerArn' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -n "$$NLB_ARN" ] && [ "$$NLB_ARN" != "None" ]; then \
+		aws elbv2 describe-listeners \
+			--load-balancer-arn "$$NLB_ARN" \
+			--query 'Listeners[].{Port:Port,Protocol:Protocol}' \
+			--output table \
+			--region $(AWS_REGION) 2>/dev/null; \
+	else \
+		echo "  $(RED)NLB not found$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)4. SSM Parameter (NLB endpoint):$(NC)"
+	@aws ssm get-parameter \
+		--name "/$(ENV)/nlb/endpoint" \
+		--query 'Parameter.{Name:Name,Value:Value}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ NLB verification complete$(NC)"
+
+verify-compute-nginx:  ## Verify NGINX compute deployment
+	@echo "$(BLUE)Verifying NGINX compute stack: $(COMPUTE_NGINX_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. Auto Scaling Group:$(NC)"
+	@aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$(ENV)-nginx-asg" \
+		--query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,HealthCheckType:HealthCheckType,Instances:length(Instances)}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. Instance Status:$(NC)"
+	@aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$(ENV)-nginx-asg" \
+		--query 'AutoScalingGroups[0].Instances[].{InstanceId:InstanceId,LifecycleState:LifecycleState,HealthStatus:HealthStatus}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ NGINX compute verification complete$(NC)"
+
+verify-compute-php:  ## Verify PHP compute deployment
+	@echo "$(BLUE)Verifying PHP compute stack: $(COMPUTE_PHP_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)1. PHP 7.4 Auto Scaling Group:$(NC)"
+	@aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$(ENV)-php74-asg" \
+		--query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:length(Instances)}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(YELLOW)Not found (may be disabled)$(NC)"
+	@echo ""
+	@echo "$(CYAN)2. PHP 8.3 Auto Scaling Group:$(NC)"
+	@aws autoscaling describe-auto-scaling-groups \
+		--auto-scaling-group-names "$(ENV)-php83-asg" \
+		--query 'AutoScalingGroups[0].{MinSize:MinSize,MaxSize:MaxSize,DesiredCapacity:DesiredCapacity,Instances:length(Instances)}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(YELLOW)Not found (may be disabled)$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ PHP compute verification complete$(NC)"
+
+verify-compute: verify-compute-alb verify-compute-nlb verify-compute-nginx verify-compute-php  ## Verify all compute stacks
+	@echo ""
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)✓ All compute stacks verified for ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
+
+# -----------------------------------------------------------------------------
+# Compute Layer Destroy Targets
+# -----------------------------------------------------------------------------
+
+destroy-compute-php:  ## Delete PHP compute stack
+	@echo "$(YELLOW)Deleting PHP compute stack: $(COMPUTE_PHP_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(COMPUTE_PHP_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_PHP_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ PHP compute stack deleted: $(COMPUTE_PHP_STACK)$(NC)"
+
+destroy-compute-nginx:  ## Delete NGINX compute stack
+	@echo "$(YELLOW)Deleting NGINX compute stack: $(COMPUTE_NGINX_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(COMPUTE_NGINX_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_NGINX_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ NGINX compute stack deleted: $(COMPUTE_NGINX_STACK)$(NC)"
+
+destroy-compute-nlb:  ## Delete NLB stack
+	@echo "$(YELLOW)Deleting NLB stack: $(COMPUTE_NLB_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(COMPUTE_NLB_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_NLB_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ NLB stack deleted: $(COMPUTE_NLB_STACK)$(NC)"
+
+destroy-compute-alb:  ## Delete ALB stack
+	@echo "$(YELLOW)Deleting ALB stack: $(COMPUTE_ALB_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(COMPUTE_ALB_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_ALB_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ ALB stack deleted: $(COMPUTE_ALB_STACK)$(NC)"
+
+destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb destroy-compute-alb  ## Delete all compute stacks (reverse order)
+	@echo "$(GREEN)✓ All compute stacks deleted for ENV=$(ENV)$(NC)"
 
 # -----------------------------------------------------------------------------
 # Bastion Host (Standalone)

@@ -1,0 +1,352 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: NGINX Compute Layer
+#
+# Purpose: Creates NGINX launch template, Auto Scaling Group, scaling policies,
+#          and CloudWatch alarms for the reverse proxy tier.
+#
+# Architecture:
+#   - Launch template with AMI from SSM parameter
+#   - IMDSv2 required, EBS encrypted gp3
+#   - UserData writes health check config, then calls configure-nginx.sh
+#   - ASG with 7-day MaxInstanceLifetime (immutable infrastructure)
+#   - Step scaling based on CPU utilization and ALB request count
+#
+# Dependencies:
+#   - cf-vpc.yaml (subnets, security groups)
+#   - cf-iam.yaml (instance profile)
+#   - cf-compute-alb.yaml (target group)
+#
+# Outputs: ASG name, Launch Template ID
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NGINX reverse proxy Auto Scaling Group and scaling policies'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - NginxInstanceType
+          - NginxVolumeSize
+      - Label:
+          default: "Auto Scaling"
+        Parameters:
+          - NginxMinInstances
+          - NginxMaxInstances
+      - Label:
+          default: "Scaling Thresholds"
+        Parameters:
+          - CPUScaleOutThreshold
+          - CPUScaleInThreshold
+          - RequestScaleOutThreshold
+          - RequestScaleInThreshold
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  NginxInstanceType:
+    Type: String
+    Description: EC2 instance type for NGINX servers
+    Default: t4g.micro
+
+  NginxMinInstances:
+    Type: Number
+    Description: Minimum number of NGINX instances
+    MinValue: 1
+    MaxValue: 10
+    Default: 2
+
+  NginxMaxInstances:
+    Type: Number
+    Description: Maximum number of NGINX instances
+    MinValue: 1
+    MaxValue: 20
+    Default: 4
+
+  NginxVolumeSize:
+    Type: Number
+    Description: EBS volume size in GB
+    MinValue: 8
+    MaxValue: 100
+    Default: 20
+
+  CPUScaleOutThreshold:
+    Type: Number
+    Description: CPU utilization percentage to trigger scale out
+    MinValue: 10
+    MaxValue: 95
+    Default: 60
+
+  CPUScaleInThreshold:
+    Type: Number
+    Description: CPU utilization percentage to trigger scale in
+    MinValue: 5
+    MaxValue: 90
+    Default: 30
+
+  RequestScaleOutThreshold:
+    Type: Number
+    Description: ALB request count per target to trigger scale out
+    MinValue: 100
+    MaxValue: 100000
+    Default: 1000
+
+  RequestScaleInThreshold:
+    Type: Number
+    Description: ALB request count per target to trigger scale in
+    MinValue: 50
+    MaxValue: 50000
+    Default: 500
+
+Resources:
+  # ========================================
+  # Launch Template
+  # ========================================
+
+  NginxLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${EnvironmentName}-nginx-lt'
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/${EnvironmentName}/ami/nginx}}'
+        InstanceType: !Ref NginxInstanceType
+        IamInstanceProfile:
+          Arn: !ImportValue
+            Fn::Sub: '${EnvironmentName}-nginx-instance-profile-arn'
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${EnvironmentName}-nginx-sg-id'
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpEndpoint: enabled
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref NginxVolumeSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-nginx'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+              - Key: Role
+                Value: nginx
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-nginx-vol'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -euo pipefail
+
+            # Write health check config (default server returning 200 on /health)
+            cat > /etc/nginx/conf.d/health-check.conf <<'HEALTHEOF'
+            server {
+                listen 80 default_server;
+                server_name _;
+
+                location /health {
+                    access_log off;
+                    return 200 'OK';
+                    add_header Content-Type text/plain;
+                }
+            }
+            HEALTHEOF
+
+            # Reload NGINX to pick up health check
+            systemctl reload nginx || systemctl start nginx
+
+            # Run the full configuration script (mounts FSx, configures sites, etc.)
+            if [ -f /opt/worxco/configure-nginx.sh ]; then
+              /opt/worxco/configure-nginx.sh
+            fi
+
+  # ========================================
+  # Auto Scaling Group
+  # ========================================
+
+  NginxAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvironmentName}-nginx-asg'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NginxLaunchTemplate
+        Version: !GetAtt NginxLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref NginxMinInstances
+      MaxSize: !Ref NginxMaxInstances
+      DesiredCapacity: !Ref NginxMinInstances
+      MaxInstanceLifetime: 604800
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-nginx-target-group-arn'
+      VPCZoneIdentifier: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-nginx-subnets'
+      TerminationPolicies:
+        - OldestInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-nginx'
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+
+  # ========================================
+  # Scaling Policies
+  # ========================================
+
+  NginxScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref NginxAutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 120
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  NginxScaleInPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref NginxAutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 600
+      StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
+
+  # ========================================
+  # CloudWatch Alarms
+  # ========================================
+
+  NginxHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-nginx-high-cpu'
+      AlarmDescription: Scale out NGINX when CPU exceeds threshold
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CPUScaleOutThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref NginxScaleOutPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref NginxAutoScalingGroup
+
+  NginxLowCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-nginx-low-cpu'
+      AlarmDescription: Scale in NGINX when CPU drops below threshold
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref CPUScaleInThreshold
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref NginxScaleInPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref NginxAutoScalingGroup
+
+  NginxHighRequestAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-nginx-high-requests'
+      AlarmDescription: Scale out NGINX when request count exceeds threshold
+      MetricName: RequestCountPerTarget
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref RequestScaleOutThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref NginxScaleOutPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-nginx-target-group-arn'
+
+  NginxLowRequestAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-nginx-low-requests'
+      AlarmDescription: Scale in NGINX when request count drops below threshold
+      MetricName: RequestCountPerTarget
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref RequestScaleInThreshold
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref NginxScaleInPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-nginx-target-group-arn'
+
+Outputs:
+  NginxAutoScalingGroupName:
+    Description: Name of the NGINX Auto Scaling Group
+    Value: !Ref NginxAutoScalingGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-asg-name'
+
+  NginxLaunchTemplateId:
+    Description: ID of the NGINX launch template
+    Value: !Ref NginxLaunchTemplate
+    Export:
+      Name: !Sub '${EnvironmentName}-nginx-lt-id'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

@@ -1,0 +1,532 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: PHP-FPM Compute Layer
+#
+# Purpose: Creates PHP 7.4 and PHP 8.3 launch templates, Auto Scaling Groups,
+#          scaling policies, and CloudWatch alarms. Each version is conditional.
+#
+# Architecture:
+#   - Launch templates with AMIs from SSM parameters
+#   - IMDSv2 required, EBS encrypted gp3
+#   - UserData calls /opt/worxco/configure-php.sh
+#   - ASGs with 7-day MaxInstanceLifetime (immutable infrastructure)
+#   - Step scaling based on NLB ActiveFlowCount
+#   - Each PHP version independently enabled/disabled via conditions
+#
+# Dependencies:
+#   - cf-vpc.yaml (subnets, security groups)
+#   - cf-iam.yaml (instance profile)
+#   - cf-compute-nlb.yaml (target groups)
+#
+# Outputs: ASG names, Launch Template IDs (conditional)
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'PHP-FPM Auto Scaling Groups with per-version conditionals'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "PHP Version Toggles"
+        Parameters:
+          - EnablePHP74
+          - EnablePHP83
+      - Label:
+          default: "PHP 7.4 Configuration"
+        Parameters:
+          - PHP74InstanceType
+          - PHP74MinInstances
+          - PHP74MaxInstances
+      - Label:
+          default: "PHP 8.3 Configuration"
+        Parameters:
+          - PHP83InstanceType
+          - PHP83MinInstances
+          - PHP83MaxInstances
+      - Label:
+          default: "Shared Configuration"
+        Parameters:
+          - PHPVolumeSize
+          - FlowCountScaleOutThreshold
+          - FlowCountScaleInThreshold
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used as prefix for all resources)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: production
+
+  EnablePHP74:
+    Type: String
+    Description: Enable PHP 7.4 ASG
+    AllowedValues: [true, false]
+    Default: true
+
+  EnablePHP83:
+    Type: String
+    Description: Enable PHP 8.3 ASG
+    AllowedValues: [true, false]
+    Default: true
+
+  PHP74InstanceType:
+    Type: String
+    Description: EC2 instance type for PHP 7.4 servers
+    Default: t4g.micro
+
+  PHP83InstanceType:
+    Type: String
+    Description: EC2 instance type for PHP 8.3 servers
+    Default: t4g.micro
+
+  PHP74MinInstances:
+    Type: Number
+    Description: Minimum number of PHP 7.4 instances
+    MinValue: 1
+    MaxValue: 20
+    Default: 2
+
+  PHP74MaxInstances:
+    Type: Number
+    Description: Maximum number of PHP 7.4 instances
+    MinValue: 1
+    MaxValue: 50
+    Default: 8
+
+  PHP83MinInstances:
+    Type: Number
+    Description: Minimum number of PHP 8.3 instances
+    MinValue: 1
+    MaxValue: 20
+    Default: 2
+
+  PHP83MaxInstances:
+    Type: Number
+    Description: Maximum number of PHP 8.3 instances
+    MinValue: 1
+    MaxValue: 50
+    Default: 8
+
+  PHPVolumeSize:
+    Type: Number
+    Description: EBS volume size in GB for PHP instances
+    MinValue: 8
+    MaxValue: 100
+    Default: 8
+
+  FlowCountScaleOutThreshold:
+    Type: Number
+    Description: NLB ActiveFlowCount per target to trigger scale out
+    MinValue: 1
+    MaxValue: 1000
+    Default: 8
+
+  FlowCountScaleInThreshold:
+    Type: Number
+    Description: NLB ActiveFlowCount per target to trigger scale in
+    MinValue: 1
+    MaxValue: 500
+    Default: 3
+
+Conditions:
+  PHP74Enabled: !Equals [!Ref EnablePHP74, true]
+  PHP83Enabled: !Equals [!Ref EnablePHP83, true]
+
+Resources:
+  # ========================================
+  # PHP 7.4 Launch Template
+  # ========================================
+
+  PHP74LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: PHP74Enabled
+    Properties:
+      LaunchTemplateName: !Sub '${EnvironmentName}-php74-lt'
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/${EnvironmentName}/ami/php74}}'
+        InstanceType: !Ref PHP74InstanceType
+        IamInstanceProfile:
+          Arn: !ImportValue
+            Fn::Sub: '${EnvironmentName}-php-instance-profile-arn'
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${EnvironmentName}-php-sg-id'
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpEndpoint: enabled
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref PHPVolumeSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-php74'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+              - Key: Role
+                Value: php-fpm
+              - Key: PHPVersion
+                Value: '7.4'
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-php74-vol'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -euo pipefail
+
+            # Run the PHP-FPM configuration script (mounts FSx, configures pool, etc.)
+            if [ -f /opt/worxco/configure-php.sh ]; then
+              /opt/worxco/configure-php.sh
+            fi
+
+  # ========================================
+  # PHP 8.3 Launch Template
+  # ========================================
+
+  PHP83LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: PHP83Enabled
+    Properties:
+      LaunchTemplateName: !Sub '${EnvironmentName}-php83-lt'
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/${EnvironmentName}/ami/php83}}'
+        InstanceType: !Ref PHP83InstanceType
+        IamInstanceProfile:
+          Arn: !ImportValue
+            Fn::Sub: '${EnvironmentName}-php-instance-profile-arn'
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${EnvironmentName}-php-sg-id'
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpEndpoint: enabled
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref PHPVolumeSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-php83'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+              - Key: Role
+                Value: php-fpm
+              - Key: PHPVersion
+                Value: '8.3'
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-php83-vol'
+              - Key: Environment
+                Value: !Ref EnvironmentName
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -euo pipefail
+
+            # Run the PHP-FPM configuration script (mounts FSx, configures pool, etc.)
+            if [ -f /opt/worxco/configure-php.sh ]; then
+              /opt/worxco/configure-php.sh
+            fi
+
+  # ========================================
+  # PHP 7.4 Auto Scaling Group
+  # ========================================
+
+  PHP74AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: PHP74Enabled
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvironmentName}-php74-asg'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PHP74LaunchTemplate
+        Version: !GetAtt PHP74LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref PHP74MinInstances
+      MaxSize: !Ref PHP74MaxInstances
+      DesiredCapacity: !Ref PHP74MinInstances
+      MaxInstanceLifetime: 604800
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-php74-target-group-arn'
+      VPCZoneIdentifier: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-php-subnets'
+      TerminationPolicies:
+        - OldestInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php74'
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+        - Key: PHPVersion
+          Value: '7.4'
+          PropagateAtLaunch: true
+
+  # ========================================
+  # PHP 8.3 Auto Scaling Group
+  # ========================================
+
+  PHP83AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: PHP83Enabled
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvironmentName}-php83-asg'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PHP83LaunchTemplate
+        Version: !GetAtt PHP83LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref PHP83MinInstances
+      MaxSize: !Ref PHP83MaxInstances
+      DesiredCapacity: !Ref PHP83MinInstances
+      MaxInstanceLifetime: 604800
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-php83-target-group-arn'
+      VPCZoneIdentifier: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: '${EnvironmentName}-php-subnets'
+      TerminationPolicies:
+        - OldestInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-php83'
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+        - Key: PHPVersion
+          Value: '8.3'
+          PropagateAtLaunch: true
+
+  # ========================================
+  # PHP 7.4 Scaling Policies
+  # ========================================
+
+  PHP74ScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: PHP74Enabled
+    Properties:
+      AutoScalingGroupName: !Ref PHP74AutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 180
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  PHP74ScaleInPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: PHP74Enabled
+    Properties:
+      AutoScalingGroupName: !Ref PHP74AutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 600
+      StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
+
+  # ========================================
+  # PHP 8.3 Scaling Policies
+  # ========================================
+
+  PHP83ScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: PHP83Enabled
+    Properties:
+      AutoScalingGroupName: !Ref PHP83AutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 180
+      StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  PHP83ScaleInPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: PHP83Enabled
+    Properties:
+      AutoScalingGroupName: !Ref PHP83AutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 600
+      StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
+
+  # ========================================
+  # PHP 7.4 CloudWatch Alarms
+  # ========================================
+
+  PHP74HighFlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: PHP74Enabled
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-php74-high-flow'
+      AlarmDescription: Scale out PHP 7.4 when ActiveFlowCount exceeds threshold
+      MetricName: ActiveFlowCount
+      Namespace: AWS/NetworkELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref FlowCountScaleOutThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref PHP74ScaleOutPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-php74-target-group-arn'
+
+  PHP74LowFlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: PHP74Enabled
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-php74-low-flow'
+      AlarmDescription: Scale in PHP 7.4 when ActiveFlowCount drops below threshold
+      MetricName: ActiveFlowCount
+      Namespace: AWS/NetworkELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref FlowCountScaleInThreshold
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref PHP74ScaleInPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-php74-target-group-arn'
+
+  # ========================================
+  # PHP 8.3 CloudWatch Alarms
+  # ========================================
+
+  PHP83HighFlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: PHP83Enabled
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-php83-high-flow'
+      AlarmDescription: Scale out PHP 8.3 when ActiveFlowCount exceeds threshold
+      MetricName: ActiveFlowCount
+      Namespace: AWS/NetworkELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref FlowCountScaleOutThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref PHP83ScaleOutPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-php83-target-group-arn'
+
+  PHP83LowFlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: PHP83Enabled
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-php83-low-flow'
+      AlarmDescription: Scale in PHP 8.3 when ActiveFlowCount drops below threshold
+      MetricName: ActiveFlowCount
+      Namespace: AWS/NetworkELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref FlowCountScaleInThreshold
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref PHP83ScaleInPolicy
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Select
+            - 5
+            - !Split
+              - ':'
+              - !ImportValue
+                Fn::Sub: '${EnvironmentName}-php83-target-group-arn'
+
+Outputs:
+  PHP74AutoScalingGroupName:
+    Description: Name of the PHP 7.4 Auto Scaling Group
+    Condition: PHP74Enabled
+    Value: !Ref PHP74AutoScalingGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-php74-asg-name'
+
+  PHP83AutoScalingGroupName:
+    Description: Name of the PHP 8.3 Auto Scaling Group
+    Condition: PHP83Enabled
+    Value: !Ref PHP83AutoScalingGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-php83-asg-name'
+
+  PHP74LaunchTemplateId:
+    Description: ID of the PHP 7.4 launch template
+    Condition: PHP74Enabled
+    Value: !Ref PHP74LaunchTemplate
+    Export:
+      Name: !Sub '${EnvironmentName}-php74-lt-id'
+
+  PHP83LaunchTemplateId:
+    Description: ID of the PHP 8.3 launch template
+    Condition: PHP83Enabled
+    Value: !Ref PHP83LaunchTemplate
+    Export:
+      Name: !Sub '${EnvironmentName}-php83-lt-id'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

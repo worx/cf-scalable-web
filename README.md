@@ -10,7 +10,7 @@ This project provides a complete, production-ready infrastructure for hosting mu
 
 - **Multi-tier VPC architecture** with defense-in-depth security
 - **NGINX reverse proxies** with SSL termination (Let's Encrypt via DNS-01)
-- **Port-based PHP-FPM routing** (1074→PHP 7.4, 1083→8.3, etc.)
+- **Port-based PHP-FPM routing** (9074→PHP 7.4, 9083→8.3, etc.)
 - **RDS PostgreSQL Multi-AZ** for database
 - **FSx for OpenZFS** shared storage (not EFS - proven faster for Drupal)
 - **ElastiCache Redis** for page caching
@@ -85,27 +85,51 @@ aws configure
    - Storage (FSx OpenZFS, S3 buckets)
    - Database (RDS PostgreSQL Multi-AZ)
    - Cache (ElastiCache Redis)
+   - Compute: ALB, NLB, NGINX ASG, PHP-FPM ASGs
+
+   Or deploy compute stacks individually:
+   ```bash
+   make deploy-compute-alb ENV=production    # Application Load Balancer
+   make deploy-compute-nlb ENV=production    # Network Load Balancer (port routing)
+   make deploy-compute-nginx ENV=production  # NGINX Auto Scaling Group
+   make deploy-compute-php ENV=production    # PHP-FPM Auto Scaling Groups
+   ```
 
 ## Project Structure
 
 ```
 cf-scalable-web/
-├── cloudformation/           # CloudFormation templates
-│   ├── cf-vpc.yaml          # VPC infrastructure
-│   ├── cf-iam.yaml          # IAM roles and policies
-│   ├── cf-storage.yaml      # FSx and S3
-│   ├── cf-database.yaml     # RDS PostgreSQL
-│   ├── cf-cache.yaml        # ElastiCache Redis
-│   └── parameters/          # Environment-specific parameters
-│       ├── template.json    # Parameter template
-│       ├── production.json  # Production values
-│       └── staging.json     # Staging values
-├── scripts/                 # Management scripts
-│   └── manage-secrets.sh    # Secrets Manager operations
-├── docs/                    # Documentation
-│   └── ARCHITECTURE.md      # Architecture details with diagrams
-├── Makefile                 # Deployment automation
-└── README.md               # This file
+├── cloudformation/              # CloudFormation templates
+│   ├── cf-vpc.yaml             # VPC infrastructure
+│   ├── cf-iam.yaml             # IAM roles and policies
+│   ├── cf-storage.yaml         # FSx and S3
+│   ├── cf-database.yaml        # RDS PostgreSQL
+│   ├── cf-cache.yaml           # ElastiCache Redis
+│   ├── cf-compute-alb.yaml     # Application Load Balancer
+│   ├── cf-compute-nlb.yaml     # Network Load Balancer (port routing)
+│   ├── cf-compute-nginx.yaml   # NGINX Auto Scaling Group
+│   ├── cf-compute-php.yaml     # PHP-FPM Auto Scaling Groups
+│   └── parameters/             # Environment-specific parameters
+│       ├── production.json     # Production foundation values
+│       ├── staging.json        # Staging foundation values
+│       ├── sandbox.json        # Sandbox foundation values
+│       ├── compute-alb-*.json  # ALB parameters per environment
+│       ├── compute-nlb-*.json  # NLB parameters per environment
+│       ├── compute-nginx-*.json # NGINX parameters per environment
+│       └── compute-php-*.json  # PHP-FPM parameters per environment
+├── image-builder/               # EC2 Image Builder configurations
+│   ├── components/             # Reusable build components
+│   └── recipes/                # Image recipes
+├── scripts/                     # Management scripts
+│   └── manage-secrets.sh       # Secrets Manager operations
+├── docs/                        # Documentation
+│   ├── ARCHITECTURE.md         # Architecture details with diagrams
+│   ├── SANDBOX-TESTING.md      # Sandbox testing guide
+│   └── SECRETS.md              # Secrets management architecture
+├── tests/                       # Test suite
+│   └── test-templates.sh       # CloudFormation template tests
+├── Makefile                     # Deployment automation
+└── README.md                   # This file
 ```
 
 ## Common Operations
@@ -115,6 +139,16 @@ cf-scalable-web/
 ```bash
 make deploy-vpc ENV=production
 make deploy-database ENV=production
+make deploy-compute-alb ENV=production
+make deploy-compute ENV=production       # All compute stacks in order
+```
+
+### Verify deployments
+
+```bash
+make verify-vpc ENV=production
+make verify-compute-alb ENV=production
+make verify-compute ENV=production       # Verify all compute stacks
 ```
 
 ### Update an existing stack
@@ -142,11 +176,12 @@ make list-secrets ENV=production
 
 ```bash
 # Delete in reverse order
-make delete-cache ENV=staging
-make delete-database ENV=staging  # WARNING: Data loss!
-make delete-storage ENV=staging   # WARNING: Data loss!
-make delete-iam ENV=staging
-make delete-vpc ENV=staging
+make destroy-compute ENV=staging  # PHP → NGINX → NLB → ALB
+make destroy-cache ENV=staging
+make destroy-database ENV=staging  # WARNING: Data loss!
+make destroy-storage ENV=staging   # WARNING: Data loss!
+make destroy-iam ENV=staging
+make destroy-vpc ENV=staging
 ```
 
 ## Environments
@@ -210,12 +245,15 @@ Compute costs (NGINX, PHP-FPM) depend on traffic and scaling.
 - [x] Parameter templates
 - [x] Basic documentation
 
-### Phase 2: Compute Layer (In Progress)
-- [ ] EC2 Image Builder pipelines (NGINX, PHP-FPM)
-- [ ] PHP version component management
-- [ ] NGINX Auto Scaling group
-- [ ] PHP-FPM Auto Scaling groups (per version)
-- [ ] Network Load Balancer (port-based routing)
+### Phase 2: Compute Layer (Complete)
+- [x] EC2 Image Builder pipelines (NGINX, PHP-FPM)
+- [x] PHP version component management
+- [x] Application Load Balancer (HTTP→HTTPS redirect)
+- [x] Network Load Balancer (port-based routing: 9074→PHP 7.4, 9083→PHP 8.3)
+- [x] NGINX Auto Scaling Group (CPU + request-count scaling, 7-day lifecycle)
+- [x] PHP-FPM Auto Scaling Groups (per-version conditional ASGs, flow-count scaling)
+- [x] SSM Parameter integration (/environment/name, /nlb/endpoint)
+- [x] Makefile deploy/verify/destroy targets for all compute stacks
 
 ### Phase 3: SSL & Routing
 - [ ] CertBot DNS-01 integration

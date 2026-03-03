@@ -1,0 +1,9 @@
+{
+  "Parameters": {
+    "EnvironmentName": "production",
+    "ALBIdleTimeout": "60",
+    "HealthCheckPath": "/health",
+    "HealthCheckInterval": "30",
+    "ACMCertificateArn": ""
+  }
+}

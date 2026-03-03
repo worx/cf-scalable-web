@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+    "EnvironmentName": "production",
+    "EnableCrossZoneLoadBalancing": "true",
+    "DeregistrationDelay": "120"
+  }
+}

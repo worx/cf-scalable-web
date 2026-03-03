@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "EnableCrossZoneLoadBalancing": "true",
+    "DeregistrationDelay": "120"
+  }
+}

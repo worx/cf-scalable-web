@@ -1,0 +1,7 @@
+{
+  "Parameters": {
+    "EnvironmentName": "staging",
+    "EnableCrossZoneLoadBalancing": "true",
+    "DeregistrationDelay": "120"
+  }
+}

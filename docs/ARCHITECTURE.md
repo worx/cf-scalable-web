@@ -69,7 +69,7 @@ graph TB
 graph LR
     Internet[Internet<br/>0.0.0.0/0] -->|80, 443| ALB[ALB Security Group]
     ALB -->|80, 443| NGINX[NGINX Security Group]
-    NGINX -->|1070-1099| NLB[NLB Security Group]
+    NGINX -->|9070-9099| NLB[NLB Security Group]
     NLB -->|9000| PHP[PHP-FPM Security Group]
     PHP -->|5432| RDS[RDS Security Group]
     NGINX -->|2049, 111| FSx[FSx Security Group]
@@ -117,7 +117,7 @@ sequenceDiagram
         NGINX-->>User: Response (cached)
     else Cache Miss
         NGINX->>Redis: Cache miss
-        NGINX->>NLB: Port 1083 (PHP 8.3)
+        NGINX->>NLB: Port 9083 (PHP 8.3)
         NLB->>PHP: Port 9000 (FastCGI)
         PHP->>FSx: Mount /var/www (NFS)
         PHP->>RDS: Query database
@@ -138,19 +138,19 @@ The Network Load Balancer routes requests based on port number:
 
 | Port | PHP Version | Use Case |
 |------|-------------|----------|
-| 1072 | PHP 7.2 | Legacy Drupal 7 sites |
-| 1074 | PHP 7.4 | Drupal 8, 9 sites |
-| 1081 | PHP 8.1 | Drupal 9, 10 sites |
-| 1083 | PHP 8.3 | Drupal 10, 11 sites |
+| 9072 | PHP 7.2 | Legacy Drupal 7 sites |
+| 9074 | PHP 7.4 | Drupal 8, 9 sites |
+| 9081 | PHP 8.1 | Drupal 9, 10 sites |
+| 9083 | PHP 8.3 | Drupal 10, 11 sites |
 
 **NGINX Configuration Example:**
 ```nginx
 upstream php74 {
-    server nlb-internal.example.com:1074;
+    server nlb-internal.example.com:9074;
 }
 
 upstream php83 {
-    server nlb-internal.example.com:1083;
+    server nlb-internal.example.com:9083;
 }
 
 location ~ \.php$ {
@@ -229,6 +229,62 @@ graph LR
 - Scale out: Active connections > 8 per instance (75% of 10 threads)
 - Scale in: Active connections < 3 per instance (25% capacity)
 - Cooldown: 3min (scale-out), 10min (scale-in)
+
+## Compute Layer Templates
+
+The compute layer is deployed as four independent CloudFormation stacks, in order:
+
+### Deployment Order and Dependencies
+
+```
+ALB (cf-compute-alb.yaml)
+ └→ NLB (cf-compute-nlb.yaml)
+     └→ NGINX (cf-compute-nginx.yaml) ← registers with ALB target group
+         └→ PHP-FPM (cf-compute-php.yaml) ← registers with NLB target groups
+```
+
+### Stack Details
+
+| Template | Purpose | Key Resources |
+|----------|---------|---------------|
+| `cf-compute-alb.yaml` | Public entry point | Internet-facing ALB, HTTP→HTTPS redirect, NGINX target group |
+| `cf-compute-nlb.yaml` | Internal PHP routing | Internal NLB, TCP listeners (9074, 9083), PHP target groups |
+| `cf-compute-nginx.yaml` | Reverse proxy tier | Launch template, ASG (min 2, max 4), CPU + request-count scaling |
+| `cf-compute-php.yaml` | Application tier | Conditional ASGs per PHP version (7.4, 8.3), flow-count scaling |
+
+### SSM Parameters (Compute Layer)
+
+These SSM parameters are created by compute stacks for boot script discovery:
+
+| Parameter | Created By | Used By | Purpose |
+|-----------|-----------|---------|---------|
+| `/environment/name` | cf-compute-alb.yaml | All instances | Environment identification |
+| `/nlb/endpoint` | cf-compute-nlb.yaml | NGINX instances | NLB DNS for upstream configuration |
+
+### Makefile Targets
+
+```bash
+# Deploy (in order: ALB → NLB → NGINX → PHP)
+make deploy-compute ENV=production        # All compute stacks
+make deploy-compute-alb ENV=production    # Just ALB
+make deploy-compute-nlb ENV=production    # Just NLB
+make deploy-compute-nginx ENV=production  # Just NGINX ASG
+make deploy-compute-php ENV=production    # Just PHP-FPM ASGs
+
+# Verify
+make verify-compute ENV=production        # All compute stacks
+
+# Destroy (reverse order: PHP → NGINX → NLB → ALB)
+make destroy-compute ENV=production       # All compute stacks
+```
+
+### Security Hardening
+
+All compute instances enforce:
+- **IMDSv2 required** (`HttpTokens: required`) - no IMDSv1 fallback
+- **EBS encryption** enabled on all volumes
+- **gp3 volumes** for consistent performance
+- **7-day MaxInstanceLifetime** (604800 seconds) for immutable infrastructure
 
 ## Storage Architecture
 
