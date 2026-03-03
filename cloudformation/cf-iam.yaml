@@ -104,6 +104,7 @@ Resources:
                   - ssm:GetParametersByPath
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/environment/name'
         - PolicyName: CloudWatchLogsAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -184,6 +185,7 @@ Resources:
                   - ssm:GetParametersByPath
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/environment/name'
         - PolicyName: S3Access
           PolicyDocument:
             Version: '2012-10-17'

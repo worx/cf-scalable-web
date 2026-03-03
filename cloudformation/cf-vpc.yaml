@@ -682,8 +682,8 @@ Resources:
     Properties:
       GroupId: !Ref NginxSecurityGroup
       IpProtocol: tcp
-      FromPort: 1070
-      ToPort: 1099
+      FromPort: 9070
+      ToPort: 9099
       DestinationSecurityGroupId: !Ref NLBSecurityGroup
       Description: PHP-FPM routing via NLB
 
@@ -747,8 +747,8 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 1070
-          ToPort: 1099
+          FromPort: 9070
+          ToPort: 9099
           SourceSecurityGroupId: !Ref NginxSecurityGroup
           Description: PHP-FPM ports from NGINX
       Tags:

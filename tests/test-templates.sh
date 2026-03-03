@@ -206,6 +206,118 @@ run_test "Component reference files exist" \
    test -f image-builder/components/test-nginx.yaml && \
    test -f image-builder/components/test-php-fpm.yaml"
 
+# ---- Compute Layer Tests ----
+echo ""
+echo "--- Compute Layer ---"
+
+# Test: ALB template syntax
+run_test "cf-compute-alb.yaml syntax" "cfn-lint cloudformation/cf-compute-alb.yaml"
+
+# Test: NLB template syntax
+run_test "cf-compute-nlb.yaml syntax" "cfn-lint cloudformation/cf-compute-nlb.yaml"
+
+# Test: NGINX compute template syntax
+run_test "cf-compute-nginx.yaml syntax" "cfn-lint cloudformation/cf-compute-nginx.yaml"
+
+# Test: PHP compute template syntax
+run_test "cf-compute-php.yaml syntax" "cfn-lint cloudformation/cf-compute-php.yaml"
+
+# Test: Compute parameter files (sandbox)
+run_test "compute-alb-sandbox.json syntax" "jq empty cloudformation/parameters/compute-alb-sandbox.json"
+run_test "compute-nlb-sandbox.json syntax" "jq empty cloudformation/parameters/compute-nlb-sandbox.json"
+run_test "compute-nginx-sandbox.json syntax" "jq empty cloudformation/parameters/compute-nginx-sandbox.json"
+run_test "compute-php-sandbox.json syntax" "jq empty cloudformation/parameters/compute-php-sandbox.json"
+
+# Test: ALB has required resources
+run_test "ALB resources present" \
+  "grep -q 'ApplicationLoadBalancer:' cloudformation/cf-compute-alb.yaml && \
+   grep -q 'NginxTargetGroup:' cloudformation/cf-compute-alb.yaml && \
+   grep -q 'HTTPListener:' cloudformation/cf-compute-alb.yaml && \
+   grep -q 'EnvironmentNameParameter:' cloudformation/cf-compute-alb.yaml"
+
+# Test: NLB has required resources
+run_test "NLB resources present" \
+  "grep -q 'NetworkLoadBalancer:' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'PHP74TargetGroup:' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'PHP83TargetGroup:' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'PHP74Listener:' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'PHP83Listener:' cloudformation/cf-compute-nlb.yaml"
+
+# Test: NLB listener ports are 9074 and 9083
+run_test "NLB listener ports (9074, 9083)" \
+  "grep -q 'Port: 9074' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'Port: 9083' cloudformation/cf-compute-nlb.yaml"
+
+# Test: NGINX has ASG and launch template
+run_test "NGINX ASG and launch template present" \
+  "grep -q 'NginxLaunchTemplate:' cloudformation/cf-compute-nginx.yaml && \
+   grep -q 'NginxAutoScalingGroup:' cloudformation/cf-compute-nginx.yaml && \
+   grep -q 'NginxScaleOutPolicy:' cloudformation/cf-compute-nginx.yaml && \
+   grep -q 'NginxScaleInPolicy:' cloudformation/cf-compute-nginx.yaml"
+
+# Test: PHP has ASGs and launch templates for both versions
+run_test "PHP ASGs and launch templates present" \
+  "grep -q 'PHP74LaunchTemplate:' cloudformation/cf-compute-php.yaml && \
+   grep -q 'PHP83LaunchTemplate:' cloudformation/cf-compute-php.yaml && \
+   grep -q 'PHP74AutoScalingGroup:' cloudformation/cf-compute-php.yaml && \
+   grep -q 'PHP83AutoScalingGroup:' cloudformation/cf-compute-php.yaml"
+
+# Test: MaxInstanceLifetime is 604800 (7 days)
+run_test "MaxInstanceLifetime 604800 in NGINX" \
+  "grep -q 'MaxInstanceLifetime: 604800' cloudformation/cf-compute-nginx.yaml"
+
+run_test "MaxInstanceLifetime 604800 in PHP" \
+  "grep -q 'MaxInstanceLifetime: 604800' cloudformation/cf-compute-php.yaml"
+
+# Test: SSM parameters configured
+run_test "SSM parameter /environment/name in ALB" \
+  "grep -q '/environment/name' cloudformation/cf-compute-alb.yaml"
+
+run_test "SSM parameter NLB endpoint in NLB" \
+  "grep -q '/nlb/endpoint' cloudformation/cf-compute-nlb.yaml"
+
+# Test: IMDSv2 required (HttpTokens: required)
+run_test "IMDSv2 required in NGINX" \
+  "grep -q 'HttpTokens: required' cloudformation/cf-compute-nginx.yaml"
+
+run_test "IMDSv2 required in PHP" \
+  "grep -q 'HttpTokens: required' cloudformation/cf-compute-php.yaml"
+
+# Test: EBS encryption enabled
+run_test "EBS encryption in NGINX" \
+  "grep -q 'Encrypted: true' cloudformation/cf-compute-nginx.yaml"
+
+run_test "EBS encryption in PHP" \
+  "grep -q 'Encrypted: true' cloudformation/cf-compute-php.yaml"
+
+# Test: GPL headers on compute templates
+run_test "GPL headers on compute templates" \
+  "grep -q 'SPDX-License-Identifier: GPL-2.0-or-later' cloudformation/cf-compute-alb.yaml && \
+   grep -q 'SPDX-License-Identifier: GPL-2.0-or-later' cloudformation/cf-compute-nlb.yaml && \
+   grep -q 'SPDX-License-Identifier: GPL-2.0-or-later' cloudformation/cf-compute-nginx.yaml && \
+   grep -q 'SPDX-License-Identifier: GPL-2.0-or-later' cloudformation/cf-compute-php.yaml"
+
+# Test: Health check in NGINX UserData
+run_test "Health check in NGINX UserData" \
+  "grep -q '/health' cloudformation/cf-compute-nginx.yaml && \
+   grep -q 'health-check.conf' cloudformation/cf-compute-nginx.yaml"
+
+# Test: PHP version conditionals present
+run_test "PHP version conditionals present" \
+  "grep -q 'PHP74Enabled:' cloudformation/cf-compute-php.yaml && \
+   grep -q 'PHP83Enabled:' cloudformation/cf-compute-php.yaml && \
+   grep -q 'EnablePHP74' cloudformation/cf-compute-php.yaml && \
+   grep -q 'EnablePHP83' cloudformation/cf-compute-php.yaml"
+
+# Test: VPC SG ports updated to 9070-9099
+run_test "VPC NLB SG ports 9070-9099" \
+  "grep -q 'FromPort: 9070' cloudformation/cf-vpc.yaml && \
+   grep -q 'ToPort: 9099' cloudformation/cf-vpc.yaml"
+
+# Test: IAM has /environment/name SSM path
+run_test "IAM SSM path includes /environment/name" \
+  "grep -q 'parameter/environment/name' cloudformation/cf-iam.yaml"
+
 echo ""
 echo "================================"
 echo "Test Results"
