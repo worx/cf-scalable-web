@@ -31,7 +31,8 @@ export
         find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis \
         update-ami-param \
-        init-secrets list-secrets test clean consolidate-logs
+        init-secrets list-secrets test clean consolidate-logs \
+        ssm-report ssm-remediate ssm-audit-params
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -94,6 +95,11 @@ COMPUTE_ALB_PARAMS := cloudformation/parameters/compute-alb-$(ENV).json
 COMPUTE_NLB_PARAMS := cloudformation/parameters/compute-nlb-$(ENV).json
 COMPUTE_NGINX_PARAMS := cloudformation/parameters/compute-nginx-$(ENV).json
 COMPUTE_PHP_PARAMS := cloudformation/parameters/compute-php-$(ENV).json
+
+# SSM Audit/Remediation
+INSTANCE_PROFILE ?= $(ENV)-nginx-instance-profile
+SSM_SSH_KEY ?=
+SSM_SSH_USER ?= ec2-user
 
 # AWS CLI environment
 export AWS_PAGER :=
@@ -216,6 +222,11 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Secrets Management:$(NC)"
 	@echo "  make init-secrets             Initialize required secrets"
 	@echo "  make list-secrets             List all secrets for environment"
+	@echo ""
+	@echo "$(YELLOW)SSM Management:$(NC)"
+	@echo "  make ssm-audit-params         Audit SSM Parameter Store completeness"
+	@echo "  make ssm-report               Report instances missing from SSM"
+	@echo "  make ssm-remediate            Remediate SSM Agent (SSM_SSH_KEY required)"
 	@echo ""
 	@echo "$(YELLOW)Testing & Maintenance:$(NC)"
 	@echo "  make test                     Run test suite"
@@ -1231,6 +1242,36 @@ init-secrets:  ## Initialize secrets for deployment
 list-secrets:  ## List all secrets
 	@echo "$(BLUE)Listing secrets for $(ENV)...$(NC)"
 	@./scripts/manage-secrets.sh list worxco/$(ENV)
+
+# -----------------------------------------------------------------------------
+# SSM Management
+# -----------------------------------------------------------------------------
+
+ssm-audit-params:  ## Audit SSM Parameter Store completeness for ENV
+	@echo "$(BLUE)Auditing SSM parameters for $(ENV)...$(NC)"
+	@./scripts/ssm-audit-params.sh --env $(ENV) --region $(AWS_REGION)
+
+ssm-report:  ## Report EC2 instances missing from SSM
+	@echo "$(BLUE)Running SSM Agent report for $(ENV)...$(NC)"
+	@./scripts/ssm-bootstrap.sh \
+		--profile $${AWS_PROFILE:-default} \
+		--region $(AWS_REGION) \
+		--instance-profile $(INSTANCE_PROFILE) \
+		report
+
+ssm-remediate:  ## Attach IAM profile + install SSM Agent via SSH (SSM_SSH_KEY required)
+	@if [ -z "$(SSM_SSH_KEY)" ]; then \
+		echo "$(RED)ERROR: SSM_SSH_KEY is required. Usage: make ssm-remediate SSM_SSH_KEY=~/.ssh/key.pem$(NC)"; \
+		exit 2; \
+	fi
+	@echo "$(BLUE)Remediating SSM Agent for $(ENV)...$(NC)"
+	@./scripts/ssm-bootstrap.sh \
+		--profile $${AWS_PROFILE:-default} \
+		--region $(AWS_REGION) \
+		--instance-profile $(INSTANCE_PROFILE) \
+		--ssh-user $(SSM_SSH_USER) \
+		--ssh-key $(SSM_SSH_KEY) \
+		remediate
 
 # -----------------------------------------------------------------------------
 # Testing & Maintenance
