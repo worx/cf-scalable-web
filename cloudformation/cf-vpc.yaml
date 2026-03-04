@@ -755,7 +755,7 @@ Resources:
         - Key: Name
           Value: !Sub '${EnvironmentName}-nlb-sg'
 
-  # NLB egress rule
+  # NLB egress rules
   NLBToPHP:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -765,6 +765,16 @@ Resources:
       ToPort: 9000
       DestinationSecurityGroupId: !Ref PHPSecurityGroup
       Description: FastCGI to PHP-FPM
+
+  NLBToPHPHealth:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NLBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9100
+      ToPort: 9100
+      DestinationSecurityGroupId: !Ref PHPSecurityGroup
+      Description: Health check to PHP NGINX
 
   # PHP-FPM Security Group
   # Egress: RDS (database), FSx (files), SES VPC endpoint (email)
@@ -780,6 +790,11 @@ Resources:
           ToPort: 9000
           SourceSecurityGroupId: !Ref NLBSecurityGroup
           Description: PHP-FPM from NLB
+        - IpProtocol: tcp
+          FromPort: 9100
+          ToPort: 9100
+          SourceSecurityGroupId: !Ref NLBSecurityGroup
+          Description: Health check NGINX from NLB
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-php-sg'

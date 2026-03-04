@@ -4,7 +4,7 @@
     "BuildSubnetId": "subnet-xxxxxxxxxxxxxxxxx",
     "BuildInstanceType": "t4g.micro",
     "PipelineSchedule": "",
-    "RecipeVersion": "1.0.0",
+    "RecipeVersion": "1.0.1",
     "BucketSuffix": "kv-worxco"
   }
 }

@@ -758,6 +758,81 @@ Resources:
                       }
                       LREOF
 
+              - name: InstallPostfix
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Postfix (satellite relay for outbound email) ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      # Pre-seed debconf to avoid interactive prompts
+                      debconf-set-selections <<< "postfix postfix/mailname string localhost"
+                      debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Satellite system'"
+                      apt-get install -y postfix libsasl2-modules
+                      # Configure as satellite relay (no local delivery)
+                      postconf -e "inet_interfaces = loopback-only"
+                      postconf -e "mydestination = "
+                      postconf -e "smtp_use_tls = yes"
+                      postconf -e "smtp_tls_security_level = encrypt"
+                      postconf -e "smtp_tls_note_starttls_offer = yes"
+                      postconf -e "smtp_sasl_auth_enable = yes"
+                      postconf -e "smtp_sasl_security_options = noanonymous"
+                      postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+                      # Relayhost will be configured at boot from SSM/Secrets Manager
+                      systemctl enable postfix
+                      systemctl stop postfix
+
+              - name: InstallHealthCheckNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Health Check NGINX (micro instance for NLB HTTP health checks) ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      apt-get install -y nginx-light
+                      # Remove default site
+                      rm -f /etc/nginx/sites-enabled/default
+                      # Write health check server config
+                      cat > /etc/nginx/conf.d/health-check.conf <<'HCEOF'
+                      # Health check endpoint for NLB (port 9100)
+                      # Proxies /health to PHP-FPM via FastCGI to verify worker availability
+                      server {
+                        listen 9100;
+                        server_name _;
+                        access_log off;
+
+                        location /health {
+                          include fastcgi_params;
+                          fastcgi_pass 127.0.0.1:9000;
+                          fastcgi_param SCRIPT_FILENAME /var/www/health.php;
+                          fastcgi_param SCRIPT_NAME /health.php;
+                          fastcgi_read_timeout 5s;
+                        }
+
+                        location / {
+                          return 404;
+                        }
+                      }
+                      HCEOF
+                      # Write health check PHP script
+                      mkdir -p /var/www
+                      cat > /var/www/health.php <<'PHPEOF'
+                      <?php
+                      // SPDX-License-Identifier: GPL-2.0-or-later
+                      // Copyright (C) 2026 The Worx Company
+                      // Purpose: PHP-FPM health check endpoint for NLB
+                      http_response_code(200);
+                      header('Content-Type: text/plain');
+                      echo 'OK';
+                      PHPEOF
+                      chmod 644 /var/www/health.php
+                      chown www-data:www-data /var/www/health.php
+                      # Enable but stop (starts at boot via configure-php.sh)
+                      systemctl enable nginx
+                      systemctl stop nginx
+
               - name: CreateBootScript
                 action: ExecuteBash
                 inputs:
@@ -793,8 +868,30 @@ Resources:
                       session.save_path = "tcp://$REDIS_ENDPOINT:6379"
                       REDISEOF
                       fi
+                      # Configure Postfix SES relay (if credentials available)
+                      SES_CREDS=$(aws secretsmanager get-secret-value \
+                        --secret-id "/$ENV/ses/smtp-credentials" --region "$REGION" \
+                        --query 'SecretString' --output text 2>/dev/null || echo "")
+                      if [ -n "$SES_CREDS" ] && [ "$SES_CREDS" != "" ]; then
+                        SES_USER=$(echo "$SES_CREDS" | jq -r '.username // empty')
+                        SES_PASS=$(echo "$SES_CREDS" | jq -r '.password // empty')
+                        SES_HOST="email-smtp.$REGION.amazonaws.com"
+                        if [ -n "$SES_USER" ] && [ -n "$SES_PASS" ]; then
+                          echo "[configure-php] Configuring Postfix SES relay via $SES_HOST"
+                          postconf -e "relayhost = [$SES_HOST]:587"
+                          echo "[$SES_HOST]:587 $SES_USER:$SES_PASS" > /etc/postfix/sasl_passwd
+                          chmod 600 /etc/postfix/sasl_passwd
+                          postmap /etc/postfix/sasl_passwd
+                        fi
+                      else
+                        echo "[configure-php] WARNING: SES credentials not found, Postfix will queue mail locally"
+                      fi
+                      systemctl restart postfix
                       systemctl start php$PHP_VER-fpm
                       echo "[configure-php] PHP-FPM $PHP_VER started successfully"
+                      # Start health check NGINX (after PHP-FPM is running)
+                      systemctl start nginx
+                      echo "[configure-php] Health check NGINX started on port 9100"
                       BOOTEOF
                       chmod 755 /opt/worxco/configure-php.sh
 
@@ -862,6 +959,44 @@ Resources:
                         echo "PASS: configure-php.sh executable"
                       else
                         echo "FAIL: configure-php.sh missing"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Postfix ---"
+                      if command -v postconf >/dev/null 2>&1; then
+                        echo "PASS: Postfix installed"
+                        if postconf -h smtp_sasl_auth_enable 2>/dev/null | grep -q "yes"; then
+                          echo "PASS: SASL auth enabled"
+                        else
+                          echo "FAIL: SASL auth not enabled"; ERRORS=$((ERRORS + 1))
+                        fi
+                        if postconf -h inet_interfaces 2>/dev/null | grep -q "loopback-only"; then
+                          echo "PASS: Listening on loopback only"
+                        else
+                          echo "FAIL: Not restricted to loopback"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: Postfix not installed"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Health Check NGINX ---"
+                      if command -v nginx >/dev/null 2>&1; then
+                        echo "PASS: NGINX installed"
+                      else
+                        echo "FAIL: NGINX not installed"; ERRORS=$((ERRORS + 1))
+                      fi
+                      if [ -f /etc/nginx/conf.d/health-check.conf ]; then
+                        if grep -q "listen 9100" /etc/nginx/conf.d/health-check.conf; then
+                          echo "PASS: Health check config on port 9100"
+                        else
+                          echo "FAIL: Health check not on port 9100"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: health-check.conf not found"; ERRORS=$((ERRORS + 1))
+                      fi
+                      if [ -f /var/www/health.php ]; then
+                        echo "PASS: health.php exists"
+                      else
+                        echo "FAIL: health.php not found"; ERRORS=$((ERRORS + 1))
                       fi
 
                       echo "=== PHP-FPM $PHP_VER Tests: $ERRORS failures ==="
@@ -968,6 +1103,81 @@ Resources:
                       }
                       LREOF
 
+              - name: InstallPostfix
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Postfix (satellite relay for outbound email) ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      # Pre-seed debconf to avoid interactive prompts
+                      debconf-set-selections <<< "postfix postfix/mailname string localhost"
+                      debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Satellite system'"
+                      apt-get install -y postfix libsasl2-modules
+                      # Configure as satellite relay (no local delivery)
+                      postconf -e "inet_interfaces = loopback-only"
+                      postconf -e "mydestination = "
+                      postconf -e "smtp_use_tls = yes"
+                      postconf -e "smtp_tls_security_level = encrypt"
+                      postconf -e "smtp_tls_note_starttls_offer = yes"
+                      postconf -e "smtp_sasl_auth_enable = yes"
+                      postconf -e "smtp_sasl_security_options = noanonymous"
+                      postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+                      # Relayhost will be configured at boot from SSM/Secrets Manager
+                      systemctl enable postfix
+                      systemctl stop postfix
+
+              - name: InstallHealthCheckNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      echo "=== Install Health Check NGINX (micro instance for NLB HTTP health checks) ==="
+                      export DEBIAN_FRONTEND=noninteractive
+                      apt-get install -y nginx-light
+                      # Remove default site
+                      rm -f /etc/nginx/sites-enabled/default
+                      # Write health check server config
+                      cat > /etc/nginx/conf.d/health-check.conf <<'HCEOF'
+                      # Health check endpoint for NLB (port 9100)
+                      # Proxies /health to PHP-FPM via FastCGI to verify worker availability
+                      server {
+                        listen 9100;
+                        server_name _;
+                        access_log off;
+
+                        location /health {
+                          include fastcgi_params;
+                          fastcgi_pass 127.0.0.1:9000;
+                          fastcgi_param SCRIPT_FILENAME /var/www/health.php;
+                          fastcgi_param SCRIPT_NAME /health.php;
+                          fastcgi_read_timeout 5s;
+                        }
+
+                        location / {
+                          return 404;
+                        }
+                      }
+                      HCEOF
+                      # Write health check PHP script
+                      mkdir -p /var/www
+                      cat > /var/www/health.php <<'PHPEOF'
+                      <?php
+                      // SPDX-License-Identifier: GPL-2.0-or-later
+                      // Copyright (C) 2026 The Worx Company
+                      // Purpose: PHP-FPM health check endpoint for NLB
+                      http_response_code(200);
+                      header('Content-Type: text/plain');
+                      echo 'OK';
+                      PHPEOF
+                      chmod 644 /var/www/health.php
+                      chown www-data:www-data /var/www/health.php
+                      # Enable but stop (starts at boot via configure-php.sh)
+                      systemctl enable nginx
+                      systemctl stop nginx
+
               - name: CreateBootScript
                 action: ExecuteBash
                 inputs:
@@ -1003,8 +1213,30 @@ Resources:
                       session.save_path = "tcp://$REDIS_ENDPOINT:6379"
                       REDISEOF
                       fi
+                      # Configure Postfix SES relay (if credentials available)
+                      SES_CREDS=$(aws secretsmanager get-secret-value \
+                        --secret-id "/$ENV/ses/smtp-credentials" --region "$REGION" \
+                        --query 'SecretString' --output text 2>/dev/null || echo "")
+                      if [ -n "$SES_CREDS" ] && [ "$SES_CREDS" != "" ]; then
+                        SES_USER=$(echo "$SES_CREDS" | jq -r '.username // empty')
+                        SES_PASS=$(echo "$SES_CREDS" | jq -r '.password // empty')
+                        SES_HOST="email-smtp.$REGION.amazonaws.com"
+                        if [ -n "$SES_USER" ] && [ -n "$SES_PASS" ]; then
+                          echo "[configure-php] Configuring Postfix SES relay via $SES_HOST"
+                          postconf -e "relayhost = [$SES_HOST]:587"
+                          echo "[$SES_HOST]:587 $SES_USER:$SES_PASS" > /etc/postfix/sasl_passwd
+                          chmod 600 /etc/postfix/sasl_passwd
+                          postmap /etc/postfix/sasl_passwd
+                        fi
+                      else
+                        echo "[configure-php] WARNING: SES credentials not found, Postfix will queue mail locally"
+                      fi
+                      systemctl restart postfix
                       systemctl start php$PHP_VER-fpm
                       echo "[configure-php] PHP-FPM $PHP_VER started successfully"
+                      # Start health check NGINX (after PHP-FPM is running)
+                      systemctl start nginx
+                      echo "[configure-php] Health check NGINX started on port 9100"
                       BOOTEOF
                       chmod 755 /opt/worxco/configure-php.sh
 
@@ -1072,6 +1304,44 @@ Resources:
                         echo "PASS: configure-php.sh executable"
                       else
                         echo "FAIL: configure-php.sh missing"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Postfix ---"
+                      if command -v postconf >/dev/null 2>&1; then
+                        echo "PASS: Postfix installed"
+                        if postconf -h smtp_sasl_auth_enable 2>/dev/null | grep -q "yes"; then
+                          echo "PASS: SASL auth enabled"
+                        else
+                          echo "FAIL: SASL auth not enabled"; ERRORS=$((ERRORS + 1))
+                        fi
+                        if postconf -h inet_interfaces 2>/dev/null | grep -q "loopback-only"; then
+                          echo "PASS: Listening on loopback only"
+                        else
+                          echo "FAIL: Not restricted to loopback"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: Postfix not installed"; ERRORS=$((ERRORS + 1))
+                      fi
+
+                      echo "--- Health Check NGINX ---"
+                      if command -v nginx >/dev/null 2>&1; then
+                        echo "PASS: NGINX installed"
+                      else
+                        echo "FAIL: NGINX not installed"; ERRORS=$((ERRORS + 1))
+                      fi
+                      if [ -f /etc/nginx/conf.d/health-check.conf ]; then
+                        if grep -q "listen 9100" /etc/nginx/conf.d/health-check.conf; then
+                          echo "PASS: Health check config on port 9100"
+                        else
+                          echo "FAIL: Health check not on port 9100"; ERRORS=$((ERRORS + 1))
+                        fi
+                      else
+                        echo "FAIL: health-check.conf not found"; ERRORS=$((ERRORS + 1))
+                      fi
+                      if [ -f /var/www/health.php ]; then
+                        echo "PASS: health.php exists"
+                      else
+                        echo "FAIL: health.php not found"; ERRORS=$((ERRORS + 1))
                       fi
 
                       echo "=== PHP-FPM $PHP_VER Tests: $ERRORS failures ==="
