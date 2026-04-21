@@ -939,7 +939,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${EnvironmentName}-elasticache-sg'
-      GroupDescription: Security group for ElastiCache Valkey
+      GroupDescription: Security group for ElastiCache
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1155,7 +1155,7 @@ Outputs:
       Name: !Sub '${EnvironmentName}-fsx-sg-id'
 
   ElastiCacheSecurityGroupId:
-    Description: Security group ID for ElastiCache Valkey
+    Description: Security group ID for ElastiCache
     Value: !Ref ElastiCacheSecurityGroup
     Export:
       Name: !Sub '${EnvironmentName}-elasticache-sg-id'
