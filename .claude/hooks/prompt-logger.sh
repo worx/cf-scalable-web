@@ -12,6 +12,7 @@
 # Change Log:
 #   2026-01-28 - Initial version (session-based model)
 #   2026-02-02 - Rewritten to per-prompt model for reliability
+#   2026-04-21 - Added response capture from transcript on Stop event
 #
 # Each UserPromptSubmit creates a new log file. No session state dependency.
 # This eliminates stale pointer issues when SessionEnd doesn't fire.
@@ -84,7 +85,7 @@ init_log_file() {
 
 **Date**: $(date '+%Y-%m-%d %H:%M:%S')
 **Week**: $(date +%V)
-**AI System**: Claude Opus 4.5
+**AI System**: Claude Opus 4.6
 **Project**: ${project_name}
 **Session ID**: ${session_id}
 
@@ -140,6 +141,32 @@ finalize_log() {
     echo ""
     echo "<sub>**License:** GPL-2.0-or-later | **Copyright:** 2026 The Worx Company | **Author:** Kurt Vanderwater <<kurt@worxco.net>></sub>"
   } >> "$log_file"
+}
+
+# Function: extract_last_response
+# Purpose: Extract the last assistant response text from a Claude transcript file
+# Parameters: $1 = transcript file path
+# Returns: response text on stdout, or empty string if extraction fails
+# Dependencies: jq
+# Created: 2026-04-21
+extract_last_response() {
+  local transcript_file="$1"
+
+  if [[ ! -f "$transcript_file" ]]; then
+    echo ""
+    return 0
+  fi
+
+  local response_text
+  response_text=$(jq -r '
+    [.[] | select(.role == "assistant")] | last |
+    if . == null then ""
+    else
+      [.content[] | select(.type == "text") | .text] | join("\n")
+    end
+  ' "$transcript_file" 2>/dev/null || echo "")
+
+  echo "$response_text"
 }
 
 # Function: read_event_data
@@ -217,6 +244,25 @@ ${prompt}
       log_file=$(get_current_prompt_log)
       if [[ -z "$log_file" ]]; then
         return 0
+      fi
+
+      # Extract and append Claude's response from the transcript
+      local transcript_path
+      transcript_path=$(echo "$event_data" \
+        | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
+
+      if [[ -n "$transcript_path" ]]; then
+        local response_text
+        response_text=$(extract_last_response "$transcript_path")
+        if [[ -n "$response_text" ]]; then
+          local max_len=4000
+          if [[ ${#response_text} -gt $max_len ]]; then
+            response_text="${response_text:0:$max_len}
+
+*[Response truncated at ${max_len} characters]*"
+          fi
+          append_log "$log_file" "Response" "$response_text"
+        fi
       fi
 
       local stop_reason

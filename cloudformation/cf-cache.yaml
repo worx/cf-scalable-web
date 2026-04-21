@@ -3,9 +3,9 @@
 # Author: Kurt Vanderwater <kurt@worxco.net>
 
 #
-# CloudFormation Template: ElastiCache Redis
+# CloudFormation Template: ElastiCache Valkey
 #
-# Purpose: Creates Redis cluster for page caching and session storage
+# Purpose: Creates Valkey cluster for page caching and session storage
 #
 # Features:
 #   - Single node (dev/test) or cluster mode (production)
@@ -15,11 +15,11 @@
 #
 # Dependencies: cf-vpc.yaml (subnets, security groups)
 #
-# Outputs: Redis endpoint, port, auth token ARN
+# Outputs: Valkey endpoint, port, auth token ARN
 #
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'ElastiCache Redis cluster for scalable web hosting'
+Description: 'ElastiCache Valkey cluster for scalable web hosting'
 
 Parameters:
   EnvironmentName:
@@ -57,14 +57,15 @@ Parameters:
     AllowedValues: [true, false]
     Default: false
 
-  RedisVersion:
+  ValkeyVersion:
     Type: String
-    Description: Redis engine version
-    Default: '7.1'
+    Description: Valkey engine version
+    Default: '8.2'
     AllowedValues:
-      - '7.1'
-      - '7.0'
-      - '6.2'
+      - '8.2'
+      - '8.1'
+      - '8.0'
+      - '7.2'
 
 Conditions:
   MultiAZEnabled: !And
@@ -79,14 +80,14 @@ Resources:
   CacheSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
     Properties:
-      CacheSubnetGroupName: !Sub '${EnvironmentName}-redis-subnet-group'
-      Description: Subnet group for ElastiCache Redis
+      CacheSubnetGroupName: !Sub '${EnvironmentName}-cache-subnet-group'
+      Description: Subnet group for ElastiCache Valkey
       SubnetIds: !Split
         - ','
         - Fn::ImportValue: !Sub '${EnvironmentName}-php-subnets'
       Tags:
         - Key: Name
-          Value: !Sub '${EnvironmentName}-redis-subnet-group'
+          Value: !Sub '${EnvironmentName}-cache-subnet-group'
         - Key: Environment
           Value: !Ref EnvironmentName
 
@@ -97,18 +98,18 @@ Resources:
   CacheParameterGroup:
     Type: AWS::ElastiCache::ParameterGroup
     Properties:
-      # Family uses major version only (e.g., redis7, not redis7.1)
+      # Family uses major version only (e.g., valkey8, not valkey8.2)
       CacheParameterGroupFamily: !Sub
-        - 'redis${MajorVersion}'
-        - MajorVersion: !Select [0, !Split ['.', !Ref RedisVersion]]
-      Description: Redis parameter group optimized for Drupal/WordPress
+        - 'valkey${MajorVersion}'
+        - MajorVersion: !Select [0, !Split ['.', !Ref ValkeyVersion]]
+      Description: Valkey parameter group optimized for Drupal/WordPress
       Properties:
         maxmemory-policy: allkeys-lru
         timeout: '300'
         tcp-keepalive: '300'
       Tags:
         - Key: Name
-          Value: !Sub '${EnvironmentName}-redis-params'
+          Value: !Sub '${EnvironmentName}-cache-params'
         - Key: Environment
           Value: !Ref EnvironmentName
 
@@ -116,32 +117,32 @@ Resources:
   # Auth Token Secret
   # ========================================
 
-  RedisAuthTokenSecret:
+  CacheAuthTokenSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${SecretNamePrefix}/redis/auth-token'
-      Description: Redis AUTH token
+      Name: !Sub '${SecretNamePrefix}/cache/auth-token'
+      Description: Valkey AUTH token
       GenerateSecretString:
         PasswordLength: 32
         ExcludePunctuation: true
         IncludeSpace: false
       Tags:
         - Key: Name
-          Value: !Sub '${EnvironmentName}-redis-auth-token'
+          Value: !Sub '${EnvironmentName}-cache-auth-token'
         - Key: Environment
           Value: !Ref EnvironmentName
 
   # ========================================
-  # Replication Group (Redis Cluster)
+  # Replication Group (Valkey Cluster)
   # ========================================
 
-  RedisReplicationGroup:
+  CacheReplicationGroup:
     Type: AWS::ElastiCache::ReplicationGroup
     Properties:
-      ReplicationGroupId: !Sub '${EnvironmentName}-redis'
-      ReplicationGroupDescription: Redis cluster for page caching
-      Engine: redis
-      EngineVersion: !Ref RedisVersion
+      ReplicationGroupId: !Sub '${EnvironmentName}-cache'
+      ReplicationGroupDescription: Valkey cluster for page caching
+      Engine: valkey
+      EngineVersion: !Ref ValkeyVersion
       CacheNodeType: !Ref CacheNodeType
       NumCacheClusters: !Ref NumCacheNodes
       AutomaticFailoverEnabled: !If [MultiAZEnabled, true, false]
@@ -152,14 +153,14 @@ Resources:
         - Fn::ImportValue: !Sub '${EnvironmentName}-elasticache-sg-id'
       AtRestEncryptionEnabled: true
       TransitEncryptionEnabled: true
-      AuthToken: !Sub '{{resolve:secretsmanager:${RedisAuthTokenSecret}:SecretString}}'
+      AuthToken: !Sub '{{resolve:secretsmanager:${CacheAuthTokenSecret}:SecretString}}'
       PreferredMaintenanceWindow: 'sun:05:00-sun:06:00'
       SnapshotRetentionLimit: 0  # No backups (cache is ephemeral)
       SnapshotWindow: '03:00-05:00'
       AutoMinorVersionUpgrade: true
       Tags:
         - Key: Name
-          Value: !Sub '${EnvironmentName}-redis'
+          Value: !Sub '${EnvironmentName}-cache'
         - Key: Environment
           Value: !Ref EnvironmentName
 
@@ -167,21 +168,21 @@ Resources:
   # Store Connection Info in Secrets Manager
   # ========================================
 
-  RedisConnectionSecret:
+  CacheConnectionSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${SecretNamePrefix}/redis/connection'
-      Description: Redis connection information
+      Name: !Sub '${SecretNamePrefix}/cache/connection'
+      Description: Valkey connection information
       SecretString: !Sub |
         {
-          "engine": "redis",
-          "host": "${RedisReplicationGroup.PrimaryEndPoint.Address}",
-          "port": ${RedisReplicationGroup.PrimaryEndPoint.Port},
-          "auth_token_secret": "${RedisAuthTokenSecret}"
+          "engine": "valkey",
+          "host": "${CacheReplicationGroup.PrimaryEndPoint.Address}",
+          "port": ${CacheReplicationGroup.PrimaryEndPoint.Port},
+          "auth_token_secret": "${CacheAuthTokenSecret}"
         }
       Tags:
         - Key: Name
-          Value: !Sub '${EnvironmentName}-redis-connection'
+          Value: !Sub '${EnvironmentName}-cache-connection'
         - Key: Environment
           Value: !Ref EnvironmentName
 
@@ -189,56 +190,56 @@ Resources:
   # SSM Parameters
   # ========================================
 
-  RedisEndpointParameter:
+  CacheEndpointParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub '/${EnvironmentName}/redis/endpoint'
-      Description: Redis primary endpoint address
+      Name: !Sub '/${EnvironmentName}/cache/endpoint'
+      Description: Valkey primary endpoint address
       Type: String
-      Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+      Value: !GetAtt CacheReplicationGroup.PrimaryEndPoint.Address
       Tags:
         Environment: !Ref EnvironmentName
 
-  RedisPortParameter:
+  CachePortParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub '/${EnvironmentName}/redis/port'
-      Description: Redis port
+      Name: !Sub '/${EnvironmentName}/cache/port'
+      Description: Valkey port
       Type: String
-      Value: !Sub '${RedisReplicationGroup.PrimaryEndPoint.Port}'
+      Value: !Sub '${CacheReplicationGroup.PrimaryEndPoint.Port}'
       Tags:
         Environment: !Ref EnvironmentName
 
 Outputs:
-  RedisReplicationGroupId:
-    Description: Redis replication group ID
-    Value: !Ref RedisReplicationGroup
+  CacheReplicationGroupId:
+    Description: Valkey replication group ID
+    Value: !Ref CacheReplicationGroup
     Export:
-      Name: !Sub '${EnvironmentName}-redis-replication-group-id'
+      Name: !Sub '${EnvironmentName}-cache-replication-group-id'
 
-  RedisPrimaryEndpoint:
-    Description: Redis primary endpoint address
-    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+  CachePrimaryEndpoint:
+    Description: Valkey primary endpoint address
+    Value: !GetAtt CacheReplicationGroup.PrimaryEndPoint.Address
     Export:
-      Name: !Sub '${EnvironmentName}-redis-primary-endpoint'
+      Name: !Sub '${EnvironmentName}-cache-primary-endpoint'
 
-  RedisPort:
-    Description: Redis port
-    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+  CachePort:
+    Description: Valkey port
+    Value: !GetAtt CacheReplicationGroup.PrimaryEndPoint.Port
     Export:
-      Name: !Sub '${EnvironmentName}-redis-port'
+      Name: !Sub '${EnvironmentName}-cache-port'
 
-  RedisAuthTokenSecretArn:
-    Description: ARN of secret containing Redis AUTH token
-    Value: !Ref RedisAuthTokenSecret
+  CacheAuthTokenSecretArn:
+    Description: ARN of secret containing Valkey AUTH token
+    Value: !Ref CacheAuthTokenSecret
     Export:
-      Name: !Sub '${EnvironmentName}-redis-auth-token-secret-arn'
+      Name: !Sub '${EnvironmentName}-cache-auth-token-secret-arn'
 
-  RedisConnectionSecretArn:
+  CacheConnectionSecretArn:
     Description: ARN of secret containing connection info
-    Value: !Ref RedisConnectionSecret
+    Value: !Ref CacheConnectionSecret
     Export:
-      Name: !Sub '${EnvironmentName}-redis-connection-secret-arn'
+      Name: !Sub '${EnvironmentName}-cache-connection-secret-arn'
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company

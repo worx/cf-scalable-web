@@ -858,15 +858,15 @@ Resources:
                         mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
                           "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
                       fi
-                      REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+                      CACHE_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" --region "$REGION" \
                         --query 'Parameter.Value' --output text 2>/dev/null || echo "")
-                      if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
-                        echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
-                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
-                      ; Redis session handler (configured at boot)
+                      if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ]; then
+                        echo "[configure-php] Configuring Valkey session handler: $CACHE_ENDPOINT"
+                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<CACHEEOF
+                      ; Valkey session handler via PHP redis extension (configured at boot)
                       session.save_handler = redis
-                      session.save_path = "tcp://$REDIS_ENDPOINT:6379"
-                      REDISEOF
+                      session.save_path = "tcp://$CACHE_ENDPOINT:6379"
+                      CACHEEOF
                       fi
                       # Configure Postfix SES relay (if credentials available)
                       SES_CREDS=$(aws secretsmanager get-secret-value \
@@ -1203,15 +1203,15 @@ Resources:
                         mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
                           "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
                       fi
-                      REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+                      CACHE_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" --region "$REGION" \
                         --query 'Parameter.Value' --output text 2>/dev/null || echo "")
-                      if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
-                        echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
-                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
-                      ; Redis session handler (configured at boot)
+                      if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ]; then
+                        echo "[configure-php] Configuring Valkey session handler: $CACHE_ENDPOINT"
+                        cat >> /etc/php/$PHP_VER/fpm/php.ini <<CACHEEOF
+                      ; Valkey session handler via PHP redis extension (configured at boot)
                       session.save_handler = redis
-                      session.save_path = "tcp://$REDIS_ENDPOINT:6379"
-                      REDISEOF
+                      session.save_path = "tcp://$CACHE_ENDPOINT:6379"
+                      CACHEEOF
                       fi
                       # Configure Postfix SES relay (if credentials available)
                       SES_CREDS=$(aws secretsmanager get-secret-value \

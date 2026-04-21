@@ -654,7 +654,7 @@ Resources:
       Description: HTTPS to NGINX
 
   # NGINX Security Group
-  # Egress: NLB (PHP routing), Redis (page cache), FSx (static files)
+  # Egress: NLB (PHP routing), Valkey (page cache), FSx (static files)
   NginxSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -687,7 +687,7 @@ Resources:
       DestinationSecurityGroupId: !Ref NLBSecurityGroup
       Description: PHP-FPM routing via NLB
 
-  NginxToRedis:
+  NginxToCache:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       GroupId: !Ref NginxSecurityGroup
@@ -695,7 +695,7 @@ Resources:
       FromPort: 6379
       ToPort: 6379
       DestinationSecurityGroupId: !Ref ElastiCacheSecurityGroup
-      Description: Redis page cache
+      Description: Valkey page cache
 
   NginxToFSxNFS:
     Type: AWS::EC2::SecurityGroupEgress
@@ -939,14 +939,14 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${EnvironmentName}-elasticache-sg'
-      GroupDescription: Security group for ElastiCache Redis
+      GroupDescription: Security group for ElastiCache Valkey
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 6379
           ToPort: 6379
           SourceSecurityGroupId: !Ref NginxSecurityGroup
-          Description: Redis from NGINX (page cache)
+          Description: Valkey from NGINX (page cache)
       SecurityGroupEgress: []
       Tags:
         - Key: Name
@@ -1155,7 +1155,7 @@ Outputs:
       Name: !Sub '${EnvironmentName}-fsx-sg-id'
 
   ElastiCacheSecurityGroupId:
-    Description: Security group ID for ElastiCache Redis
+    Description: Security group ID for ElastiCache Valkey
     Value: !Ref ElastiCacheSecurityGroup
     Export:
       Name: !Sub '${EnvironmentName}-elasticache-sg-id'

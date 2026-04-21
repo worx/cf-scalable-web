@@ -30,7 +30,7 @@ Parameters:
     Type: Number
     Description: FSx storage capacity in GB (minimum 64GB, scales automatically)
     MinValue: 64
-    MaxValue: 524288
+    MaxValue: 65536
     Default: 100
 
   FSxThroughputMBps:
