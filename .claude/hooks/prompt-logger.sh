@@ -143,32 +143,6 @@ finalize_log() {
   } >> "$log_file"
 }
 
-# Function: extract_last_response
-# Purpose: Extract the last assistant response text from a Claude transcript file
-# Parameters: $1 = transcript file path
-# Returns: response text on stdout, or empty string if extraction fails
-# Dependencies: jq
-# Created: 2026-04-21
-extract_last_response() {
-  local transcript_file="$1"
-
-  if [[ ! -f "$transcript_file" ]]; then
-    echo ""
-    return 0
-  fi
-
-  local response_text
-  response_text=$(jq -r '
-    [.[] | select(.role == "assistant")] | last |
-    if . == null then ""
-    else
-      [.content[] | select(.type == "text") | .text] | join("\n")
-    end
-  ' "$transcript_file" 2>/dev/null || echo "")
-
-  echo "$response_text"
-}
-
 # Function: read_event_data
 # Purpose: Read JSON event data from stdin (provided by Claude Code hooks)
 # Parameters: none (reads stdin)
@@ -246,23 +220,19 @@ ${prompt}
         return 0
       fi
 
-      # Extract and append Claude's response from the transcript
-      local transcript_path
-      transcript_path=$(echo "$event_data" \
-        | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
+      # Extract and append Claude's last response from Stop event data
+      local response_text
+      response_text=$(echo "$event_data" \
+        | jq -r '.last_assistant_message // ""' 2>/dev/null || echo "")
 
-      if [[ -n "$transcript_path" ]]; then
-        local response_text
-        response_text=$(extract_last_response "$transcript_path")
-        if [[ -n "$response_text" ]]; then
-          local max_len=4000
-          if [[ ${#response_text} -gt $max_len ]]; then
-            response_text="${response_text:0:$max_len}
+      if [[ -n "$response_text" ]]; then
+        local max_len=4000
+        if [[ ${#response_text} -gt $max_len ]]; then
+          response_text="${response_text:0:$max_len}
 
 *[Response truncated at ${max_len} characters]*"
-          fi
-          append_log "$log_file" "Response" "$response_text"
         fi
+        append_log "$log_file" "Response" "$response_text"
       fi
 
       local stop_reason
