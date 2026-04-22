@@ -584,6 +584,33 @@ destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
 			exit 0; \
 		fi; \
 	fi
+	@echo "$(BLUE)Emptying S3 buckets in stack $(STORAGE_STACK) before deletion...$(NC)"
+	@BUCKETS=$$(aws cloudformation describe-stack-resources \
+		--stack-name $(STORAGE_STACK) \
+		--region $(AWS_REGION) \
+		--query 'StackResources[?ResourceType==`AWS::S3::Bucket`].PhysicalResourceId' \
+		--output text 2>/dev/null || echo ""); \
+	for bucket in $$BUCKETS; do \
+		if [ -n "$$bucket" ]; then \
+			echo "  $(YELLOW)Emptying bucket: $$bucket$(NC)"; \
+			aws s3 rm "s3://$$bucket" --recursive --region $(AWS_REGION) 2>/dev/null || true; \
+			VERSIONS=$$(aws s3api list-object-versions --bucket "$$bucket" \
+				--query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+				--output json --region $(AWS_REGION) 2>/dev/null); \
+			if [ "$$VERSIONS" != '{"Objects": null}' ] && [ -n "$$VERSIONS" ]; then \
+				aws s3api delete-objects --bucket "$$bucket" \
+					--delete "$$VERSIONS" --region $(AWS_REGION) >/dev/null 2>&1 || true; \
+			fi; \
+			MARKERS=$$(aws s3api list-object-versions --bucket "$$bucket" \
+				--query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+				--output json --region $(AWS_REGION) 2>/dev/null); \
+			if [ "$$MARKERS" != '{"Objects": null}' ] && [ -n "$$MARKERS" ]; then \
+				aws s3api delete-objects --bucket "$$bucket" \
+					--delete "$$MARKERS" --region $(AWS_REGION) >/dev/null 2>&1 || true; \
+			fi; \
+			echo "  $(GREEN)✓ Bucket emptied: $$bucket$(NC)"; \
+		fi; \
+	done
 	@echo "$(YELLOW)Deleting storage stack: $(STORAGE_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
