@@ -102,7 +102,7 @@ run_test "RDS Multi-AZ configured" \
   "grep -q 'MultiAZ: true' cloudformation/cf-database.yaml"
 
 # Test 13: Cache template has encryption
-run_test "Redis encryption configured" \
+run_test "Cache encryption configured" \
   "grep -q 'TransitEncryptionEnabled: true' cloudformation/cf-cache.yaml && \
    grep -q 'AtRestEncryptionEnabled: true' cloudformation/cf-cache.yaml"
 

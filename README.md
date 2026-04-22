@@ -13,7 +13,7 @@ This project provides a complete, production-ready infrastructure for hosting mu
 - **Port-based PHP-FPM routing** (9074→PHP 7.4, 9083→8.3, etc.)
 - **RDS PostgreSQL Multi-AZ** for database
 - **FSx for OpenZFS** shared storage (not EFS - proven faster for Drupal)
-- **ElastiCache Redis** for page caching
+- **ElastiCache Valkey** for page caching
 - **Auto-scaling** with 7-day instance lifecycle (immutable infrastructure)
 - **EC2 Image Builder** for automated AMI creation
 - **Modular CloudFormation templates** for independent stack updates
@@ -24,7 +24,7 @@ This project provides a complete, production-ready infrastructure for hosting mu
 ```
 Internet → ALB → NGINX (SSL) → NLB (port routing) → PHP-FPM → RDS PostgreSQL
                    ↓                                     ↓
-              ElastiCache Redis                   FSx OpenZFS
+              ElastiCache Valkey                   FSx OpenZFS
 ```
 
 - **No public IPs** except on ALB (defense in depth)
@@ -84,7 +84,7 @@ aws configure
    - IAM (roles and instance profiles)
    - Storage (FSx OpenZFS, S3 buckets)
    - Database (RDS PostgreSQL Multi-AZ)
-   - Cache (ElastiCache Redis)
+   - Cache (ElastiCache Valkey)
    - Compute: ALB, NLB, NGINX ASG, PHP-FPM ASGs
 
    Or deploy compute stacks individually:
@@ -104,7 +104,7 @@ cf-scalable-web/
 │   ├── cf-iam.yaml             # IAM roles and policies
 │   ├── cf-storage.yaml         # FSx and S3
 │   ├── cf-database.yaml        # RDS PostgreSQL
-│   ├── cf-cache.yaml           # ElastiCache Redis
+│   ├── cf-cache.yaml           # ElastiCache Valkey
 │   ├── cf-compute-alb.yaml     # Application Load Balancer
 │   ├── cf-compute-nlb.yaml     # Network Load Balancer (port routing)
 │   ├── cf-compute-nginx.yaml   # NGINX Auto Scaling Group
@@ -209,7 +209,7 @@ Create `cloudformation/parameters/dev.json` with minimal resources.
 - VPC (NAT Gateways): ~$65/mo (2 AZs)
 - RDS PostgreSQL (db.t4g.small Multi-AZ): ~$75/mo
 - FSx OpenZFS (100GB, 128MB/s): ~$50/mo
-- ElastiCache Redis (cache.t4g.micro): ~$12/mo
+- ElastiCache Valkey (cache.t4g.micro): ~$12/mo
 - **Total base infrastructure: ~$202/mo**
 
 Compute costs (NGINX, PHP-FPM) depend on traffic and scaling.
@@ -224,7 +224,7 @@ Compute costs (NGINX, PHP-FPM) depend on traffic and scaling.
 
 - **Defense in depth:** 4-tier private subnets, no lateral movement
 - **Secrets Manager:** All passwords, keys, tokens
-- **Encryption:** At rest (RDS, FSx, S3) and in transit (Redis, SSL)
+- **Encryption:** At rest (RDS, FSx, S3) and in transit (Valkey, SSL)
 - **IAM least privilege:** Each role has minimum required permissions
 - **VPC Flow Logs:** Optional (set `EnableVPCFlowLogs: true`)
 - **Session Manager:** Audited SSH access via SSM (deploy host for long-running operations)

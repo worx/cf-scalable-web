@@ -19,8 +19,8 @@ flowchart TB
     subgraph CFSecrets["CloudFormation-Managed Secrets"]
         RDS_PASS[RDS Master Password]
         RDS_CONN[RDS Connection Info]
-        REDIS_AUTH[Redis Auth Token]
-        REDIS_CONN[Redis Connection Info]
+        CACHE_AUTH[Cache Auth Token]
+        CACHE_CONN[Cache Connection Info]
     end
 
     subgraph External["External Secrets"]
@@ -77,16 +77,16 @@ These secrets are created as part of CloudFormation stacks and are **deleted whe
 
 | Secret | Path | Purpose |
 |--------|------|---------|
-| Auth Token | `worxco/{env}/redis/auth-token` | Redis AUTH password |
-| Connection Info | `worxco/{env}/redis/connection` | Endpoint, port |
+| Auth Token | `worxco/{env}/cache/auth-token` | Valkey AUTH password |
+| Connection Info | `worxco/{env}/cache/connection` | Endpoint, port |
 
 **Auth Token**: Plain alphanumeric string (32 characters)
 
 **Connection Info Structure**:
 ```json
 {
-  "engine": "redis",
-  "host": "master.sandbox-redis.xxxxx.use1.cache.amazonaws.com",
+  "engine": "valkey",
+  "host": "master.sandbox-cache.xxxxx.use1.cache.amazonaws.com",
   "port": 6379,
   "auth_token_secret": "arn:aws:secretsmanager:..."
 }
@@ -96,9 +96,9 @@ These secrets are created as part of CloudFormation stacks and are **deleted whe
 
 ```
 make deploy-database  →  Creates RDS secrets
-make deploy-cache     →  Creates Redis secrets
+make deploy-cache     →  Creates cache secrets
 make destroy-database →  Deletes RDS secrets
-make destroy-cache    →  Deletes Redis secrets
+make destroy-cache    →  Deletes cache secrets
 make destroy-all      →  Deletes ALL CF-managed secrets
 ```
 
@@ -196,7 +196,7 @@ worxco/{environment}/{service}/{secret-name}
 Examples:
   worxco/sandbox/rds/master-password
   worxco/production/rds/connection
-  worxco/staging/redis/auth-token
+  worxco/staging/cache/auth-token
   worxco/production/ec2/ssh-keypair
 ```
 
@@ -236,8 +236,8 @@ flowchart LR
 /{env}/rds/endpoint      → RDS hostname
 /{env}/rds/port          → 5432
 /{env}/rds/database      → drupal
-/{env}/redis/endpoint    → Redis hostname
-/{env}/redis/port        → 6379
+/{env}/cache/endpoint    → Valkey hostname
+/{env}/cache/port        → 6379
 /{env}/fsx/dns           → FSx DNS name
 /{env}/fsx/mount         → FSx mount path
 /{env}/s3/media          → Media bucket name

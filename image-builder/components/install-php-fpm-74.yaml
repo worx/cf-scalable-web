@@ -211,7 +211,7 @@ phases:
               #
               # Purpose: Configure PHP-FPM at boot time
               # - Mount /var/www from FSx
-              # - Configure Redis session handler from SSM
+              # - Configure Valkey session handler from SSM
               # - Configure database connection from SSM
               # - Start PHP-FPM
               #
@@ -232,16 +232,16 @@ phases:
                   "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
               fi
 
-              # Configure Redis session handler
-              REDIS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/redis/endpoint" --region "$REGION" \
+              # Configure Valkey session handler (via PHP redis extension)
+              CACHE_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" --region "$REGION" \
                 --query 'Parameter.Value' --output text 2>/dev/null || echo "")
-              if [ -n "$REDIS_ENDPOINT" ] && [ "$REDIS_ENDPOINT" != "None" ]; then
-                echo "[configure-php] Configuring Redis session handler: $REDIS_ENDPOINT"
-                cat >> /etc/php/$PHP_VER/fpm/php.ini <<REDISEOF
-              ; Redis session handler (configured at boot)
+              if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ]; then
+                echo "[configure-php] Configuring Valkey session handler: $CACHE_ENDPOINT"
+                cat >> /etc/php/$PHP_VER/fpm/php.ini <<CACHEEOF
+              ; Valkey session handler via PHP redis extension (configured at boot)
               session.save_handler = redis
-              session.save_path = "tcp://$REDIS_ENDPOINT:6379"
-              REDISEOF
+              session.save_path = "tcp://$CACHE_ENDPOINT:6379"
+              CACHEEOF
               fi
 
               # Configure Postfix SES relay (if credentials available)

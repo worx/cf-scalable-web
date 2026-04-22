@@ -8,7 +8,7 @@ This project provides a complete CloudFormation-based infrastructure for scalabl
 - Multi-tier VPC architecture (defense in depth)
 - NGINX reverse proxies with SSL termination (CertBot DNS-01)
 - PHP-FPM pools with port-based routing (9074→PHP 7.4, 9083→8.3, etc.)
-- RDS PostgreSQL Multi-AZ, FSx OpenZFS shared storage, ElastiCache Redis
+- RDS PostgreSQL Multi-AZ, FSx OpenZFS shared storage, ElastiCache Valkey
 - Auto-scaling with 7-day instance lifecycle (immutable infrastructure)
 - EC2 Image Builder for automated AMI creation
 - Optional monitoring and compliance features

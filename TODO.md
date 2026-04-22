@@ -7,7 +7,7 @@
 - [x] Write cf-iam.yaml (IAM roles and policies)
 - [x] Write cf-storage.yaml (FSx OpenZFS, S3 buckets)
 - [x] Write cf-database.yaml (RDS PostgreSQL)
-- [x] Write cf-cache.yaml (ElastiCache Redis)
+- [x] Write cf-cache.yaml (ElastiCache Valkey)
 - [x] Write scripts/manage-secrets.sh (add/browse/change/delete secrets)
 - [x] Write Makefile (deploy-all, deploy-vpc, validate, etc.)
 - [x] Create parameters/production.json template
@@ -34,7 +34,7 @@
 - [ ] Decide: Route 53 zone list in SSM Parameter vs. wildcard permission
 - [ ] Test: Request cert for test domain, verify renewal
 - [ ] Write docs/SSL-MANAGEMENT.md
-- [ ] Write scripts/health-check.sh (test ALB, NLB ports, RDS, FSx, Redis)
+- [ ] Write scripts/health-check.sh (test ALB, NLB ports, RDS, FSx, cache)
 - [ ] Test: End-to-end request flow (Browser → ALB → NGINX → NLB → PHP-FPM → RDS)
 
 ## Phase 4: Auto Scaling & Lifecycle

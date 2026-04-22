@@ -56,7 +56,7 @@ When you deploy the cf-scalable-web infrastructure for the first time, AWS autom
 
 **Permissions include**:
 - Create and manage network interfaces in your VPC
-- Manage security group rules for Redis/Memcached
+- Manage security group rules for Valkey/Memcached
 
 **Trust policy**: `elasticache.amazonaws.com`
 

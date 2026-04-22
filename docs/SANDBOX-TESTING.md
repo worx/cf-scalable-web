@@ -42,7 +42,7 @@ The `cloudformation/parameters/sandbox.json` file contains minimal configuration
 - **NAT Gateway**: Disabled (uses VPC Endpoints for SES)
 - **FSx**: 64GB storage, 64 MB/s, 1-day backups
 - **RDS**: db.t4g.micro, 20GB, 1-day backups
-- **Redis**: cache.t4g.micro, single node
+- **Cache**: cache.t4g.micro, single node (Valkey)
 - **No VPC Flow Logs, Performance Insights, or Enhanced Monitoring**
 
 View current parameters:
@@ -76,7 +76,7 @@ make verify-storage ENV=sandbox
 make deploy-database ENV=sandbox
 make verify-database ENV=sandbox
 
-# 6. Deploy Cache stack (ElastiCache Redis)
+# 6. Deploy Cache stack (ElastiCache Valkey)
 make deploy-cache ENV=sandbox
 make verify-cache ENV=sandbox
 
@@ -141,7 +141,7 @@ aws ec2 describe-vpc-endpoints --filters "Name=service-name,Values=com.amazonaws
 - [ ] Instance profiles created
 - [ ] Policies attached with least privilege
 - [ ] Route 53 permissions for NGINX (CertBot)
-- [ ] S3/RDS/Redis permissions for PHP-FPM
+- [ ] S3/RDS/cache permissions for PHP-FPM
 - [ ] SSM permissions for Session Manager
 
 **Quick Verification:**
@@ -223,10 +223,10 @@ psql -h "$DB_ENDPOINT" -U dbadmin -d drupal -c "SELECT version();"
 ```
 
 ### Cache Stack (cf-cache.yaml)
-- [ ] ElastiCache Redis cluster created
+- [ ] ElastiCache Valkey cluster created
 - [ ] cache.t4g.micro node type
 - [ ] Single node (no replication)
-- [ ] Redis 7.1 version
+- [ ] Valkey 8.2 version
 - [ ] Encryption at rest enabled
 - [ ] Encryption in transit enabled
 - [ ] Auth token stored in Secrets Manager
@@ -243,26 +243,26 @@ make verify-cache ENV=sandbox
 aws elasticache describe-replication-groups --region us-east-1 | jq '.ReplicationGroups[] | select(.ReplicationGroupId | contains("sandbox"))'
 
 # Check cluster details
-aws elasticache describe-replication-groups --replication-group-id sandbox-redis --region us-east-1 | jq '.ReplicationGroups[0] | {Status, CacheNodeType, AtRestEncryptionEnabled, TransitEncryptionEnabled}'
+aws elasticache describe-replication-groups --replication-group-id sandbox-cache --region us-east-1 | jq '.ReplicationGroups[0] | {Status, CacheNodeType, AtRestEncryptionEnabled, TransitEncryptionEnabled}'
 
-# Get Redis endpoint
-aws elasticache describe-replication-groups --replication-group-id sandbox-redis --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint' --output table
+# Get cache endpoint
+aws elasticache describe-replication-groups --replication-group-id sandbox-cache --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint' --output table
 
 # Verify auth token in Secrets Manager
-aws secretsmanager get-secret-value --secret-id worxco/sandbox/redis/auth-token --region us-east-1 | jq -r '.SecretString'
+aws secretsmanager get-secret-value --secret-id worxco/sandbox/cache/auth-token --region us-east-1 | jq -r '.SecretString'
 ```
 
 **Connection Test (from within VPC):**
 ```bash
 # Get endpoint
-REDIS_ENDPOINT=$(aws elasticache describe-replication-groups --replication-group-id sandbox-redis --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' --output text)
-REDIS_PORT=$(aws elasticache describe-replication-groups --replication-group-id sandbox-redis --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Port' --output text)
+CACHE_ENDPOINT=$(aws elasticache describe-replication-groups --replication-group-id sandbox-cache --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' --output text)
+CACHE_PORT=$(aws elasticache describe-replication-groups --replication-group-id sandbox-cache --region us-east-1 --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Port' --output text)
 
 # Get auth token
-REDIS_AUTH=$(aws secretsmanager get-secret-value --secret-id worxco/sandbox/redis/auth-token --region us-east-1 --query 'SecretString' --output text)
+CACHE_AUTH=$(aws secretsmanager get-secret-value --secret-id worxco/sandbox/cache/auth-token --region us-east-1 --query 'SecretString' --output text)
 
-# Test connection (requires redis-cli and network access)
-redis-cli -h "$REDIS_ENDPOINT" -p "$REDIS_PORT" --tls -a "$REDIS_AUTH" PING
+# Test connection (requires redis-cli and network access — CLI name is still redis-cli)
+redis-cli -h "$CACHE_ENDPOINT" -p "$CACHE_PORT" --tls -a "$CACHE_AUTH" PING
 ```
 
 ### Compute Layer (Phase 2)
@@ -361,18 +361,18 @@ The VPC implements defense-in-depth with locked-down security groups:
 | Component | Can Connect To | Cannot Connect To |
 |-----------|----------------|-------------------|
 | ALB | NGINX only | Everything else |
-| NGINX | NLB, Redis, FSx | RDS, Internet |
+| NGINX | NLB, Cache, FSx | RDS, Internet |
 | NLB | PHP only | Everything else |
-| PHP | RDS, FSx, SES Endpoint | Redis, Internet |
+| PHP | RDS, FSx, SES Endpoint | Cache, Internet |
 | RDS | Nothing (receive only) | Everything |
-| Redis | Nothing (receive only) | Everything |
+| Cache | Nothing (receive only) | Everything |
 | FSx | Nothing (receive only) | Everything |
 
 **Key Security Features:**
 - No NAT Gateway (instances cannot reach internet)
 - SES VPC Endpoint for email (private connectivity)
 - All egress rules locked to specific destinations
-- PHP cannot access Redis (NGINX-only for page cache)
+- PHP cannot access cache (NGINX-only for page cache)
 - Data tier has no outbound connectivity
 
 ## Known Issues and Limitations
@@ -387,14 +387,14 @@ The VPC implements defense-in-depth with locked-down security groups:
 - **Minimum storage**: 20GB (PostgreSQL minimum)
 - **Single AZ**: No Multi-AZ replication in sandbox
 
-### ElastiCache Redis
+### ElastiCache Valkey
 - **Minimum node**: cache.t4g.micro (smallest ARM instance)
 - **Single node**: No replication in sandbox
 
 ### Security Groups
 - Security groups are configured for defense-in-depth
 - If testing from local machine, you'll need EC2 Serial Console or temporary rules
-- **Do not expose RDS/Redis directly to internet**
+- **Do not expose RDS/cache directly to internet**
 
 ## Troubleshooting
 

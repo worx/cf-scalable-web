@@ -38,8 +38,8 @@ graph TB
     end
 
     subgraph "Private Tier 4 (Data Layer)"
-        DataSubnet1[10.101.41.0/24<br/>RDS, FSx, Redis]
-        DataSubnet2[10.101.42.0/24<br/>RDS, FSx, Redis]
+        DataSubnet1[10.101.41.0/24<br/>RDS, FSx, Cache]
+        DataSubnet2[10.101.42.0/24<br/>RDS, FSx, Cache]
     end
 
     Internet --> IGW
@@ -74,8 +74,8 @@ graph LR
     PHP -->|5432| RDS[RDS Security Group]
     NGINX -->|2049, 111| FSx[FSx Security Group]
     PHP -->|2049, 111| FSx
-    NGINX -->|6379| Redis[Redis Security Group]
-    PHP -->|6379| Redis
+    NGINX -->|6379| Valkey[Valkey Security Group]
+    PHP -->|6379| Valkey
 
     style Internet fill:#f99
     style ALB fill:#ff9
@@ -84,7 +84,7 @@ graph LR
     style PHP fill:#99f
     style RDS fill:#f9f
     style FSx fill:#f9f
-    style Redis fill:#f9f
+    style Valkey fill:#f9f
 ```
 
 **Security Principles:**
@@ -101,7 +101,7 @@ sequenceDiagram
     participant User as User Browser
     participant ALB as Application<br/>Load Balancer
     participant NGINX as NGINX<br/>(SSL Termination)
-    participant Redis as ElastiCache<br/>Redis
+    participant Cache as ElastiCache<br/>Valkey
     participant NLB as Network<br/>Load Balancer
     participant PHP as PHP-FPM
     participant RDS as PostgreSQL<br/>RDS
@@ -112,11 +112,11 @@ sequenceDiagram
     NGINX->>NGINX: SSL Termination
 
     alt Cache Hit
-        NGINX->>Redis: Check page cache
-        Redis-->>NGINX: Cached content
+        NGINX->>Cache: Check page cache
+        Cache-->>NGINX: Cached content
         NGINX-->>User: Response (cached)
     else Cache Miss
-        NGINX->>Redis: Cache miss
+        NGINX->>Cache: Cache miss
         NGINX->>NLB: Port 9083 (PHP 8.3)
         NLB->>PHP: Port 9000 (FastCGI)
         PHP->>FSx: Mount /var/www (NFS)
@@ -126,7 +126,7 @@ sequenceDiagram
         FSx-->>PHP: Files
         PHP-->>NLB: Response
         NLB-->>NGINX: Response
-        NGINX->>Redis: Store in cache
+        NGINX->>Cache: Store in cache
         NGINX-->>ALB: Response
         ALB-->>User: HTTPS Response
     end
@@ -458,7 +458,7 @@ graph TB
 graph TB
     PHPRole[PHP-FPM IAM Role]
 
-    PHPRole -->|Read| Secrets[Secrets Manager<br/>DB Password, Redis Token]
+    PHPRole -->|Read| Secrets[Secrets Manager<br/>DB Password, Cache Token]
     PHPRole -->|Read/Write| S3[S3 Buckets<br/>Media Uploads]
     PHPRole -->|Read| SSM[SSM Parameter Store<br/>DB Endpoint, FSx DNS]
     PHPRole -->|Write| CW[CloudWatch Logs<br/>PHP-FPM Logs]
@@ -468,7 +468,7 @@ graph TB
 ```
 
 **Key Permissions:**
-- `secretsmanager:GetSecretValue` - Database and Redis credentials
+- `secretsmanager:GetSecretValue` - Database and cache credentials
 - `s3:GetObject`, `s3:PutObject` - Drupal media uploads
 - `ssm:GetParameter` - RDS endpoint, FSx mount info
 - `logs:PutLogEvents` - Send logs to CloudWatch
@@ -492,7 +492,7 @@ graph TB
     subgraph "Data Layer Metrics"
         RDS[RDS<br/>CPU, Connections, IOPS]
         FSx[FSx<br/>Throughput, IOPS, Storage]
-        Redis[Redis<br/>CPU, Memory, Hit Rate]
+        Valkey[Valkey<br/>CPU, Memory, Hit Rate]
     end
 
     ALB --> CW[CloudWatch]
@@ -501,7 +501,7 @@ graph TB
     NLB --> CW
     RDS --> CW
     FSx --> CW
-    Redis --> CW
+    Valkey --> CW
 
     CW --> Dashboard[CloudWatch Dashboard]
     CW -->|Alarm| SNS[SNS Topic]
@@ -544,7 +544,7 @@ graph LR
 | **Single PHP-FPM instance** | Instance terminated | 2-3 minutes | None (NLB routes to healthy instances) |
 | **RDS Primary** | Instance failure | ~60 seconds | Brief connection errors (automatic failover) |
 | **FSx File System** | File system issue | 5-10 minutes | Downtime (AWS restores from snapshot) |
-| **ElastiCache Redis** | Node failure | Immediate | Cache miss (performance impact, no downtime) |
+| **ElastiCache Valkey** | Node failure | Immediate | Cache miss (performance impact, no downtime) |
 | **NAT Gateway** | Gateway failure | Immediate | No outbound internet (inbound traffic unaffected) |
 | **Availability Zone** | Complete AZ failure | 2-5 minutes | No downtime (Multi-AZ resources failover) |
 
@@ -578,23 +578,23 @@ If a new AMI causes issues:
 ```mermaid
 graph TD
     Request[HTTP Request] --> NGINX
-    NGINX -->|Check| Redis{Redis Cache?}
-    Redis -->|Hit| Response[Return Cached]
-    Redis -->|Miss| PHP[Generate Page]
-    PHP -->|Store| Redis
+    NGINX -->|Check| Valkey{Valkey Cache?}
+    Valkey -->|Hit| Response[Return Cached]
+    Valkey -->|Miss| PHP[Generate Page]
+    PHP -->|Store| Valkey
     PHP --> Response
 
-    style Redis fill:#ff9
+    style Valkey fill:#ff9
     style Response fill:#9f9
 ```
 
 **Cache Layers:**
-1. **Redis (Page Cache):** Full HTML pages, 15-minute TTL
+1. **Valkey (Page Cache):** Full HTML pages, 15-minute TTL
 2. **OpCache (PHP):** Compiled PHP bytecode, in-memory
 3. **PostgreSQL Query Cache:** Database query results
 
 **Expected Hit Rates:**
-- Redis page cache: **70-90%** (anonymous users)
+- Valkey page cache: **70-90%** (anonymous users)
 - OpCache: **100%** (always enabled)
 - Database query cache: **50-70%**
 
@@ -637,7 +637,7 @@ effective_io_concurrency = 200
 - RDS encryption at rest (KMS)
 - FSx encryption at rest
 - S3 encryption (SSE-S3)
-- Redis encryption in transit
+- Valkey encryption in transit
 - SSL/TLS for all connections
 
 ### Secrets Management

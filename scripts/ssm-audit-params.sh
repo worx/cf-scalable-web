@@ -170,11 +170,11 @@ check_param "/${ENV_NAME}/rds/port" "RDS" \
 check_param "/${ENV_NAME}/rds/database" "RDS" \
   "make deploy-database ENV=${ENV_NAME}"
 
-# --- Redis Parameters ---
-section_header "Redis (Cache)" "cf-cache.yaml"
-check_param "/${ENV_NAME}/redis/endpoint" "Redis" \
+# --- Cache Parameters ---
+section_header "Cache (ElastiCache Valkey)" "cf-cache.yaml"
+check_param "/${ENV_NAME}/cache/endpoint" "Cache" \
   "make deploy-cache ENV=${ENV_NAME}"
-check_param "/${ENV_NAME}/redis/port" "Redis" \
+check_param "/${ENV_NAME}/cache/port" "Cache" \
   "make deploy-cache ENV=${ENV_NAME}"
 
 # --- FSx Parameters ---
