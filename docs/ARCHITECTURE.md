@@ -294,9 +294,9 @@ All compute instances enforce:
 graph TB
     subgraph "FSx OpenZFS"
         Root[Root Volume<br/>ZSTD Compression]
-        Sites[/fsx/sites<br/>Drupal/WordPress Sites]
-        Configs[/fsx/configs<br/>NGINX/PHP Configs]
-        SSL[/fsx/ssl<br/>Let's Encrypt Certs]
+        Sites["/fsx/sites<br/>Drupal/WordPress Sites"]
+        Configs["/fsx/configs<br/>NGINX/PHP Configs"]
+        SSL["/fsx/ssl<br/>Let's Encrypt Certs"]
     end
 
     subgraph "NGINX Instances"
@@ -361,7 +361,7 @@ graph TB
     end
 
     subgraph "Availability Zone 2"
-        Standby[RDS Standby<br/>(Synchronous Replication)]
+        Standby[RDS Standby<br/>Synchronous Replication]
     end
 
     PHP1[PHP-FPM Instances] -->|Read/Write| Primary
@@ -450,7 +450,7 @@ graph TB
 - `route53:ChangeResourceRecordSets` - CertBot DNS-01 validation
 - `ssm:GetParameter` - Read FSx mount info, configuration
 - `logs:PutLogEvents` - Send logs to CloudWatch
-- `ssmmessages:*` - Session Manager access (no bastion needed)
+- `ssmmessages:*` - Session Manager access
 
 ### PHP-FPM Instance Role
 

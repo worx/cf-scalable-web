@@ -278,7 +278,7 @@ jq -r '
   if [[ -n "${PUB}" ]]; then
     TARGET="${PUB}"
   else
-    # If no public IP, use private IP (assumes you're on VPN/bastion/etc.)
+    # If no public IP, use private IP (assumes you're on VPN/deploy host/etc.)
     TARGET="${PRIV}"
   fi
 

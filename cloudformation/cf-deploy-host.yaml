@@ -3,16 +3,16 @@
 # Author: Kurt Vanderwater <kurt@worxco.net>
 
 #
-# CloudFormation Template: Bastion Host
+# CloudFormation Template: Deploy Host
 #
-# Purpose: Creates a standalone bastion host in the default VPC for
+# Purpose: Creates a standalone deploy host in the default VPC for
 #          managing cf-scalable-web infrastructure deployments.
 #
 # Features:
 #   - Uses default VPC (survives project VPC teardowns)
 #   - Ubuntu 24.04 LTS on ARM (t4g.micro, 1GB RAM + 2GB swap)
 #   - SSH access restricted to specified CIDR
-#   - SSM Session Manager for backup access
+#   - SSM Session Manager for primary access
 #   - Dynamic public IP (no EIP cost when stopped)
 #   - Optional key pair creation (stored in SSM Parameter Store)
 #   - Pre-installed: AWS CLI, git, make, screen, tmux, vim, Claude Code
@@ -20,13 +20,13 @@
 # Dependencies: None (standalone)
 #
 # Usage:
-#   make deploy-bastion
-#   make verify-bastion
-#   make destroy-bastion
+#   make deploy-deploy-host
+#   make verify-deploy-host
+#   make destroy-deploy-host
 #
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Standalone bastion host for cf-scalable-web infrastructure management'
+Description: 'Standalone deploy host for cf-scalable-web infrastructure management'
 
 Parameters:
   KeyPairName:
@@ -62,7 +62,7 @@ Resources:
   # Key Pair (Conditional)
   # ========================================
 
-  BastionKeyPair:
+  DeployHostKeyPair:
     Type: AWS::EC2::KeyPair
     Condition: CreateKeyPair
     Properties:
@@ -72,17 +72,17 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-keypair'
         - Key: Purpose
-          Value: Bastion SSH access
+          Value: Deploy host SSH access
 
   # ========================================
   # Security Group
   # ========================================
 
-  BastionSecurityGroup:
+  DeployHostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${AWS::StackName}-sg'
-      GroupDescription: Security group for bastion host - SSH from allowed CIDR only
+      GroupDescription: Security group for deploy host - SSH from allowed CIDR only
       # Uses default VPC automatically
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -99,7 +99,7 @@ Resources:
   # IAM Role (Admin + SSM)
   # ========================================
 
-  BastionRole:
+  DeployHostRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${AWS::StackName}-role'
@@ -114,36 +114,36 @@ Resources:
         # SSM Session Manager access
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         # Full infrastructure management (PowerUserAccess excludes IAM
-        # operations, but this bastion must create IAM roles/policies
+        # operations, but this deploy host must create IAM roles/policies
         # for the compute and storage stacks it deploys)
         - arn:aws:iam::aws:policy/AdministratorAccess
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-role'
 
-  BastionInstanceProfile:
+  DeployHostInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       InstanceProfileName: !Sub '${AWS::StackName}-profile'
       Roles:
-        - !Ref BastionRole
+        - !Ref DeployHostRole
 
   # ========================================
   # EC2 Instance
   # ========================================
 
-  BastionInstance:
+  DeployHostInstance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref UbuntuAMI
       InstanceType: !Ref InstanceType
       KeyName: !If
         - CreateKeyPair
-        - !Ref BastionKeyPair
+        - !Ref DeployHostKeyPair
         - !Ref KeyPairName
-      IamInstanceProfile: !Ref BastionInstanceProfile
+      IamInstanceProfile: !Ref DeployHostInstanceProfile
       SecurityGroupIds:
-        - !Ref BastionSecurityGroup
+        - !Ref DeployHostSecurityGroup
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -155,9 +155,9 @@ Resources:
         Fn::Base64: |
           #!/bin/bash
           set -euo pipefail
-          exec > >(tee /var/log/bastion-bootstrap.log) 2>&1
+          exec > >(tee /var/log/deploy-host-bootstrap.log) 2>&1
 
-          echo "=== Bastion Bootstrap Starting $(date) ==="
+          echo "=== Deploy Host Bootstrap Starting $(date) ==="
 
           # Create 2GB swap (supplements t4g.micro's 1GB RAM)
           fallocate -l 2G /swapfile
@@ -193,7 +193,7 @@ Resources:
 
           # Make vim the default editor (not nano!)
           update-alternatives --set editor /usr/bin/vim.basic
-          cat > /etc/profile.d/bastion-env.sh << 'ENVEOF'
+          cat > /etc/profile.d/deploy-host-env.sh << 'ENVEOF'
           export EDITOR=vim
           export VISUAL=vim
           export AWS_PAGER=""
@@ -213,7 +213,7 @@ Resources:
           # Root password from Secrets Manager (optional, non-fatal)
           echo "=== Setting root password from Secrets Manager ==="
           ROOT_PASS=$(aws secretsmanager get-secret-value \
-            --secret-id "worxco/bastion/root-password" \
+            --secret-id "worxco/deploy-host/root-password" \
             --region us-east-1 \
             --query 'SecretString' \
             --output text 2>/dev/null) || true
@@ -222,7 +222,7 @@ Resources:
             echo "Root password set from Secrets Manager"
             unset ROOT_PASS
           else
-            echo "WARNING: worxco/bastion/root-password not found in Secrets Manager - skipping"
+            echo "WARNING: worxco/deploy-host/root-password not found in Secrets Manager - skipping"
           fi
 
           # cfn-lint for template validation (venv avoids system package conflicts
@@ -248,11 +248,11 @@ Resources:
           chown ubuntu:ubuntu /home/ubuntu/projects
 
           # Create helpful motd
-          cat > /etc/update-motd.d/99-bastion << 'MOTDEOF'
+          cat > /etc/update-motd.d/99-deploy-host << 'MOTDEOF'
           #!/bin/bash
           echo ""
           echo "============================================"
-          echo "  cf-scalable-web Bastion Host"
+          echo "  cf-scalable-web Deploy Host"
           echo "============================================"
           echo ""
           echo "Quick Start:"
@@ -260,58 +260,58 @@ Resources:
           echo "  git clone <your-repo>"
           echo "  cd cf-scalable-web"
           echo "  cp .env.example .env        # <-- required before make"
-          echo "  screen -S deploy"
+          echo "  tmux new -s deploy"
           echo "  make deploy-all ENV=sandbox"
-          echo "  # Ctrl-A D to detach"
+          echo "  # Ctrl-B D to detach"
           echo ""
           echo "AWS: Instance role provides credentials (no ~/.aws/ needed)"
           echo "Installed: aws, git, make, screen, tmux, vim, claude"
           echo ""
           MOTDEOF
-          chmod +x /etc/update-motd.d/99-bastion
+          chmod +x /etc/update-motd.d/99-deploy-host
 
-          echo "=== Bastion Bootstrap Complete $(date) ==="
-          echo "SUCCESS" > /var/log/bastion-bootstrap-status
+          echo "=== Deploy Host Bootstrap Complete $(date) ==="
+          echo "SUCCESS" > /var/log/deploy-host-bootstrap-status
 
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}'
         - Key: Purpose
-          Value: Infrastructure management bastion
+          Value: Infrastructure management deploy host
 
 Outputs:
-  BastionPublicIP:
-    Description: Bastion public IP (dynamic, changes on stop/start - use verify-bastion)
-    Value: !GetAtt BastionInstance.PublicIp
+  DeployHostPublicIP:
+    Description: Deploy host public IP (dynamic, changes on stop/start)
+    Value: !GetAtt DeployHostInstance.PublicIp
 
-  BastionInstanceId:
-    Description: Bastion EC2 instance ID
-    Value: !Ref BastionInstance
+  DeployHostInstanceId:
+    Description: Deploy host EC2 instance ID
+    Value: !Ref DeployHostInstance
     Export:
       Name: !Sub '${AWS::StackName}-instance-id'
 
   SSHCommand:
-    Description: SSH command to connect (IP changes on stop/start - use verify-bastion)
-    Value: !Sub 'ssh -i ~/.ssh/bastion.pem ubuntu@${BastionInstance.PublicIp}'
+    Description: SSH command to connect (IP changes on stop/start)
+    Value: !Sub 'ssh -i ~/.ssh/deploy-host.pem ubuntu@${DeployHostInstance.PublicIp}'
 
   SSMCommand:
     Description: SSM Session Manager command (no SSH key needed)
-    Value: !Sub 'aws ssm start-session --target ${BastionInstance}'
+    Value: !Sub 'aws ssm start-session --target ${DeployHostInstance}'
 
   KeyPairParameterPath:
     Condition: CreateKeyPair
     Description: SSM parameter path containing private key (retrieve once, then delete)
-    Value: !Sub '/ec2/keypair/${BastionKeyPair.KeyPairId}'
+    Value: !Sub '/ec2/keypair/${DeployHostKeyPair.KeyPairId}'
 
   RetrieveKeyCommand:
     Condition: CreateKeyPair
     Description: Command to retrieve private key
     Value: !Sub |
-      aws ssm get-parameter --name /ec2/keypair/${BastionKeyPair.KeyPairId} --with-decryption --query 'Parameter.Value' --output text > ~/.ssh/bastion.pem && chmod 600 ~/.ssh/bastion.pem
+      aws ssm get-parameter --name /ec2/keypair/${DeployHostKeyPair.KeyPairId} --with-decryption --query 'Parameter.Value' --output text > ~/.ssh/deploy-host.pem && chmod 600 ~/.ssh/deploy-host.pem
 
   SecurityGroupId:
-    Description: Bastion security group ID (for VPC peering rules)
-    Value: !Ref BastionSecurityGroup
+    Description: Deploy host security group ID (for VPC peering rules)
+    Value: !Ref DeployHostSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-sg-id'
 

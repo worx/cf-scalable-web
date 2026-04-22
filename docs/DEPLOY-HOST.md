@@ -1,15 +1,15 @@
-# Bastion Host Setup
+# Deploy Host Setup
 
-This document describes the standalone bastion host for managing cf-scalable-web infrastructure deployments.
+This document describes the standalone deploy host for managing cf-scalable-web infrastructure deployments.
 
 ## Overview
 
-The bastion host is a small EC2 instance that runs in the **default VPC**, separate from the project infrastructure. This design allows:
+The deploy host is a small EC2 instance that runs in the **default VPC**, separate from the project infrastructure. This design allows:
 
 - Long-running deployments (40+ minutes) without laptop dependency
-- Persistent sessions via `screen` or `tmux`
+- Persistent sessions via `tmux` or `screen`
 - Survival across project VPC teardowns
-- SSH and SSM Session Manager access
+- SSM Session Manager access (primary) and SSH (backup)
 
 ```mermaid
 flowchart TB
@@ -18,14 +18,14 @@ flowchart TB
     end
 
     subgraph DefaultVPC["Default VPC"]
-        BASTION[Bastion Host<br/>t4g.nano]
+        DEPLOYHOST[Deploy Host<br/>t4g.micro]
     end
 
     subgraph ProjectVPC["cf-scalable-web VPC"]
         NGINX[NGINX]
         PHP[PHP-FPM]
         RDS[(RDS)]
-        REDIS[(Redis)]
+        CACHE[(Valkey)]
     end
 
     subgraph AWS["AWS APIs"]
@@ -34,9 +34,9 @@ flowchart TB
         RDSAPI[RDS]
     end
 
-    YOU -->|SSH / SSM| BASTION
-    BASTION -->|make deploy-all| CF
-    BASTION -.->|Future: VPC Peering| ProjectVPC
+    YOU -->|SSM / SSH| DEPLOYHOST
+    DEPLOYHOST -->|make deploy-all| CF
+    DEPLOYHOST -.->|Future: VPC Peering| ProjectVPC
     CF --> ProjectVPC
 ```
 
@@ -45,20 +45,20 @@ flowchart TB
 | Component | Description |
 |-----------|-------------|
 | **Location** | Default VPC (always exists) |
-| **Instance Type** | t4g.nano (ARM, ~$3/month) |
+| **Instance Type** | t4g.micro (ARM, ~$3/month) |
 | **OS** | Ubuntu 24.04 LTS |
-| **Access** | SSH (key-based) + SSM Session Manager |
-| **Elastic IP** | Yes (stable address) |
+| **Access** | SSM Session Manager (primary) + SSH (backup) |
+| **Public IP** | Dynamic (no EIP cost when stopped) |
 
 ### Why Separate from Project VPC?
 
-1. **Survivability**: Project VPC can be destroyed/recreated without affecting bastion
-2. **Independence**: Bastion doesn't depend on project infrastructure
+1. **Survivability**: Project VPC can be destroyed/recreated without affecting the deploy host
+2. **Independence**: Deploy host doesn't depend on project infrastructure
 3. **Simplicity**: No circular dependencies during initial deployment
 
 ### Future: VPC Peering
 
-When EC2 instances are deployed in the project VPC, add VPC peering to enable direct SSH access:
+When EC2 instances are deployed in the project VPC, add VPC peering to enable direct access:
 
 ```
 Default VPC (10.0.0.0/24) <--peering--> Project VPC (10.200.0.0/16)
@@ -74,14 +74,14 @@ Default VPC (10.0.0.0/24) <--peering--> Project VPC (10.200.0.0/16)
 
 ### 1. Configure Parameters
 
-Edit `cloudformation/parameters/bastion.json`:
+Edit `cloudformation/parameters/deploy-host.json`:
 
 ```json
 {
   "Parameters": {
     "KeyPairName": "",
     "AllowedSSHCidr": "YOUR_OFFICE_IP/32",
-    "InstanceType": "t4g.nano"
+    "InstanceType": "t4g.micro"
   }
 }
 ```
@@ -90,12 +90,12 @@ Edit `cloudformation/parameters/bastion.json`:
 |-----------|-------------|
 | `KeyPairName` | Leave empty to create new key pair, or specify existing |
 | `AllowedSSHCidr` | Your office/VPN IP with /32 (single IP) or /24 (range) |
-| `InstanceType` | t4g.nano is sufficient for deployment tasks |
+| `InstanceType` | t4g.micro is sufficient for deployment tasks |
 
 ### 2. Deploy
 
 ```bash
-make deploy-bastion
+make deploy-deploy-host
 ```
 
 This will:
@@ -103,16 +103,15 @@ This will:
 - Create IAM role (for SSM and CloudFormation access)
 - Create key pair (if not specified) and store in SSM Parameter Store
 - Launch EC2 instance with all tools pre-installed
-- Allocate Elastic IP
 
 ### 3. Get Connection Info
 
 ```bash
-make verify-bastion
+make verify-deploy-host
 ```
 
 Outputs include:
-- `BastionPublicIP`: Elastic IP address
+- `DeployHostPublicIP`: Public IP address
 - `SSHCommand`: Ready-to-use SSH command
 - `SSMCommand`: SSM Session Manager command
 - `KeyPairParameterPath`: Where to retrieve the private key
@@ -122,14 +121,14 @@ Outputs include:
 If a new key pair was created:
 
 ```bash
-# Get the parameter path from verify-bastion output
+# Get the parameter path from verify-deploy-host output
 aws ssm get-parameter \
   --name /ec2/keypair/key-XXXXXXXX \
   --with-decryption \
   --query 'Parameter.Value' \
-  --output text > ~/.ssh/bastion.pem
+  --output text > ~/.ssh/deploy-host.pem
 
-chmod 600 ~/.ssh/bastion.pem
+chmod 600 ~/.ssh/deploy-host.pem
 ```
 
 ### 5. Configure SSH (Optional)
@@ -137,25 +136,17 @@ chmod 600 ~/.ssh/bastion.pem
 Add to `~/.ssh/config` for convenience:
 
 ```
-Host bastion
-    HostName <elastic-ip>
+Host deploy-host
+    HostName <public-ip>
     User ubuntu
-    IdentityFile ~/.ssh/bastion.pem
+    IdentityFile ~/.ssh/deploy-host.pem
 ```
 
-Then connect with just: `ssh bastion`
+Then connect with just: `ssh deploy-host`
 
 ## Usage
 
-### SSH Access
-
-```bash
-ssh -i ~/.ssh/bastion.pem ubuntu@<elastic-ip>
-# Or if configured in ~/.ssh/config:
-ssh bastion
-```
-
-### SSM Session Manager (No Key Needed)
+### SSM Session Manager (Primary - No Key Needed)
 
 ```bash
 aws ssm start-session --target i-XXXXXXXXX
@@ -163,14 +154,22 @@ aws ssm start-session --target i-XXXXXXXXX
 
 This works even if you lose your SSH key.
 
+### SSH Access (Backup)
+
+```bash
+ssh -i ~/.ssh/deploy-host.pem ubuntu@<public-ip>
+# Or if configured in ~/.ssh/config:
+ssh deploy-host
+```
+
 ### Long-Running Deployments
 
 ```bash
-# Connect to bastion
-ssh bastion
+# Connect to deploy host via SSM
+aws ssm start-session --target i-XXXXXXXXX
 
 # Start a persistent session
-screen -S deploy
+tmux new -s deploy
 
 # Clone repo (first time)
 cd ~/projects
@@ -181,23 +180,21 @@ cd cf-scalable-web
 make deploy-all ENV=sandbox
 
 # Detach and go home
-# Press: Ctrl-A, then D
+# Press: Ctrl-B, then D
 
 # Later, reconnect
-ssh bastion
-screen -r deploy
+aws ssm start-session --target i-XXXXXXXXX
+tmux attach -t deploy
 ```
 
 ## Pre-Installed Tools
-
-The bastion comes with these tools installed:
 
 | Tool | Purpose |
 |------|---------|
 | `aws` | AWS CLI v2 |
 | `git` | Version control |
 | `make` | Build automation |
-| `screen` / `tmux` | Persistent sessions |
+| `tmux` / `screen` | Persistent sessions |
 | `vim` | Text editor (set as default) |
 | `tree` | Directory visualization |
 | `jq` | JSON processing |
@@ -215,7 +212,7 @@ The bastion comes with these tools installed:
 ```bash
 # Find security group
 aws ec2 describe-security-groups \
-  --filters "Name=group-name,Values=cf-bastion-sg" \
+  --filters "Name=group-name,Values=cf-deploy-host-sg" \
   --query 'SecurityGroups[0].GroupId' --output text
 
 # Update SSH rule
@@ -229,21 +226,20 @@ aws ec2 authorize-security-group-ingress \
 
 - Provides access without SSH key
 - All sessions logged to CloudTrail
-- Useful for emergency access or key rotation
+- Primary access method
 
 ### IAM Role
 
-The bastion has `PowerUserAccess` for infrastructure management. This is intentional - it needs to create/modify AWS resources.
+The deploy host has `AdministratorAccess` for infrastructure management. This is intentional — it needs to create/modify all AWS resources including IAM roles and policies.
 
 ## Teardown
 
 ```bash
-make destroy-bastion
+make destroy-deploy-host
 ```
 
 This deletes:
 - EC2 instance
-- Elastic IP
 - Security group
 - IAM role and instance profile
 - Key pair (if created by stack)
@@ -255,7 +251,7 @@ This deletes:
 ### Can't SSH
 
 1. Check security group allows your current IP
-2. Verify key permissions: `chmod 600 ~/.ssh/bastion.pem`
+2. Verify key permissions: `chmod 600 ~/.ssh/deploy-host.pem`
 3. Use SSM Session Manager as backup
 
 ### Instance Not Responding
@@ -272,20 +268,24 @@ aws ec2 get-console-output --instance-id i-XXXXXXXX --output text
 
 SSH in and check:
 ```bash
-cat /var/log/bastion-bootstrap.log
-cat /var/log/bastion-bootstrap-status
+cat /var/log/deploy-host-bootstrap.log
+cat /var/log/deploy-host-bootstrap-status
 ```
 
 ## Cost
 
 | Resource | Monthly Cost |
 |----------|--------------|
-| t4g.nano | ~$3.00 |
-| Elastic IP | ~$3.65 |
+| t4g.micro | ~$6.00 |
 | EBS (20GB gp3) | ~$1.60 |
-| **Total** | **~$8.25/month** |
+| **Total** | **~$7.60/month** |
 
-Stop the instance when not in use to save on compute costs (EIP still charges when not attached).
+Stop the instance when not in use to save on compute costs:
+
+```bash
+make stop-deploy-host    # Stop instance
+make start-deploy-host   # Start instance
+```
 
 ---
 

@@ -227,7 +227,7 @@ Compute costs (NGINX, PHP-FPM) depend on traffic and scaling.
 - **Encryption:** At rest (RDS, FSx, S3) and in transit (Redis, SSL)
 - **IAM least privilege:** Each role has minimum required permissions
 - **VPC Flow Logs:** Optional (set `EnableVPCFlowLogs: true`)
-- **Session Manager:** Audited SSH access (no bastion host)
+- **Session Manager:** Audited SSH access via SSM (deploy host for long-running operations)
 
 ## Documentation
 

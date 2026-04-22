@@ -25,8 +25,8 @@ export
         verify-compute verify-compute-alb verify-compute-nlb verify-compute-nginx verify-compute-php \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
         destroy-compute destroy-compute-alb destroy-compute-nlb destroy-compute-nginx destroy-compute-php \
-        deploy-bastion verify-bastion destroy-bastion \
-        stop-bastion start-bastion set-bastion-password \
+        deploy-deploy-host verify-deploy-host destroy-deploy-host \
+        stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
         find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis \
@@ -62,11 +62,11 @@ STORAGE_STACK := $(STACK_PREFIX)-storage
 DATABASE_STACK := $(STACK_PREFIX)-database
 CACHE_STACK := $(STACK_PREFIX)-cache
 
-# Bastion (standalone, not environment-specific)
-BASTION_STACK := cf-bastion
-BASTION_TEMPLATE := cloudformation/cf-bastion.yaml
-BASTION_PARAMS := cloudformation/parameters/bastion.json
-BASTION_SECRET_PATH := worxco/bastion/root-password
+# Deploy Host (standalone, not environment-specific)
+DEPLOY_HOST_STACK := cf-deploy-host
+DEPLOY_HOST_TEMPLATE := cloudformation/cf-deploy-host.yaml
+DEPLOY_HOST_PARAMS := cloudformation/parameters/deploy-host.json
+DEPLOY_HOST_SECRET_PATH := worxco/deploy-host/root-password
 
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
@@ -192,13 +192,13 @@ help:  ## Show this help message
 	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
 	@echo "  make destroy-all              Delete all stacks (reverse order)"
 	@echo ""
-	@echo "$(YELLOW)Bastion Host:$(NC)"
-	@echo "  make deploy-bastion           Deploy bastion host (standalone)"
-	@echo "  make verify-bastion           Show bastion connection info"
-	@echo "  make stop-bastion             Stop bastion (EIP persists)"
-	@echo "  make start-bastion            Start bastion instance"
-	@echo "  make set-bastion-password     Set root password in Secrets Manager"
-	@echo "  make destroy-bastion          Delete bastion host"
+	@echo "$(YELLOW)Deploy Host:$(NC)"
+	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
+	@echo "  make verify-deploy-host       Show deploy host connection info"
+	@echo "  make stop-deploy-host         Stop deploy host"
+	@echo "  make start-deploy-host        Start deploy host instance"
+	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
+	@echo "  make destroy-deploy-host      Delete deploy host"
 	@echo ""
 	@echo "$(YELLOW)Image Builder (ENV=sandbox|staging|production):$(NC)"
 	@echo "  make find-default-subnet      Discover default VPC subnet IDs"
@@ -245,7 +245,7 @@ help:  ## Show this help message
 
 validate:  ## Validate all CloudFormation templates
 	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(BASTION_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
+	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			echo "  Validating $$template..."; \
 			cfn-lint "$$template" || exit 1; \
@@ -257,9 +257,9 @@ validate:  ## Validate all CloudFormation templates
 	else \
 		echo "$(YELLOW)  Warning: Parameter file not found: $(PARAM_FILE)$(NC)"; \
 	fi
-	@if [ -f $(BASTION_PARAMS) ]; then \
-		echo "  Validating $(BASTION_PARAMS)..."; \
-		jq empty $(BASTION_PARAMS) || exit 1; \
+	@if [ -f $(DEPLOY_HOST_PARAMS) ]; then \
+		echo "  Validating $(DEPLOY_HOST_PARAMS)..."; \
+		jq empty $(DEPLOY_HOST_PARAMS) || exit 1; \
 	fi
 	@if [ -f $(IMAGE_BUILDER_PARAMS) ]; then \
 		echo "  Validating $(IMAGE_BUILDER_PARAMS)..."; \
@@ -886,69 +886,69 @@ destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb d
 	@echo "$(GREEN)✓ All compute stacks deleted for ENV=$(ENV)$(NC)"
 
 # -----------------------------------------------------------------------------
-# Bastion Host (Standalone)
+# Deploy Host (Standalone)
 # -----------------------------------------------------------------------------
 
-deploy-bastion:  ## Deploy bastion host (standalone, uses default VPC)
-	@echo "$(BLUE)Deploying bastion stack: $(BASTION_STACK)$(NC)"
+deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
+	@echo "$(BLUE)Deploying deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@time aws cloudformation deploy \
-		--template-file $(BASTION_TEMPLATE) \
-		--stack-name $(BASTION_STACK) \
-		--parameter-overrides file://$(BASTION_PARAMS) \
+		--template-file $(DEPLOY_HOST_TEMPLATE) \
+		--stack-name $(DEPLOY_HOST_STACK) \
+		--parameter-overrides file://$(DEPLOY_HOST_PARAMS) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION)
-	@echo "$(GREEN)✓ Bastion deployed$(NC)"
-	@$(MAKE) verify-bastion
+	@echo "$(GREEN)✓ Deploy host deployed$(NC)"
+	@$(MAKE) verify-deploy-host
 
-verify-bastion:  ## Show bastion connection info
-	@echo "$(BLUE)Bastion Connection Info$(NC)"
+verify-deploy-host:  ## Show deploy host connection info
+	@echo "$(BLUE)Deploy Host Connection Info$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
 	@echo "$(CYAN)Stack Outputs:$(NC)"
 	@aws cloudformation describe-stacks \
-		--stack-name $(BASTION_STACK) \
+		--stack-name $(DEPLOY_HOST_STACK) \
 		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
 		--output table \
-		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Bastion stack not found$(NC)"
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Deploy host stack not found$(NC)"
 	@echo ""
 	@echo "$(CYAN)Instance Status:$(NC)"
 	@aws ec2 describe-instances \
-		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+		--filters "Name=tag:Name,Values=$(DEPLOY_HOST_STACK)" \
 		--query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,Type:InstanceType,IP:PublicIpAddress}' \
 		--output table \
 		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Instance not found$(NC)"
 	@echo ""
-	@echo "$(GREEN)✓ Bastion verification complete$(NC)"
+	@echo "$(GREEN)✓ Deploy host verification complete$(NC)"
 
-destroy-bastion:  ## Delete bastion host
-	@echo "$(RED)WARNING: This will delete the bastion host!$(NC)"
+destroy-deploy-host:  ## Delete deploy host
+	@echo "$(RED)WARNING: This will delete the deploy host!$(NC)"
 	@read -p "Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" != "yes" ]; then \
 		echo "Cancelled"; \
 		exit 0; \
 	fi
-	@echo "$(YELLOW)Deleting bastion stack: $(BASTION_STACK)$(NC)"
+	@echo "$(YELLOW)Deleting deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@time aws cloudformation delete-stack \
-		--stack-name $(BASTION_STACK) \
+		--stack-name $(DEPLOY_HOST_STACK) \
 		--region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
 	@aws cloudformation wait stack-delete-complete \
-		--stack-name $(BASTION_STACK) \
+		--stack-name $(DEPLOY_HOST_STACK) \
 		--region $(AWS_REGION)
-	@echo "$(GREEN)✓ Bastion deleted$(NC)"
+	@echo "$(GREEN)✓ Deploy host deleted$(NC)"
 
-stop-bastion:  ## Stop bastion instance (EIP persists)
-	@echo "$(BLUE)Stopping bastion instance...$(NC)"
+stop-deploy-host:  ## Stop deploy host instance
+	@echo "$(BLUE)Stopping deploy host instance...$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@INSTANCE_ID=$$(aws ec2 describe-instances \
-		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+		--filters "Name=tag:Name,Values=$(DEPLOY_HOST_STACK)" \
 			"Name=instance-state-name,Values=pending,running,stopping,stopped" \
 		--query 'Reservations[].Instances[0].InstanceId' \
 		--output text \
 		--region $(AWS_REGION) 2>/dev/null); \
 	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
-		echo "$(RED)Error: Bastion instance not found$(NC)"; \
+		echo "$(RED)Error: Deploy host instance not found$(NC)"; \
 		exit 1; \
 	fi; \
 	CURRENT_STATE=$$(aws ec2 describe-instances \
@@ -971,19 +971,19 @@ stop-bastion:  ## Stop bastion instance (EIP persists)
 	aws ec2 wait instance-stopped \
 		--instance-ids "$$INSTANCE_ID" \
 		--region $(AWS_REGION); \
-	echo "$(GREEN)✓ Bastion stopped (EIP remains associated)$(NC)"
+	echo "$(GREEN)✓ Deploy host stopped$(NC)"
 
-start-bastion:  ## Start bastion instance
-	@echo "$(BLUE)Starting bastion instance...$(NC)"
+start-deploy-host:  ## Start deploy host instance
+	@echo "$(BLUE)Starting deploy host instance...$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@INSTANCE_ID=$$(aws ec2 describe-instances \
-		--filters "Name=tag:Name,Values=$(BASTION_STACK)" \
+		--filters "Name=tag:Name,Values=$(DEPLOY_HOST_STACK)" \
 			"Name=instance-state-name,Values=pending,running,stopping,stopped" \
 		--query 'Reservations[].Instances[0].InstanceId' \
 		--output text \
 		--region $(AWS_REGION) 2>/dev/null); \
 	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
-		echo "$(RED)Error: Bastion instance not found$(NC)"; \
+		echo "$(RED)Error: Deploy host instance not found$(NC)"; \
 		exit 1; \
 	fi; \
 	CURRENT_STATE=$$(aws ec2 describe-instances \
@@ -1006,14 +1006,14 @@ start-bastion:  ## Start bastion instance
 	aws ec2 wait instance-running \
 		--instance-ids "$$INSTANCE_ID" \
 		--region $(AWS_REGION); \
-	echo "$(GREEN)✓ Bastion started$(NC)"
+	echo "$(GREEN)✓ Deploy host started$(NC)"
 	@echo ""
-	@$(MAKE) verify-bastion
+	@$(MAKE) verify-deploy-host
 
-set-bastion-password:  ## Set root password for bastion in Secrets Manager
-	@echo "$(BLUE)Set Bastion Root Password$(NC)"
+set-deploy-host-password:  ## Set root password for deploy host in Secrets Manager
+	@echo "$(BLUE)Set Deploy Host Root Password$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@echo "This password will be applied on next bastion deploy."
+	@echo "This password will be applied on next deploy-deploy-host."
 	@echo ""
 	@read -s -p "Enter root password: " PASS1; echo ""; \
 	read -s -p "Confirm root password: " PASS2; echo ""; \
@@ -1027,23 +1027,23 @@ set-bastion-password:  ## Set root password for bastion in Secrets Manager
 	fi; \
 	echo "$(BLUE)Storing password in Secrets Manager...$(NC)"; \
 	if aws secretsmanager describe-secret \
-		--secret-id "$(BASTION_SECRET_PATH)" \
+		--secret-id "$(DEPLOY_HOST_SECRET_PATH)" \
 		--region $(AWS_REGION) >/dev/null 2>&1; then \
 		aws secretsmanager put-secret-value \
-			--secret-id "$(BASTION_SECRET_PATH)" \
+			--secret-id "$(DEPLOY_HOST_SECRET_PATH)" \
 			--secret-string "$$PASS1" \
 			--region $(AWS_REGION) >/dev/null; \
 		echo "$(GREEN)✓ Password updated in Secrets Manager$(NC)"; \
 	else \
 		aws secretsmanager create-secret \
-			--name "$(BASTION_SECRET_PATH)" \
-			--description "Root password for bastion host" \
+			--name "$(DEPLOY_HOST_SECRET_PATH)" \
+			--description "Root password for deploy host" \
 			--secret-string "$$PASS1" \
 			--region $(AWS_REGION) >/dev/null; \
 		echo "$(GREEN)✓ Password created in Secrets Manager$(NC)"; \
 	fi; \
-	echo "  Secret: $(CYAN)$(BASTION_SECRET_PATH)$(NC)"; \
-	echo "  $(YELLOW)Note: Password applies on next deploy-bastion (UserData runs on first boot only)$(NC)"
+	echo "  Secret: $(CYAN)$(DEPLOY_HOST_SECRET_PATH)$(NC)"; \
+	echo "  $(YELLOW)Note: Password applies on next deploy-deploy-host (UserData runs on first boot only)$(NC)"
 
 # -----------------------------------------------------------------------------
 # Image Builder
