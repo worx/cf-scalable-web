@@ -1157,7 +1157,7 @@ destroy-image-builder:  ## Delete Image Builder stack and associated AMIs/snapsh
 	@echo "$(BLUE)Cleaning up AMIs built by Image Builder for ENV=$(ENV)...$(NC)"
 	@AMI_IDS=$$(aws ec2 describe-images --owners self \
 		--filters "Name=tag:CreatedBy,Values=EC2 Image Builder" \
-			"Name=tag:Environment,Values=$(ENV)" \
+			"Name=name,Values=$(ENV)-*" \
 		--query 'Images[].ImageId' \
 		--output text \
 		--region $(AWS_REGION) 2>/dev/null || echo ""); \
