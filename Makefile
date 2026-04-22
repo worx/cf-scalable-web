@@ -205,7 +205,7 @@ help:  ## Show this help message
 	@echo "  make upload-build-configs     Sync configs to S3 image-builder bucket"
 	@echo "  make deploy-image-builder     Deploy Image Builder stack"
 	@echo "  make verify-image-builder     Show pipeline statuses and latest builds"
-	@echo "  make destroy-image-builder    Delete Image Builder stack (AMIs persist)"
+	@echo "  make destroy-image-builder    Delete Image Builder stack + AMIs"
 	@echo "  make build-ami-nginx          Trigger NGINX pipeline execution"
 	@echo "  make build-ami-php74          Trigger PHP 7.4 pipeline execution"
 	@echo "  make build-ami-php83          Trigger PHP 8.3 pipeline execution"
@@ -656,6 +656,7 @@ destroy-all:  ## Delete all stacks (reverse order, with confirmation)
 		exit 0; \
 	fi
 	@$(MAKE) destroy-compute ENV=$(ENV) CONFIRMED=yes || true
+	@$(MAKE) destroy-image-builder ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-cache ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-database ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-storage ENV=$(ENV) CONFIRMED=yes || true
@@ -1144,13 +1145,42 @@ verify-image-builder:  ## Show pipeline statuses and latest build info
 	@echo ""
 	@echo "$(GREEN)✓ Image Builder verification complete$(NC)"
 
-destroy-image-builder:  ## Delete Image Builder stack (AMIs persist independently)
-	@echo "$(RED)WARNING: This will delete the Image Builder stack!$(NC)"
-	@echo "$(YELLOW)Note: Existing AMIs will NOT be deleted.$(NC)"
-	@read -p "Type 'yes' to confirm: " confirm; \
-	if [ "$$confirm" != "yes" ]; then \
-		echo "Cancelled"; \
-		exit 0; \
+destroy-image-builder:  ## Delete Image Builder stack and associated AMIs/snapshots
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(RED)WARNING: This will delete the Image Builder stack and all associated AMIs!$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Cancelled"; \
+			exit 0; \
+		fi; \
+	fi
+	@echo "$(BLUE)Cleaning up AMIs built by Image Builder for ENV=$(ENV)...$(NC)"
+	@AMI_IDS=$$(aws ec2 describe-images --owners self \
+		--filters "Name=tag:CreatedBy,Values=EC2 Image Builder" \
+			"Name=tag:Environment,Values=$(ENV)" \
+		--query 'Images[].ImageId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null || echo ""); \
+	if [ -n "$$AMI_IDS" ] && [ "$$AMI_IDS" != "None" ]; then \
+		for ami in $$AMI_IDS; do \
+			echo "  $(YELLOW)Deregistering AMI: $$ami$(NC)"; \
+			SNAP_IDS=$$(aws ec2 describe-images --image-ids "$$ami" \
+				--query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' \
+				--output text \
+				--region $(AWS_REGION) 2>/dev/null || echo ""); \
+			aws ec2 deregister-image --image-id "$$ami" \
+				--region $(AWS_REGION) 2>/dev/null || true; \
+			for snap in $$SNAP_IDS; do \
+				if [ -n "$$snap" ] && [ "$$snap" != "None" ]; then \
+					echo "    $(YELLOW)Deleting snapshot: $$snap$(NC)"; \
+					aws ec2 delete-snapshot --snapshot-id "$$snap" \
+						--region $(AWS_REGION) 2>/dev/null || true; \
+				fi; \
+			done; \
+			echo "  $(GREEN)✓ AMI $$ami and snapshots removed$(NC)"; \
+		done; \
+	else \
+		echo "  $(CYAN)No AMIs found for ENV=$(ENV)$(NC)"; \
 	fi
 	@echo "$(YELLOW)Deleting Image Builder stack: $(IMAGE_BUILDER_STACK)$(NC)"
 	@time aws cloudformation delete-stack \
@@ -1160,7 +1190,7 @@ destroy-image-builder:  ## Delete Image Builder stack (AMIs persist independentl
 	@aws cloudformation wait stack-delete-complete \
 		--stack-name $(IMAGE_BUILDER_STACK) \
 		--region $(AWS_REGION)
-	@echo "$(GREEN)✓ Image Builder stack deleted (AMIs preserved)$(NC)"
+	@echo "$(GREEN)✓ Image Builder stack and AMIs deleted$(NC)"
 
 build-ami-nginx:  ## Trigger NGINX pipeline execution
 	@echo "$(BLUE)Triggering NGINX AMI build...$(NC)"
