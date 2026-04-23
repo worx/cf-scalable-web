@@ -1060,6 +1060,8 @@ destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb d
 deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
 	@echo "$(BLUE)Deploying deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
+	@aws ssm delete-document --name SSM-SessionManagerRunShell \
+		--region $(AWS_REGION) 2>/dev/null || true
 	@time aws cloudformation deploy \
 		--template-file $(DEPLOY_HOST_TEMPLATE) \
 		--stack-name $(DEPLOY_HOST_STACK) \
@@ -1102,6 +1104,12 @@ destroy-deploy-host:  ## Delete deploy host
 		--region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
 	$(call cf-wait,stack-delete-complete,$(DEPLOY_HOST_STACK))
+	@echo "$(BLUE)Cleaning up SSM session preferences document...$(NC)"
+	@aws ssm delete-document \
+		--name SSM-SessionManagerRunShell \
+		--region $(AWS_REGION) 2>/dev/null \
+		&& echo "  $(GREEN)✓ SSM-SessionManagerRunShell deleted$(NC)" \
+		|| echo "  $(CYAN)SSM-SessionManagerRunShell not found (already clean)$(NC)"
 	@echo "$(GREEN)✓ Deploy host deleted$(NC)"
 
 stop-deploy-host:  ## Stop deploy host instance
