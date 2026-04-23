@@ -164,7 +164,7 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-nginx     Deploy NGINX compute stack"
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
-	@echo "  make deploy-all               Deploy all stacks in order"
+	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
 	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
 	@echo "  make verify-all               Verify all stacks"
@@ -371,8 +371,86 @@ deploy-cache: validate check-params  ## Deploy cache stack
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ Cache stack deployed: $(CACHE_STACK)$(NC)"
 
-deploy-all: deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache deploy-compute  ## Deploy all stacks
-	@echo "$(GREEN)✓ All stacks deployed for ENV=$(ENV)$(NC)"
+deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "$(BLUE)  Full Deployment: ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Phase 1: Foundation$(NC)"
+	@$(MAKE) deploy-vpc ENV=$(ENV)
+	@$(MAKE) deploy-iam ENV=$(ENV)
+	@$(MAKE) deploy-storage ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Phase 2: Image Builder + AMI Builds$(NC)"
+	@$(MAKE) deploy-image-builder ENV=$(ENV)
+	@$(MAKE) build-amis ENV=$(ENV)
+	@echo ""
+	@echo "$(BLUE)Waiting for AMI builds to complete (this takes 20-30 minutes)...$(NC)"
+	@for pipeline in nginx php74 php83; do \
+		echo "  $(BLUE)Waiting for $$pipeline AMI...$(NC)"; \
+		case $$pipeline in \
+			nginx) OUTPUT_KEY="NginxPipelineArn" ;; \
+			php74) OUTPUT_KEY="PhpFpm74PipelineArn" ;; \
+			php83) OUTPUT_KEY="PhpFpm83PipelineArn" ;; \
+		esac; \
+		PIPELINE_ARN=$$(aws cloudformation describe-stacks \
+			--stack-name $(IMAGE_BUILDER_STACK) \
+			--query "Stacks[0].Outputs[?OutputKey==\`$$OUTPUT_KEY\`].OutputValue" \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$PIPELINE_ARN" ] || [ "$$PIPELINE_ARN" = "None" ]; then \
+			echo "$(RED)Error: $$pipeline pipeline ARN not found$(NC)"; \
+			exit 1; \
+		fi; \
+		BUILD_ARN=$$(aws imagebuilder list-image-pipeline-images \
+			--image-pipeline-arn "$$PIPELINE_ARN" \
+			--query 'imageSummaryList | sort_by(@, &dateCreated) | [-1].arn' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$BUILD_ARN" ] || [ "$$BUILD_ARN" = "None" ]; then \
+			echo "$(RED)Error: No build found for $$pipeline$(NC)"; \
+			exit 1; \
+		fi; \
+		while true; do \
+			STATUS=$$(aws imagebuilder get-image \
+				--image-build-version-arn "$$BUILD_ARN" \
+				--query 'image.state.status' \
+				--output text \
+				--region $(AWS_REGION) 2>/dev/null); \
+			case $$STATUS in \
+				AVAILABLE) \
+					echo "  $(GREEN)✓ $$pipeline AMI ready$(NC)"; \
+					break ;; \
+				FAILED|CANCELLED) \
+					REASON=$$(aws imagebuilder get-image \
+						--image-build-version-arn "$$BUILD_ARN" \
+						--query 'image.state.reason' \
+						--output text \
+						--region $(AWS_REGION) 2>/dev/null); \
+					echo "  $(RED)✗ $$pipeline AMI build $$STATUS: $$REASON$(NC)"; \
+					exit 1 ;; \
+				*) \
+					printf "  $$pipeline: $$STATUS (polling every 60s)...\r"; \
+					sleep 60 ;; \
+			esac; \
+		done; \
+	done
+	@echo ""
+	@echo "$(CYAN)Phase 3: Update AMI Parameters$(NC)"
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=nginx
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php83
+	@echo ""
+	@echo "$(CYAN)Phase 4: Compute Layer$(NC)"
+	@$(MAKE) deploy-compute ENV=$(ENV)
+	@echo ""
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)  ✓ Full deployment complete: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Optional (deploy when needed):$(NC)"
+	@echo "  make deploy-database ENV=$(ENV)    # RDS PostgreSQL (~15 min, ~\$$75/mo)"
+	@echo "  make deploy-cache ENV=$(ENV)       # ElastiCache Valkey (~2 min, ~\$$12/mo)"
 
 # -----------------------------------------------------------------------------
 # Verify Targets
