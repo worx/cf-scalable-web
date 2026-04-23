@@ -182,9 +182,17 @@ env-check:  ## Display current AWS environment variables
 	else \
 		echo "  $(GREEN).env file:       loaded$(NC)"; \
 	fi
-	@echo "  AWS_PROFILE:         $(CYAN)$${AWS_PROFILE:-<not set>}$(NC)"
+	@if [ -n "$${AWS_PROFILE}" ]; then \
+		echo "  AWS_PROFILE:         $(CYAN)$${AWS_PROFILE}$(NC)"; \
+	else \
+		echo "  AWS_PROFILE:         $(CYAN)<instance role>$(NC)"; \
+	fi
 	@echo "  AWS_REGION:          $(CYAN)$${AWS_REGION:-$(AWS_REGION)}$(NC)"
-	@echo "  AWS_PAGER:           $(CYAN)$${AWS_PAGER:-<not set>}$(NC)"
+	@if [ "$${AWS_PAGER+set}" = "set" ]; then \
+		echo "  AWS_PAGER:           $(CYAN)(disabled)$(NC)"; \
+	else \
+		echo "  AWS_PAGER:           $(YELLOW)<not set - may open pager>$(NC)"; \
+	fi
 	@echo "  AWS_CLI_AUTO_PROMPT: $(CYAN)$${AWS_CLI_AUTO_PROMPT:-<not set>}$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "  ENV (Makefile):      $(CYAN)$(ENV)$(NC)"
