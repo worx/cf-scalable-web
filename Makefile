@@ -448,9 +448,11 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@$(MAKE) deploy-image-builder ENV=$(ENV)
 	@$(MAKE) build-amis ENV=$(ENV)
 	@echo ""
-	@echo "$(BLUE)Waiting for AMI builds to complete (this takes 20-30 minutes)...$(NC)"
-	@for pipeline in nginx php74 php83; do \
-		echo "  $(BLUE)Waiting for $$pipeline AMI...$(NC)"; \
+	@echo "$(BLUE)Waiting for all AMI builds to complete (this takes 20-30 minutes)...$(NC)"
+	@echo "$(BLUE)All 3 builds run in parallel — polling all simultaneously.$(NC)"
+	@NGINX_DONE=0; PHP74_DONE=0; PHP83_DONE=0; \
+	NGINX_ARN=""; PHP74_ARN=""; PHP83_ARN=""; \
+	for pipeline in nginx php74 php83; do \
 		case $$pipeline in \
 			nginx) OUTPUT_KEY="NginxPipelineArn" ;; \
 			php74) OUTPUT_KEY="PhpFpm74PipelineArn" ;; \
@@ -474,29 +476,53 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 			echo "$(RED)Error: No build found for $$pipeline$(NC)"; \
 			exit 1; \
 		fi; \
-		while true; do \
+		case $$pipeline in \
+			nginx) NGINX_ARN="$$BUILD_ARN" ;; \
+			php74) PHP74_ARN="$$BUILD_ARN" ;; \
+			php83) PHP83_ARN="$$BUILD_ARN" ;; \
+		esac; \
+	done; \
+	echo "  Tracking: nginx, php74, php83"; \
+	while [ $$NGINX_DONE -eq 0 ] || [ $$PHP74_DONE -eq 0 ] || [ $$PHP83_DONE -eq 0 ]; do \
+		for pipeline in nginx php74 php83; do \
+			case $$pipeline in \
+				nginx) DONE=$$NGINX_DONE; ARN="$$NGINX_ARN" ;; \
+				php74) DONE=$$PHP74_DONE; ARN="$$PHP74_ARN" ;; \
+				php83) DONE=$$PHP83_DONE; ARN="$$PHP83_ARN" ;; \
+			esac; \
+			if [ $$DONE -eq 1 ]; then continue; fi; \
 			STATUS=$$(aws imagebuilder get-image \
-				--image-build-version-arn "$$BUILD_ARN" \
+				--image-build-version-arn "$$ARN" \
 				--query 'image.state.status' \
 				--output text \
 				--region $(AWS_REGION) 2>/dev/null); \
 			case $$STATUS in \
 				AVAILABLE) \
 					echo "  $(GREEN)✓ $$pipeline AMI ready$(NC)"; \
-					break ;; \
+					case $$pipeline in \
+						nginx) NGINX_DONE=1 ;; \
+						php74) PHP74_DONE=1 ;; \
+						php83) PHP83_DONE=1 ;; \
+					esac ;; \
 				FAILED|CANCELLED) \
 					REASON=$$(aws imagebuilder get-image \
-						--image-build-version-arn "$$BUILD_ARN" \
+						--image-build-version-arn "$$ARN" \
 						--query 'image.state.reason' \
 						--output text \
 						--region $(AWS_REGION) 2>/dev/null); \
 					echo "  $(RED)✗ $$pipeline AMI build $$STATUS: $$REASON$(NC)"; \
 					exit 1 ;; \
-				*) \
-					printf "  $$pipeline: $$STATUS (polling every 60s)...\r"; \
-					sleep 60 ;; \
+				*) ;; \
 			esac; \
 		done; \
+		if [ $$NGINX_DONE -eq 0 ] || [ $$PHP74_DONE -eq 0 ] || [ $$PHP83_DONE -eq 0 ]; then \
+			REMAINING=""; \
+			[ $$NGINX_DONE -eq 0 ] && REMAINING="$$REMAINING nginx"; \
+			[ $$PHP74_DONE -eq 0 ] && REMAINING="$$REMAINING php74"; \
+			[ $$PHP83_DONE -eq 0 ] && REMAINING="$$REMAINING php83"; \
+			echo "  Waiting on:$$REMAINING (polling every 60s)"; \
+			sleep 60; \
+		fi; \
 	done
 	@echo ""
 	@echo "$(CYAN)Phase 3: Update AMI Parameters$(NC)"
