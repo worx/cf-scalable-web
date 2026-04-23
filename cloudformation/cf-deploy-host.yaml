@@ -11,10 +11,10 @@
 # Features:
 #   - Uses default VPC (survives project VPC teardowns)
 #   - Ubuntu 24.04 LTS on ARM (t4g.micro, 1GB RAM + 2GB swap)
-#   - SSH access restricted to specified CIDR
-#   - SSM Session Manager for primary access
-#   - Dynamic public IP (no EIP cost when stopped)
-#   - Optional key pair creation (stored in SSM Parameter Store)
+#   - SSM Session Manager access only (no SSH inbound)
+#   - Public IP for outbound internet (apt-get, git, AWS APIs)
+#   - No inbound ports open (security group blocks all ingress)
+#   - IAM instance role provides AdministratorAccess (no keys needed)
 #   - Pre-installed: AWS CLI, git, make, screen, tmux, vim, Claude Code
 #
 # Dependencies: None (standalone)
@@ -29,17 +29,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Standalone deploy host for cf-scalable-web infrastructure management'
 
 Parameters:
-  KeyPairName:
-    Type: String
-    Description: Existing EC2 key pair name (leave empty to create new)
-    Default: ''
-
-  AllowedSSHCidr:
-    Type: String
-    Description: CIDR block allowed to SSH (e.g., 203.0.113.50/32 for single IP)
-    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
-    ConstraintDescription: Must be a valid CIDR block (e.g., 192.168.1.0/24)
-
   InstanceType:
     Type: String
     Description: EC2 instance type
@@ -54,42 +43,18 @@ Parameters:
     Description: Ubuntu 24.04 LTS ARM64 AMI (resolved from SSM)
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
 
-Conditions:
-  CreateKeyPair: !Equals [!Ref KeyPairName, '']
-
 Resources:
   # ========================================
-  # Key Pair (Conditional)
-  # ========================================
-
-  DeployHostKeyPair:
-    Type: AWS::EC2::KeyPair
-    Condition: CreateKeyPair
-    Properties:
-      KeyName: !Sub '${AWS::StackName}-keypair'
-      KeyType: ed25519
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-keypair'
-        - Key: Purpose
-          Value: Deploy host SSH access
-
-  # ========================================
-  # Security Group
+  # Security Group (no inbound, SSM only)
   # ========================================
 
   DeployHostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${AWS::StackName}-sg'
-      GroupDescription: Security group for deploy host - SSH from allowed CIDR only
+      GroupDescription: Security group for deploy host - no inbound, SSM access only
       # Uses default VPC automatically
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: !Ref AllowedSSHCidr
-          Description: SSH from allowed CIDR
+      # No SecurityGroupIngress — all inbound blocked
       # Default egress allows all outbound (needed for package installs, AWS API calls)
       Tags:
         - Key: Name
@@ -137,10 +102,6 @@ Resources:
     Properties:
       ImageId: !Ref UbuntuAMI
       InstanceType: !Ref InstanceType
-      KeyName: !If
-        - CreateKeyPair
-        - !Ref DeployHostKeyPair
-        - !Ref KeyPairName
       IamInstanceProfile: !Ref DeployHostInstanceProfile
       SecurityGroupIds:
         - !Ref DeployHostSecurityGroup
@@ -152,126 +113,159 @@ Resources:
             Encrypted: true
             DeleteOnTermination: true
       UserData:
-        Fn::Base64: |
-          #!/bin/bash
-          set -euo pipefail
-          exec > >(tee /var/log/deploy-host-bootstrap.log) 2>&1
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              # CloudFormation-injected region (used below, then baked into profile)
+              CF_REGION="${Region}"
+              exec > >(tee /var/log/deploy-host-bootstrap.log) 2>&1
 
-          echo "=== Deploy Host Bootstrap Starting $(date) ==="
+              echo "=== Deploy Host Bootstrap Starting $(date) ==="
 
-          # Create 2GB swap (supplements t4g.micro's 1GB RAM)
-          fallocate -l 2G /swapfile
-          chmod 600 /swapfile
-          mkswap /swapfile
-          swapon /swapfile
-          echo '/swapfile none swap sw 0 0' >> /etc/fstab
-          sysctl vm.swappiness=10
-          echo 'vm.swappiness=10' >> /etc/sysctl.conf
-          echo "Swap enabled: $(swapon --show) (swappiness=10)"
+              # Create 2GB swap (supplements t4g.micro's 1GB RAM)
+              fallocate -l 2G /swapfile
+              chmod 600 /swapfile
+              mkswap /swapfile
+              swapon /swapfile
+              echo '/swapfile none swap sw 0 0' >> /etc/fstab
+              sysctl vm.swappiness=10
+              echo 'vm.swappiness=10' >> /etc/sysctl.conf
+              echo "Swap enabled: $(swapon --show) (swappiness=10)"
 
-          # System updates
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -y
+              # System updates
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -y
 
-          # Upgrade is best-effort: transient mirror 404s on fresh AMIs are common
-          apt-get upgrade -y || apt-get upgrade -y --fix-missing || {
-            echo "WARNING: apt-get upgrade failed (non-fatal, continuing)"
-          }
+              # Upgrade is best-effort: transient mirror 404s on fresh AMIs are common
+              apt-get upgrade -y || apt-get upgrade -y --fix-missing || {
+                echo "WARNING: apt-get upgrade failed (non-fatal, continuing)"
+              }
 
-          # Core tools
-          apt-get install -y \
-            git \
-            make \
-            jq \
-            screen \
-            tmux \
-            tree \
-            vim \
-            unzip \
-            python3-pip \
-            python3-venv
+              # Core tools
+              apt-get install -y \
+                git \
+                make \
+                jq \
+                screen \
+                tmux \
+                tree \
+                vim \
+                unzip \
+                python3-pip \
+                python3-venv
 
-          # Make vim the default editor (not nano!)
-          update-alternatives --set editor /usr/bin/vim.basic
-          cat > /etc/profile.d/deploy-host-env.sh << 'ENVEOF'
-          export EDITOR=vim
-          export VISUAL=vim
-          export AWS_PAGER=""
-          export AWS_CLI_AUTO_PROMPT=off
-          ENVEOF
+              # Make vim the default editor (not nano!)
+              update-alternatives --set editor /usr/bin/vim.basic
+              cat > /etc/profile.d/deploy-host-env.sh <<ENVEOF
+              export EDITOR=vim
+              export VISUAL=vim
+              export AWS_PAGER=""
+              export AWS_CLI_AUTO_PROMPT=off
+              export AWS_DEFAULT_REGION=$CF_REGION
+              ENVEOF
 
-          # Set vim as default for git
-          su - ubuntu -c 'git config --global core.editor vim'
+              # Set vim as default for git
+              su - ubuntu -c 'git config --global core.editor vim'
 
-          # AWS CLI v2 (ARM64)
-          cd /tmp
-          curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip -q awscliv2.zip
-          ./aws/install
-          rm -rf aws awscliv2.zip
+              # AWS CLI v2 (ARM64)
+              cd /tmp
+              curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+              unzip -q awscliv2.zip
+              ./aws/install
+              rm -rf aws awscliv2.zip
 
-          # Root password from Secrets Manager (optional, non-fatal)
-          echo "=== Setting root password from Secrets Manager ==="
-          ROOT_PASS=$(aws secretsmanager get-secret-value \
-            --secret-id "worxco/deploy-host/root-password" \
-            --region us-east-1 \
-            --query 'SecretString' \
-            --output text 2>/dev/null) || true
-          if [ -n "$ROOT_PASS" ]; then
-            echo "root:$ROOT_PASS" | chpasswd
-            echo "Root password set from Secrets Manager"
-            unset ROOT_PASS
-          else
-            echo "WARNING: worxco/deploy-host/root-password not found in Secrets Manager - skipping"
-          fi
+              # Create ~/.aws with README explaining instance role credentials
+              mkdir -p /home/ubuntu/.aws
+              cat > /home/ubuntu/.aws/README.md << 'AWSEOF'
+              # AWS Credentials on Deploy Host
 
-          # cfn-lint for template validation (venv avoids system package conflicts
-          # and keeps memory usage low on t4g.nano's 512MB)
-          python3 -m venv /opt/cfn-lint --system-site-packages
-          /opt/cfn-lint/bin/pip install cfn-lint
-          ln -sf /opt/cfn-lint/bin/cfn-lint /usr/local/bin/cfn-lint
+              This instance uses an IAM Instance Role for AWS access.
+              No access keys or credentials files are needed.
 
-          # Node.js 20.x LTS (for Claude Code)
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          apt-get install -y nodejs
+              The instance role provides AdministratorAccess to this
+              AWS account via the EC2 instance metadata service (IMDS).
 
-          # Claude Code CLI
-          npm install -g @anthropic-ai/claude-code
+              All AWS CLI commands work automatically:
+                aws sts get-caller-identity    # verify your identity
+                aws s3 ls                      # list buckets
+                aws cloudformation list-stacks # list stacks
 
-          # Ensure SSM Agent is running (usually pre-installed)
-          snap install amazon-ssm-agent --classic || true
-          systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-          systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+              The default region is set via /etc/profile.d/deploy-host-env.sh.
+              Override per-command with: --region us-west-2
+              Override per-session with: export AWS_DEFAULT_REGION=us-west-2
 
-          # Create working directory
-          mkdir -p /home/ubuntu/projects
-          chown ubuntu:ubuntu /home/ubuntu/projects
+              DO NOT place access keys on this instance.
+              The instance role is more secure (automatic rotation, no key files).
+              AWSEOF
+              chown -R ubuntu:ubuntu /home/ubuntu/.aws
 
-          # Create helpful motd
-          cat > /etc/update-motd.d/99-deploy-host << 'MOTDEOF'
-          #!/bin/bash
-          echo ""
-          echo "============================================"
-          echo "  cf-scalable-web Deploy Host"
-          echo "============================================"
-          echo ""
-          echo "Quick Start:"
-          echo "  cd ~/projects"
-          echo "  git clone <your-repo>"
-          echo "  cd cf-scalable-web"
-          echo "  cp .env.example .env        # <-- required before make"
-          echo "  tmux new -s deploy"
-          echo "  make deploy-all ENV=sandbox"
-          echo "  # Ctrl-B D to detach"
-          echo ""
-          echo "AWS: Instance role provides credentials (no ~/.aws/ needed)"
-          echo "Installed: aws, git, make, screen, tmux, vim, claude"
-          echo ""
-          MOTDEOF
-          chmod +x /etc/update-motd.d/99-deploy-host
+              # Root password from Secrets Manager (optional, non-fatal)
+              echo "=== Setting root password from Secrets Manager ==="
+              ROOT_PASS=$(aws secretsmanager get-secret-value \
+                --secret-id "worxco/deploy-host/root-password" \
+                --region $CF_REGION \
+                --query 'SecretString' \
+                --output text 2>/dev/null) || true
+              if [ -n "$ROOT_PASS" ]; then
+                echo "root:$ROOT_PASS" | chpasswd
+                echo "Root password set from Secrets Manager"
+                unset ROOT_PASS
+              else
+                echo "WARNING: worxco/deploy-host/root-password not found in Secrets Manager - skipping"
+              fi
 
-          echo "=== Deploy Host Bootstrap Complete $(date) ==="
-          echo "SUCCESS" > /var/log/deploy-host-bootstrap-status
+              # cfn-lint for template validation (venv avoids system package conflicts
+              # and keeps memory usage low on t4g.nano's 512MB)
+              python3 -m venv /opt/cfn-lint --system-site-packages
+              /opt/cfn-lint/bin/pip install cfn-lint
+              ln -sf /opt/cfn-lint/bin/cfn-lint /usr/local/bin/cfn-lint
+
+              # Node.js 20.x LTS (for Claude Code)
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get install -y nodejs
+
+              # Claude Code CLI
+              npm install -g @anthropic-ai/claude-code
+
+              # Ensure SSM Agent is running (usually pre-installed)
+              snap install amazon-ssm-agent --classic || true
+              systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+              systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+              # Create working directory
+              mkdir -p /home/ubuntu/projects
+              chown ubuntu:ubuntu /home/ubuntu/projects
+
+              # Create helpful motd
+              cat > /etc/update-motd.d/99-deploy-host << 'MOTDEOF'
+              #!/bin/bash
+              echo ""
+              echo "============================================"
+              echo "  cf-scalable-web Deploy Host"
+              echo "============================================"
+              echo ""
+              echo "Quick Start:"
+              echo "  cd ~/projects"
+              echo "  git clone <your-repo>"
+              echo "  cd cf-scalable-web"
+              echo "  cp .env.example .env        # <-- required before make"
+              echo "  tmux new -s deploy"
+              echo "  make deploy-all ENV=sandbox"
+              echo "  # Ctrl-B D to detach"
+              echo ""
+              echo "Access: SSM Session Manager only (no SSH)"
+              echo "AWS:    Instance role provides AdministratorAccess"
+              echo "Region: $CF_REGION (override with export AWS_DEFAULT_REGION=...)"
+              echo "Tools:  aws, git, make, tmux, screen, vim, claude"
+              echo ""
+              MOTDEOF
+              chmod +x /etc/update-motd.d/99-deploy-host
+
+              echo "=== Deploy Host Bootstrap Complete $(date) ==="
+              echo "SUCCESS" > /var/log/deploy-host-bootstrap-status
+            - Region: !Ref 'AWS::Region'
 
       Tags:
         - Key: Name
@@ -281,7 +275,7 @@ Resources:
 
 Outputs:
   DeployHostPublicIP:
-    Description: Deploy host public IP (dynamic, changes on stop/start)
+    Description: Deploy host public IP (for outbound internet only - no inbound ports open)
     Value: !GetAtt DeployHostInstance.PublicIp
 
   DeployHostInstanceId:
@@ -290,27 +284,12 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-instance-id'
 
-  SSHCommand:
-    Description: SSH command to connect (IP changes on stop/start)
-    Value: !Sub 'ssh -i ~/.ssh/deploy-host.pem ubuntu@${DeployHostInstance.PublicIp}'
-
   SSMCommand:
-    Description: SSM Session Manager command (no SSH key needed)
+    Description: SSM Session Manager command (primary access method)
     Value: !Sub 'aws ssm start-session --target ${DeployHostInstance}'
 
-  KeyPairParameterPath:
-    Condition: CreateKeyPair
-    Description: SSM parameter path containing private key (retrieve once, then delete)
-    Value: !Sub '/ec2/keypair/${DeployHostKeyPair.KeyPairId}'
-
-  RetrieveKeyCommand:
-    Condition: CreateKeyPair
-    Description: Command to retrieve private key
-    Value: !Sub |
-      aws ssm get-parameter --name /ec2/keypair/${DeployHostKeyPair.KeyPairId} --with-decryption --query 'Parameter.Value' --output text > ~/.ssh/deploy-host.pem && chmod 600 ~/.ssh/deploy-host.pem
-
   SecurityGroupId:
-    Description: Deploy host security group ID (for VPC peering rules)
+    Description: Deploy host security group ID
     Value: !Ref DeployHostSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-sg-id'

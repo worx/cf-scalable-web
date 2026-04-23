@@ -1,7 +1,5 @@
 {
   "Parameters": {
-    "KeyPairName": "",
-    "AllowedSSHCidr": "107.221.152.113/32",
     "InstanceType": "t4g.micro"
   }
 }
