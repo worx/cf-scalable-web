@@ -314,6 +314,9 @@ Resources:
                 make deploy-all ENV=sandbox
                 # Ctrl-B D to detach
 
+              Reconnect:
+                tmux attach -t deploy
+
               Access: SSM Session Manager only (no SSH)
               AWS:    Instance role provides AdministratorAccess
               Region: $CF_REGION (override with export AWS_DEFAULT_REGION=...)
