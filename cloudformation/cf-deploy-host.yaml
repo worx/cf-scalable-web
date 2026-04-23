@@ -232,36 +232,64 @@ Resources:
               # Ensure SSM Agent is running (usually pre-installed)
               snap install amazon-ssm-agent --classic || true
               systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-              systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+              # Configure SSM Session Manager to run as ubuntu with bash login shell
+              mkdir -p /etc/amazon/ssm
+              cat > /etc/amazon/ssm/amazon-ssm-agent.json << 'SSMEOF'
+              {
+                "Profile": {
+                  "ShareCreds": true,
+                  "ShareProfile": ""
+                },
+                "Ssm": {
+                  "SessionWorker": {
+                    "RunAsEnabled": true,
+                    "RunAsDefaultUser": "ubuntu"
+                  }
+                }
+              }
+              SSMEOF
+
+              # Restart SSM agent to pick up config
+              systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
               # Create working directory
               mkdir -p /home/ubuntu/projects
               chown ubuntu:ubuntu /home/ubuntu/projects
 
-              # Create helpful motd
-              cat > /etc/update-motd.d/99-deploy-host << 'MOTDEOF'
-              #!/bin/bash
-              echo ""
-              echo "============================================"
-              echo "  cf-scalable-web Deploy Host"
-              echo "============================================"
-              echo ""
-              echo "Quick Start:"
-              echo "  cd ~/projects"
-              echo "  git clone <your-repo>"
-              echo "  cd cf-scalable-web"
-              echo "  cp .env.example .env        # <-- required before make"
-              echo "  tmux new -s deploy"
-              echo "  make deploy-all ENV=sandbox"
-              echo "  # Ctrl-B D to detach"
-              echo ""
-              echo "Access: SSM Session Manager only (no SSH)"
-              echo "AWS:    Instance role provides AdministratorAccess"
-              echo "Region: $CF_REGION (override with export AWS_DEFAULT_REGION=...)"
-              echo "Tools:  aws, git, make, tmux, screen, vim, claude"
-              echo ""
+              # Create static /etc/motd (SSM doesn't run update-motd.d scripts)
+              cat > /etc/motd <<MOTDEOF
+
+              ============================================
+                cf-scalable-web Deploy Host
+              ============================================
+
+              Quick Start:
+                cd ~/projects
+                git clone <your-repo>
+                cd cf-scalable-web
+                cp .env.example .env        # <-- required before make
+                tmux new -s deploy
+                make deploy-all ENV=sandbox
+                # Ctrl-B D to detach
+
+              Access: SSM Session Manager only (no SSH)
+              AWS:    Instance role provides AdministratorAccess
+              Region: $CF_REGION (override with export AWS_DEFAULT_REGION=...)
+              Tools:  aws, git, make, tmux, screen, vim, claude
+
               MOTDEOF
-              chmod +x /etc/update-motd.d/99-deploy-host
+
+              # Display motd on interactive bash sessions (SSM, tmux, etc.)
+              cat >> /home/ubuntu/.bashrc << 'RCEOF'
+
+              # Show motd on interactive login
+              if [ -f /etc/motd ] && [ -z "$MOTD_SHOWN" ]; then
+                cat /etc/motd
+                export MOTD_SHOWN=1
+              fi
+              RCEOF
+              chown ubuntu:ubuntu /home/ubuntu/.bashrc
 
               echo "=== Deploy Host Bootstrap Complete $(date) ==="
               echo "SUCCESS" > /var/log/deploy-host-bootstrap-status
