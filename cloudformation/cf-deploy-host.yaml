@@ -94,6 +94,29 @@ Resources:
         - !Ref DeployHostRole
 
   # ========================================
+  # SSM Session Manager Preferences
+  # ========================================
+  # Account-level document that configures all SSM sessions to run as
+  # ubuntu with a bash login shell. Agent-level config does not work
+  # reliably with the snap-installed SSM agent on Ubuntu.
+
+  SSMSessionPreferences:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: SSM-SessionManagerRunShell
+      DocumentType: Session
+      DocumentFormat: JSON
+      Content:
+        schemaVersion: '1.0'
+        description: Session Manager preferences - run as ubuntu with bash
+        sessionType: Standard_Stream
+        inputs:
+          runAsEnabled: true
+          runAsDefaultUser: ubuntu
+          shellProfile:
+            linux: cd ~ && exec bash -l
+
+  # ========================================
   # EC2 Instance
   # ========================================
 
@@ -229,29 +252,13 @@ Resources:
               # Claude Code CLI
               npm install -g @anthropic-ai/claude-code
 
-              # Ensure SSM Agent is running (usually pre-installed)
+              # Ensure SSM Agent is running (usually pre-installed on Ubuntu)
+              # Note: SSM session preferences (RunAs user, shell) are configured
+              # via the SSM-SessionManagerRunShell document (account-level),
+              # not via agent config. See SSMSessionPreferences resource below.
               snap install amazon-ssm-agent --classic || true
               systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-
-              # Configure SSM Session Manager to run as ubuntu with bash login shell
-              mkdir -p /etc/amazon/ssm
-              cat > /etc/amazon/ssm/amazon-ssm-agent.json << 'SSMEOF'
-              {
-                "Profile": {
-                  "ShareCreds": true,
-                  "ShareProfile": ""
-                },
-                "Ssm": {
-                  "SessionWorker": {
-                    "RunAsEnabled": true,
-                    "RunAsDefaultUser": "ubuntu"
-                  }
-                }
-              }
-              SSMEOF
-
-              # Restart SSM agent to pick up config
-              systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+              systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
               # Create working directory
               mkdir -p /home/ubuntu/projects
