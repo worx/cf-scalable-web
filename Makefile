@@ -114,6 +114,61 @@ CYAN := \033[0;36m
 NC := \033[0m
 
 # -----------------------------------------------------------------------------
+# Helper: Robust CloudFormation Wait
+# -----------------------------------------------------------------------------
+# aws cloudformation wait has a hard limit of 120 attempts × 30 seconds = 60 min.
+# Long-running stacks (RDS Multi-AZ, FSx OpenZFS, Image Builder) can exceed this.
+# This helper retries the wait in an outer loop, checking actual stack status
+# between retries.
+#
+# Usage: $(call cf-wait,WAIT_TYPE,STACK_NAME)
+#   WAIT_TYPE: stack-create-complete, stack-update-complete, stack-delete-complete
+#   STACK_NAME: CloudFormation stack name
+define cf-wait
+	@WAIT_TYPE="$(1)"; \
+	STACK="$(2)"; \
+	MAX_RETRIES=5; \
+	RETRY=0; \
+	while [ $$RETRY -lt $$MAX_RETRIES ]; do \
+		if aws cloudformation wait $$WAIT_TYPE \
+			--stack-name "$$STACK" \
+			--region $(AWS_REGION) 2>/dev/null; then \
+			break; \
+		fi; \
+		RETRY=$$((RETRY + 1)); \
+		STATUS=$$(aws cloudformation describe-stacks \
+			--stack-name "$$STACK" \
+			--query 'Stacks[0].StackStatus' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null || echo "DELETED"); \
+		case $$STATUS in \
+			*COMPLETE) \
+				break ;; \
+			*FAILED|*ROLLBACK_COMPLETE) \
+				REASON=$$(aws cloudformation describe-stack-events \
+					--stack-name "$$STACK" \
+					--query 'StackEvents[?ResourceStatus==`CREATE_FAILED`||ResourceStatus==`UPDATE_FAILED`||ResourceStatus==`DELETE_FAILED`]|[0].ResourceStatusReason' \
+					--output text \
+					--region $(AWS_REGION) 2>/dev/null || echo "Unknown"); \
+				echo "$(RED)Stack $$STACK failed ($$STATUS): $$REASON$(NC)"; \
+				exit 1 ;; \
+			DELETED|DELETE_COMPLETE) \
+				break ;; \
+			*IN_PROGRESS) \
+				echo "  $(YELLOW)Wait timed out but stack still in progress ($$STATUS), retrying ($$RETRY/$$MAX_RETRIES)...$(NC)"; \
+				;; \
+			*) \
+				echo "$(RED)Unexpected stack status: $$STATUS$(NC)"; \
+				exit 1 ;; \
+		esac; \
+	done; \
+	if [ $$RETRY -ge $$MAX_RETRIES ]; then \
+		echo "$(RED)Error: Stack $$STACK did not complete after $$MAX_RETRIES wait cycles$(NC)"; \
+		exit 1; \
+	fi
+endef
+
+# -----------------------------------------------------------------------------
 # Default Target
 # -----------------------------------------------------------------------------
 
@@ -338,7 +393,7 @@ deploy-iam: validate check-params  ## Deploy IAM stack
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ IAM stack deployed: $(IAM_STACK)$(NC)"
 
-deploy-storage: validate check-params  ## Deploy storage stack
+deploy-storage: validate check-params  ## Deploy storage stack (FSx ~15-20 min)
 	@echo "$(BLUE)Deploying storage stack: $(STORAGE_STACK)$(NC)"
 	@time aws cloudformation deploy \
 		--template-file $(STORAGE_TEMPLATE) \
@@ -346,10 +401,14 @@ deploy-storage: validate check-params  ## Deploy storage stack
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
-		--no-fail-on-empty-changeset
+		--no-fail-on-empty-changeset \
+	|| { \
+		echo "$(YELLOW)Deploy command returned non-zero, checking stack status...$(NC)"; \
+		$(call cf-wait,stack-create-complete,$(STORAGE_STACK)); \
+	}
 	@echo "$(GREEN)✓ Storage stack deployed: $(STORAGE_STACK)$(NC)"
 
-deploy-database: validate check-params  ## Deploy database stack
+deploy-database: validate check-params  ## Deploy database stack (RDS ~15-20 min)
 	@echo "$(BLUE)Deploying database stack: $(DATABASE_STACK)$(NC)"
 	@time aws cloudformation deploy \
 		--template-file $(DATABASE_TEMPLATE) \
@@ -357,7 +416,11 @@ deploy-database: validate check-params  ## Deploy database stack
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
-		--no-fail-on-empty-changeset
+		--no-fail-on-empty-changeset \
+	|| { \
+		echo "$(YELLOW)Deploy command returned non-zero, checking stack status...$(NC)"; \
+		$(call cf-wait,stack-create-complete,$(DATABASE_STACK)); \
+	}
 	@echo "$(GREEN)✓ Database stack deployed: $(DATABASE_STACK)$(NC)"
 
 deploy-cache: validate check-params  ## Deploy cache stack
@@ -643,14 +706,14 @@ destroy-vpc:  ## Delete VPC stack
 	@echo "$(YELLOW)Deleting VPC stack: $(VPC_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(VPC_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(VPC_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(VPC_STACK))
 	@echo "$(GREEN)✓ VPC stack deleted: $(VPC_STACK)$(NC)"
 
 destroy-iam:  ## Delete IAM stack
 	@echo "$(YELLOW)Deleting IAM stack: $(IAM_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(IAM_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(IAM_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(IAM_STACK))
 	@echo "$(GREEN)✓ IAM stack deleted: $(IAM_STACK)$(NC)"
 
 destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
@@ -692,7 +755,7 @@ destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
 	@echo "$(YELLOW)Deleting storage stack: $(STORAGE_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(STORAGE_STACK))
 	@echo "$(GREEN)✓ Storage stack deleted: $(STORAGE_STACK)$(NC)"
 
 destroy-database:  ## Delete database stack (WARNING: Data loss!)
@@ -713,14 +776,14 @@ destroy-database:  ## Delete database stack (WARNING: Data loss!)
 	@echo "$(YELLOW)Deleting database stack: $(DATABASE_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(DATABASE_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(DATABASE_STACK))
 	@echo "$(GREEN)✓ Database stack deleted: $(DATABASE_STACK)$(NC)"
 
 destroy-cache:  ## Delete cache stack
 	@echo "$(YELLOW)Deleting cache stack: $(CACHE_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(CACHE_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(CACHE_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(CACHE_STACK))
 	@echo "$(GREEN)✓ Cache stack deleted: $(CACHE_STACK)$(NC)"
 
 destroy-all:  ## Delete all stacks (reverse order, with confirmation)
@@ -937,28 +1000,28 @@ destroy-compute-php:  ## Delete PHP compute stack
 	@echo "$(YELLOW)Deleting PHP compute stack: $(COMPUTE_PHP_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(COMPUTE_PHP_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_PHP_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(COMPUTE_PHP_STACK))
 	@echo "$(GREEN)✓ PHP compute stack deleted: $(COMPUTE_PHP_STACK)$(NC)"
 
 destroy-compute-nginx:  ## Delete NGINX compute stack
 	@echo "$(YELLOW)Deleting NGINX compute stack: $(COMPUTE_NGINX_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(COMPUTE_NGINX_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_NGINX_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(COMPUTE_NGINX_STACK))
 	@echo "$(GREEN)✓ NGINX compute stack deleted: $(COMPUTE_NGINX_STACK)$(NC)"
 
 destroy-compute-nlb:  ## Delete NLB stack
 	@echo "$(YELLOW)Deleting NLB stack: $(COMPUTE_NLB_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(COMPUTE_NLB_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_NLB_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(COMPUTE_NLB_STACK))
 	@echo "$(GREEN)✓ NLB stack deleted: $(COMPUTE_NLB_STACK)$(NC)"
 
 destroy-compute-alb:  ## Delete ALB stack
 	@echo "$(YELLOW)Deleting ALB stack: $(COMPUTE_ALB_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(COMPUTE_ALB_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete --stack-name $(COMPUTE_ALB_STACK) --region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(COMPUTE_ALB_STACK))
 	@echo "$(GREEN)✓ ALB stack deleted: $(COMPUTE_ALB_STACK)$(NC)"
 
 destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb destroy-compute-alb  ## Delete all compute stacks (reverse order)
@@ -1012,9 +1075,7 @@ destroy-deploy-host:  ## Delete deploy host
 		--stack-name $(DEPLOY_HOST_STACK) \
 		--region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete \
-		--stack-name $(DEPLOY_HOST_STACK) \
-		--region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(DEPLOY_HOST_STACK))
 	@echo "$(GREEN)✓ Deploy host deleted$(NC)"
 
 stop-deploy-host:  ## Stop deploy host instance
@@ -1265,9 +1326,7 @@ destroy-image-builder:  ## Delete Image Builder stack and associated AMIs/snapsh
 		--stack-name $(IMAGE_BUILDER_STACK) \
 		--region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	@aws cloudformation wait stack-delete-complete \
-		--stack-name $(IMAGE_BUILDER_STACK) \
-		--region $(AWS_REGION)
+	$(call cf-wait,stack-delete-complete,$(IMAGE_BUILDER_STACK))
 	@echo "$(GREEN)✓ Image Builder stack and AMIs deleted$(NC)"
 
 build-ami-nginx:  ## Trigger NGINX pipeline execution
