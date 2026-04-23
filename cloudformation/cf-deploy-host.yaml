@@ -260,9 +260,46 @@ Resources:
               systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
               systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
-              # Create working directory
+              # Configure GitHub SSH access from Secrets Manager
+              echo "=== Configuring GitHub SSH access ==="
+              mkdir -p /home/ubuntu/.ssh
+              chmod 700 /home/ubuntu/.ssh
+              SSH_SECRET=$(aws secretsmanager get-secret-value \
+                --secret-id "worxco/deploy-host/github-ssh-key" \
+                --region $CF_REGION \
+                --query 'SecretString' \
+                --output text 2>/dev/null) || true
+              if [ -n "$SSH_SECRET" ]; then
+                echo "$SSH_SECRET" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['private_key'])" > /home/ubuntu/.ssh/github_deploy_key
+                echo "$SSH_SECRET" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['public_key'])" > /home/ubuntu/.ssh/github_deploy_key.pub
+                chmod 600 /home/ubuntu/.ssh/github_deploy_key
+                chmod 644 /home/ubuntu/.ssh/github_deploy_key.pub
+                cat > /home/ubuntu/.ssh/config << 'SSHCFGEOF'
+              Host github.com
+                IdentityFile ~/.ssh/github_deploy_key
+                StrictHostKeyChecking accept-new
+              SSHCFGEOF
+                chmod 600 /home/ubuntu/.ssh/config
+                chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+                echo "GitHub SSH key configured"
+                unset SSH_SECRET
+              else
+                echo "WARNING: worxco/deploy-host/github-ssh-key not found - manual git clone required"
+              fi
+
+              # Create working directory and clone repo
               mkdir -p /home/ubuntu/projects
               chown ubuntu:ubuntu /home/ubuntu/projects
+              if [ -f /home/ubuntu/.ssh/github_deploy_key ]; then
+                echo "=== Cloning repository ==="
+                su - ubuntu -c 'cd ~/projects && git clone git@github.com:worx/cf-scalable-web.git 2>&1' || {
+                  echo "WARNING: git clone failed (deploy key may not be configured on GitHub yet)"
+                }
+                if [ -d /home/ubuntu/projects/cf-scalable-web ]; then
+                  su - ubuntu -c 'cd ~/projects/cf-scalable-web && cp .env.example .env'
+                  echo "Repository cloned and .env configured"
+                fi
+              fi
 
               # Create static /etc/motd (SSM doesn't run update-motd.d scripts)
               cat > /etc/motd <<MOTDEOF
@@ -272,10 +309,7 @@ Resources:
               ============================================
 
               Quick Start:
-                cd ~/projects
-                git clone <your-repo>
-                cd cf-scalable-web
-                cp .env.example .env        # <-- required before make
+                cd ~/projects/cf-scalable-web
                 tmux new -s deploy
                 make deploy-all ENV=sandbox
                 # Ctrl-B D to detach
