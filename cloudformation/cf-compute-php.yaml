@@ -189,6 +189,8 @@ Resources:
                 Value: php-fpm
               - Key: PHPVersion
                 Value: '7.4'
+              - Key: ForceUpdateToken
+                Value: !Ref ForceUpdateToken
           - ResourceType: volume
             Tags:
               - Key: Name
@@ -247,6 +249,8 @@ Resources:
                 Value: php-fpm
               - Key: PHPVersion
                 Value: '8.3'
+              - Key: ForceUpdateToken
+                Value: !Ref ForceUpdateToken
           - ResourceType: volume
             Tags:
               - Key: Name

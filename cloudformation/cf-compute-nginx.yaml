@@ -158,6 +158,8 @@ Resources:
                 Value: !Ref EnvironmentName
               - Key: Role
                 Value: nginx
+              - Key: ForceUpdateToken
+                Value: !Ref ForceUpdateToken
           - ResourceType: volume
             Tags:
               - Key: Name
