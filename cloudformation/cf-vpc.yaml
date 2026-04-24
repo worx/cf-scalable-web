@@ -1003,8 +1003,11 @@ Resources:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateTier3Subnet1
+      SubnetIds: !If
+        - HasTwoAZs
+        - - !Ref PrivateTier3Subnet1
+          - !Ref PrivateTier3Subnet2
+        - - !Ref PrivateTier3Subnet1
       SecurityGroupIds:
         - !Ref AWSServicesEndpointSecurityGroup
 
@@ -1016,8 +1019,11 @@ Resources:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateTier3Subnet1
+      SubnetIds: !If
+        - HasTwoAZs
+        - - !Ref PrivateTier3Subnet1
+          - !Ref PrivateTier3Subnet2
+        - - !Ref PrivateTier3Subnet1
       SecurityGroupIds:
         - !Ref AWSServicesEndpointSecurityGroup
 
@@ -1029,8 +1035,11 @@ Resources:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateTier3Subnet1
+      SubnetIds: !If
+        - HasTwoAZs
+        - - !Ref PrivateTier3Subnet1
+          - !Ref PrivateTier3Subnet2
+        - - !Ref PrivateTier3Subnet1
       SecurityGroupIds:
         - !Ref AWSServicesEndpointSecurityGroup
 
@@ -1042,8 +1051,11 @@ Resources:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateTier3Subnet1
+      SubnetIds: !If
+        - HasTwoAZs
+        - - !Ref PrivateTier3Subnet1
+          - !Ref PrivateTier3Subnet2
+        - - !Ref PrivateTier3Subnet1
       SecurityGroupIds:
         - !Ref AWSServicesEndpointSecurityGroup
 
@@ -1056,6 +1068,10 @@ Resources:
       VpcEndpointType: Gateway
       RouteTableIds:
         - !Ref PrivateRouteTable1
+        - !If
+          - HasTwoAZs
+          - !Ref PrivateRouteTable2
+          - !Ref 'AWS::NoValue'
 
   # SES VPC Endpoint Security Group
   # Allows PHP instances to send email via SMTP without NAT Gateway
