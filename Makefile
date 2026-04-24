@@ -1444,19 +1444,30 @@ PIPELINE ?= nginx
 update-ami-param:  ## Write latest AMI ID to SSM (PIPELINE=nginx|php74|php83)
 	@echo "$(BLUE)Updating SSM with latest $(PIPELINE) AMI...$(NC)"
 	@case "$(PIPELINE)" in \
-		nginx) NAME_FILTER="$(ENV)-*nginx*" ;; \
-		php74) NAME_FILTER="$(ENV)-*php*74*" ;; \
-		php83) NAME_FILTER="$(ENV)-*php*83*" ;; \
+		nginx) RECIPE_FILTER="*nginx-recipe*" ;; \
+		php74) RECIPE_FILTER="*php-fpm-74-recipe*" ;; \
+		php83) RECIPE_FILTER="*php-fpm-83-recipe*" ;; \
 		*) echo "$(RED)Error: PIPELINE must be nginx, php74, or php83$(NC)"; exit 1 ;; \
 	esac; \
 	AMI_ID=$$(aws ec2 describe-images \
 		--owners self \
-		--filters "Name=name,Values=$$NAME_FILTER" "Name=state,Values=available" \
+		--filters "Name=tag:Ec2ImageBuilderArn,Values=$$RECIPE_FILTER" \
+			"Name=tag:Environment,Values=$(ENV)" \
+			"Name=state,Values=available" \
 		--query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
 		--output text \
 		--region $(AWS_REGION) 2>/dev/null); \
 	if [ -z "$$AMI_ID" ] || [ "$$AMI_ID" = "None" ]; then \
-		echo "$(RED)Error: No AMI found matching $$NAME_FILTER$(NC)"; \
+		AMI_ID=$$(aws ec2 describe-images \
+			--owners self \
+			--filters "Name=tag:Ec2ImageBuilderArn,Values=$$RECIPE_FILTER" \
+				"Name=state,Values=available" \
+			--query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null); \
+	fi; \
+	if [ -z "$$AMI_ID" ] || [ "$$AMI_ID" = "None" ]; then \
+		echo "$(RED)Error: No AMI found for $(PIPELINE) (recipe filter: $$RECIPE_FILTER)$(NC)"; \
 		exit 1; \
 	fi; \
 	echo "  AMI: $(CYAN)$$AMI_ID$(NC)"; \
