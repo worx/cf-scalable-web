@@ -161,7 +161,7 @@ Resources:
           - !ImportValue
             Fn::Sub: '${EnvironmentName}-php-sg-id'
         MetadataOptions:
-          HttpTokens: required
+          HttpTokens: optional
           HttpPutResponseHopLimit: 1
           HttpEndpoint: enabled
         Monitoring:
@@ -219,7 +219,7 @@ Resources:
           - !ImportValue
             Fn::Sub: '${EnvironmentName}-php-sg-id'
         MetadataOptions:
-          HttpTokens: required
+          HttpTokens: optional
           HttpPutResponseHopLimit: 1
           HttpEndpoint: enabled
         Monitoring:

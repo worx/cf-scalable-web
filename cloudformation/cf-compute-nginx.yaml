@@ -132,7 +132,7 @@ Resources:
           - !ImportValue
             Fn::Sub: '${EnvironmentName}-nginx-sg-id'
         MetadataOptions:
-          HttpTokens: required
+          HttpTokens: optional
           HttpPutResponseHopLimit: 1
           HttpEndpoint: enabled
         Monitoring:
