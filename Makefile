@@ -454,6 +454,7 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo ""
 	@echo "$(CYAN)Phase 2: Image Builder + AMI Builds$(NC)"
 	@$(MAKE) deploy-image-builder ENV=$(ENV)
+	@$(MAKE) upload-build-configs ENV=$(ENV)
 	@$(MAKE) build-amis ENV=$(ENV)
 	@echo ""
 	@echo "$(BLUE)Waiting for all AMI builds to complete (this takes 20-30 minutes)...$(NC)"
