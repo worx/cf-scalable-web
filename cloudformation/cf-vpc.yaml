@@ -956,6 +956,87 @@ Resources:
   # VPC Endpoints
   # ========================================
 
+  # AWS Services VPC Endpoint Security Group
+  # Allows instances in private subnets to reach AWS APIs without NAT Gateway
+  AWSServicesEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-aws-endpoints-sg'
+      GroupDescription: Security group for AWS service VPC endpoints
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt VPC.CidrBlock
+          Description: HTTPS from all VPC subnets
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-aws-endpoints-sg'
+
+  # SSM Endpoint (for aws ssm get-parameter in boot scripts)
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateTier3Subnet1
+      SecurityGroupIds:
+        - !Ref AWSServicesEndpointSecurityGroup
+
+  # SSM Messages Endpoint (for Session Manager access)
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateTier3Subnet1
+      SecurityGroupIds:
+        - !Ref AWSServicesEndpointSecurityGroup
+
+  # EC2 Messages Endpoint (for SSM agent registration)
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateTier3Subnet1
+      SecurityGroupIds:
+        - !Ref AWSServicesEndpointSecurityGroup
+
+  # Secrets Manager Endpoint (for auth tokens, passwords)
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateTier3Subnet1
+      SecurityGroupIds:
+        - !Ref AWSServicesEndpointSecurityGroup
+
+  # S3 Gateway Endpoint (free - for package installs, Image Builder, media)
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+
   # SES VPC Endpoint Security Group
   # Allows PHP instances to send email via SMTP without NAT Gateway
   SESEndpointSecurityGroup:
