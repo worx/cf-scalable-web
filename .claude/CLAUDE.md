@@ -5,13 +5,14 @@
 This project provides a complete CloudFormation-based infrastructure for scalable Drupal/WordPress hosting on AWS.
 
 **Key Features:**
-- Multi-tier VPC architecture (defense in depth)
-- NGINX reverse proxies with SSL termination (CertBot DNS-01)
+- Multi-tier VPC architecture (defense in depth) with VPC endpoints (no NAT Gateway)
+- NGINX reverse proxies (SSL termination planned — Phase 3)
 - PHP-FPM pools with port-based routing (9074→PHP 7.4, 9083→8.3, etc.)
-- RDS PostgreSQL Multi-AZ, FSx OpenZFS shared storage, ElastiCache Valkey
+- RDS PostgreSQL Multi-AZ, FSx OpenZFS shared storage, ElastiCache Valkey 8.2
 - Auto-scaling with 7-day instance lifecycle (immutable infrastructure)
 - EC2 Image Builder for automated AMI creation
-- Optional monitoring and compliance features
+- Deploy host for long-running operations (SSM-only, auto-clones repo)
+- `make deploy-all` full lifecycle (~50 min from zero to running compute)
 
 ## Standards
 

@@ -36,8 +36,8 @@ flowchart TB
 
     DB -->|Creates/Deletes| RDS_PASS
     DB -->|Creates/Deletes| RDS_CONN
-    CACHE -->|Creates/Deletes| REDIS_AUTH
-    CACHE -->|Creates/Deletes| REDIS_CONN
+    CACHE -->|Creates/Deletes| CACHE_AUTH
+    CACHE -->|Creates/Deletes| CACHE_CONN
 
     INIT[make init-secrets] -->|Creates| External
     DESTROY[make destroy-all] -.->|Does NOT touch| External
@@ -123,7 +123,8 @@ This runs `scripts/manage-secrets.sh` which creates:
 | Secret | Path | Purpose |
 |--------|------|---------|
 | EC2 SSH Key | `worxco/{env}/ec2/ssh-keypair` | Instance SSH access |
-| (Future) | `worxco/{env}/...` | Additional secrets as needed |
+| Deploy Host GitHub Key | `worxco/deploy-host/github-ssh-key` | Read-only deploy key for repo clone |
+| Deploy Host Root Password | `worxco/deploy-host/root-password` | Root password (optional) |
 
 ### Lifecycle
 

@@ -15,18 +15,18 @@
 - [x] Write README.md
 - [x] Write LICENSE
 
-## Phase 2: Compute Layer (NEXT)
+## Phase 2: Compute Layer ✅ COMPLETE
 
-- [ ] Write image-builder/php-components.yaml (PHP 7.2, 7.4, 8.1, 8.3 package lists)
-- [ ] Write cf-image-builder.yaml (NGINX pipeline, PHP-FPM pipelines)
-- [ ] Write Image Builder components:
-  - [ ] base-hardening.yaml
-  - [ ] install-nginx.yaml (+ certbot + Route 53 DNS plugin)
-  - [ ] install-php-fpm.yaml (parameterized by version)
-  - [ ] configure-monitoring.yaml (CloudWatch agent)
-- [ ] Write cf-compute-nginx.yaml (ALB TCP mode, NGINX ASG, 7-day lifecycle)
-- [ ] Write cf-compute-php.yaml (NLB, dynamic port mapping, PHP ASGs per version)
-- [ ] Test: Build AMIs, launch instances, verify FSx mounting
+- [x] Write cf-image-builder.yaml (NGINX pipeline, PHP-FPM 7.4/8.3 pipelines)
+- [x] Write Image Builder components (base-hardening, install-nginx, install-php-fpm, test components)
+- [x] Write cf-compute-alb.yaml (Application Load Balancer)
+- [x] Write cf-compute-nlb.yaml (Network Load Balancer, port-based routing)
+- [x] Write cf-compute-nginx.yaml (NGINX ASG, 7-day lifecycle)
+- [x] Write cf-compute-php.yaml (PHP-FPM ASGs per version)
+- [x] Write cf-deploy-host.yaml (standalone deploy host, SSM-only, auto-clones repo)
+- [x] Full deploy-all lifecycle: VPC → IAM → Storage → Image Builder → AMI builds → compute
+- [x] VPC endpoints for private subnet AWS API access (SSM, Secrets Manager, S3)
+- [x] Test: Build AMIs, launch instances, all healthy (2026-04-24)
 
 ## Phase 3: SSL & Routing
 

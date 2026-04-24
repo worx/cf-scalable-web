@@ -86,18 +86,23 @@ make destroy-all ENV=sandbox
 
 ### Full Stack Testing
 
-After sequential testing passes, test all stacks together:
+After sequential testing passes, test the full lifecycle (~50 min):
 
 ```bash
-# Deploy all stacks in order (foundation + compute)
+# Deploy all stacks: Foundation → Image Builder → AMI builds → Compute
 make deploy-all ENV=sandbox
+
+# Optional: deploy runtime dependencies
+make deploy-database ENV=sandbox  # ~10 min, ~$75/mo
+make deploy-cache ENV=sandbox     # ~12 min, ~$12/mo
 
 # Verify all stacks
 make status ENV=sandbox
 make verify-vpc ENV=sandbox
+make verify-image-builder ENV=sandbox
 make verify-compute ENV=sandbox
 
-# Destroy all stacks
+# Destroy all stacks (empties S3, deregisters AMIs, deletes snapshots)
 make destroy-all ENV=sandbox
 ```
 

@@ -74,18 +74,26 @@ aws configure
    make validate
    ```
 
-5. **Deploy foundation stacks:**
+5. **Deploy all stacks (~50 min):**
    ```bash
    make deploy-all ENV=production
    ```
 
-   This deploys in order:
-   - VPC (subnets, NAT gateways, security groups)
-   - IAM (roles and instance profiles)
-   - Storage (FSx OpenZFS, S3 buckets)
-   - Database (RDS PostgreSQL Multi-AZ)
-   - Cache (ElastiCache Valkey)
-   - Compute: ALB, NLB, NGINX ASG, PHP-FPM ASGs
+   This runs a 4-phase lifecycle:
+
+   | Phase | What | Approx. Time |
+   |-------|------|--------------|
+   | 1. Foundation | VPC, IAM, Storage (FSx OpenZFS, S3) | ~20 min |
+   | 2. Image Builder + AMI Builds | Deploy Image Builder, upload configs, trigger 3 parallel AMI builds (NGINX, PHP 7.4, PHP 8.3), wait for completion | ~25 min |
+   | 3. AMI Parameters | Write AMI IDs to SSM (`/ENV/ami/nginx`, `/ENV/ami/php74`, `/ENV/ami/php83`) | ~1 min |
+   | 4. Compute | ALB, NLB, NGINX ASG, PHP-FPM ASGs | ~5 min |
+
+   **Database and Cache are optional runtime dependencies** (not included in
+   `deploy-all`). Deploy them separately when needed:
+   ```bash
+   make deploy-database ENV=production  # RDS PostgreSQL Multi-AZ (~10 min, ~$75/mo)
+   make deploy-cache ENV=production     # ElastiCache Valkey (~12 min, ~$12/mo)
+   ```
 
    Or deploy compute stacks individually:
    ```bash
@@ -109,10 +117,12 @@ cf-scalable-web/
 │   ├── cf-compute-nlb.yaml     # Network Load Balancer (port routing)
 │   ├── cf-compute-nginx.yaml   # NGINX Auto Scaling Group
 │   ├── cf-compute-php.yaml     # PHP-FPM Auto Scaling Groups
+│   ├── cf-deploy-host.yaml     # Deploy host (standalone, default VPC)
 │   └── parameters/             # Environment-specific parameters
 │       ├── production.json     # Production foundation values
 │       ├── staging.json        # Staging foundation values
 │       ├── sandbox.json        # Sandbox foundation values
+│       ├── deploy-host.json    # Deploy host parameters
 │       ├── compute-alb-*.json  # ALB parameters per environment
 │       ├── compute-nlb-*.json  # NLB parameters per environment
 │       ├── compute-nginx-*.json # NGINX parameters per environment
@@ -124,6 +134,7 @@ cf-scalable-web/
 │   └── manage-secrets.sh       # Secrets Manager operations
 ├── docs/                        # Documentation
 │   ├── ARCHITECTURE.md         # Architecture details with diagrams
+│   ├── DEPLOY-HOST.md          # Deploy host setup and usage
 │   ├── SANDBOX-TESTING.md      # Sandbox testing guide
 │   └── SECRETS.md              # Secrets management architecture
 ├── tests/                       # Test suite
@@ -232,6 +243,7 @@ Compute costs (NGINX, PHP-FPM) depend on traffic and scaling.
 ## Documentation
 
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Detailed architecture with Mermaid diagrams
+- **[DEPLOY-HOST.md](docs/DEPLOY-HOST.md)** - Deploy host setup and SSM access
 - **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Step-by-step deployment guide *(coming soon)*
 - **[OPERATIONS.md](docs/OPERATIONS.md)** - Day-2 operations *(coming soon)*
 - **[SSL-MANAGEMENT.md](docs/SSL-MANAGEMENT.md)** - CertBot DNS-01 setup *(coming soon)*

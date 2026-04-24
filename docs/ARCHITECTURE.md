@@ -60,7 +60,7 @@ graph TB
 **Key Points:**
 - Only public IPs on ALB
 - Each tier isolated by security groups
-- NAT Gateways provide outbound internet (for updates, Let's Encrypt, etc.)
+- NAT Gateways provide outbound internet (for OS updates, package installs, etc.)
 - Multi-AZ deployment across 2 availability zones
 
 ### Security Group Architecture
@@ -70,7 +70,7 @@ graph LR
     Internet[Internet<br/>0.0.0.0/0] -->|80, 443| ALB[ALB Security Group]
     ALB -->|80, 443| NGINX[NGINX Security Group]
     NGINX -->|9070-9099| NLB[NLB Security Group]
-    NLB -->|9000| PHP[PHP-FPM Security Group]
+    NLB -->|9000, 9074, 9083| PHP[PHP-FPM Security Group]
     PHP -->|5432| RDS[RDS Security Group]
     NGINX -->|2049, 111| FSx[FSx Security Group]
     PHP -->|2049, 111| FSx
@@ -92,6 +92,21 @@ graph LR
 - **Least privilege:** Only required ports open
 - **Defense in depth:** Multiple layers of security
 
+### VPC Endpoints
+
+Private instances reach AWS APIs through VPC endpoints, eliminating the need for NAT Gateway traffic for AWS service calls. These are defined in `cf-vpc.yaml`.
+
+| Endpoint | Service | Type | Notes |
+|----------|---------|------|-------|
+| SSM | `com.amazonaws.REGION.ssm` | Interface | PrivateDnsEnabled; used by boot scripts for parameter discovery |
+| SSM Messages | `com.amazonaws.REGION.ssmmessages` | Interface | Session Manager shell access to private instances |
+| EC2 Messages | `com.amazonaws.REGION.ec2messages` | Interface | SSM agent registration |
+| Secrets Manager | `com.amazonaws.REGION.secretsmanager` | Interface | Retrieve DB passwords, SSH keys, API tokens |
+| S3 | `com.amazonaws.REGION.s3` | Gateway | Free; route-table based; package installs, Image Builder, media |
+| SES SMTP | `com.amazonaws.REGION.email-smtp` | Interface | Email sending from PHP instances; single-AZ only |
+
+Interface endpoints are placed in the PHP-FPM subnet tier (PrivateTier3) and secured by a shared `AWSServicesEndpointSecurityGroup` that permits HTTPS (443) from the NGINX and PHP security groups. The SES endpoint has its own security group allowing SMTP (587) and SMTPS (465) from PHP only.
+
 ## Request Flow
 
 ### HTTP/HTTPS Request Flow
@@ -108,8 +123,8 @@ sequenceDiagram
     participant FSx as FSx<br/>OpenZFS
 
     User->>ALB: HTTPS Request
-    ALB->>NGINX: TCP 443 (encrypted)
-    NGINX->>NGINX: SSL Termination
+    ALB->>NGINX: HTTP forward
+    Note over NGINX: SSL termination planned Phase 3
 
     alt Cache Hit
         NGINX->>Cache: Check page cache
@@ -252,6 +267,10 @@ ALB (cf-compute-alb.yaml)
 | `cf-compute-nginx.yaml` | Reverse proxy tier | Launch template, ASG (min 2, max 4), CPU + request-count scaling |
 | `cf-compute-php.yaml` | Application tier | Conditional ASGs per PHP version (7.4, 8.3), flow-count scaling |
 
+### NLB Health Checks
+
+The NLB target groups use **TCP health checks on port 9000** (FastCGI) to verify PHP-FPM availability. This is a temporary configuration -- the target design uses HTTP health checks on port 9100 via a lightweight NGINX sidecar that proxies to a `health.php` script over FastCGI. The HTTP/9100 approach is under investigation due to a FastCGI 502 bug. Once resolved, the health checks will be switched to `HTTP /health` on port 9100.
+
 ### SSM Parameters (Compute Layer)
 
 These SSM parameters are created by compute stacks for boot script discovery:
@@ -281,7 +300,7 @@ make destroy-compute ENV=production       # All compute stacks
 ### Security Hardening
 
 All compute instances enforce:
-- **IMDSv2 required** (`HttpTokens: required`) - no IMDSv1 fallback
+- **IMDSv2 optional** (`HttpTokens: optional`) -- temporary; current AMIs use IMDSv1 metadata calls, pending rebuild to support IMDSv2-only. Target state is `HttpTokens: required`.
 - **EBS encryption** enabled on all volumes
 - **gp3 volumes** for consistent performance
 - **7-day MaxInstanceLifetime** (604800 seconds) for immutable infrastructure
@@ -294,9 +313,9 @@ All compute instances enforce:
 graph TB
     subgraph "FSx OpenZFS"
         Root[Root Volume<br/>ZSTD Compression]
-        Sites["/fsx/sites<br/>Drupal/WordPress Sites"]
-        Configs["/fsx/configs<br/>NGINX/PHP Configs"]
-        SSL["/fsx/ssl<br/>Let's Encrypt Certs"]
+        Sites["sites - Drupal and WordPress Sites"]
+        Configs["configs - NGINX and PHP Configs"]
+        SSL["ssl - TLS Certs, Phase 3 future"]
     end
 
     subgraph "NGINX Instances"
@@ -392,26 +411,28 @@ graph TB
 }
 ```
 
-## SSL Certificate Management
+## SSL Certificate Management -- Phase 3 (Future)
 
-### Let's Encrypt DNS-01 Challenge
+SSL termination via Let's Encrypt and CertBot is **planned but not yet implemented**. The current infrastructure passes traffic as HTTP between the ALB and NGINX. The design below is the target architecture for a future phase.
+
+### Let's Encrypt DNS-01 Challenge (Planned)
 
 ```mermaid
 sequenceDiagram
-    participant CertBot as CertBot<br/>(on NGINX)
-    participant LE as Let's Encrypt<br/>API
-    participant R53 as Route 53<br/>DNS
-    participant FSx as FSx<br/>/var/www/ssl
-    participant NGINX as All NGINX<br/>Instances
+    participant CertBot as CertBot on NGINX
+    participant LE as Lets Encrypt API
+    participant R53 as Route 53 DNS
+    participant FSx as FSx shared storage
+    participant NGINX as All NGINX Instances
 
     CertBot->>CertBot: Generate private key
     CertBot->>LE: Request cert for example.com
-    LE-->>CertBot: Challenge: Create TXT record
+    LE-->>CertBot: Challenge - Create TXT record
     CertBot->>R53: Create _acme-challenge.example.com TXT
     R53-->>LE: DNS query
     LE->>LE: Verify TXT record
     LE-->>CertBot: Certificate issued
-    CertBot->>FSx: Write cert to /var/www/ssl/example.com/
+    CertBot->>FSx: Write cert to ssl directory
     FSx-->>NGINX: All instances see new cert
     NGINX->>NGINX: Reload configuration
 ```
@@ -422,7 +443,7 @@ sequenceDiagram
 - **Wildcard certs:** Can generate `*.example.com` certificates
 - **Private instances:** NGINX has no public IP
 
-**CertBot Renewal (Automated):**
+**CertBot Renewal (Planned):**
 ```bash
 # Cron job on NGINX instances (runs daily)
 0 2 * * * certbot renew --dns-route53 --deploy-hook "systemctl reload nginx"
@@ -658,7 +679,20 @@ DB_PASSWORD=$(aws secretsmanager get-secret-value \
 
 ## Future Enhancements
 
-### Phase 2: LaTeX PDF Service
+### Phase 2: IMDSv2 Enforcement and HTTP Health Checks
+
+- **IMDSv2 required**: Rebuild AMIs to remove IMDSv1 metadata calls, then set `HttpTokens: required` on all launch templates
+- **HTTP health checks on port 9100**: Resolve FastCGI 502 bug in micro-NGINX sidecar, then switch NLB target groups from TCP/9000 to HTTP/9100
+
+### Phase 3: SSL Termination via Let's Encrypt
+
+- **CertBot DNS-01**: Install CertBot on NGINX instances, automate certificate issuance via Route 53
+- **Shared cert storage**: Write certificates to FSx so all NGINX instances pick them up
+- **Auto-renewal cron**: Daily CertBot renewal with NGINX reload hook
+
+See the [SSL Certificate Management](#ssl-certificate-management----phase-3-future) section for the full design.
+
+### Phase 4: LaTeX PDF Service
 
 ```mermaid
 graph LR
