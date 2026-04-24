@@ -197,8 +197,8 @@ Resources:
                   - s3:DeleteObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media'
-                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media/*'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*/*'
               - Effect: Allow
                 Action:
                   - s3:ListAllMyBuckets
