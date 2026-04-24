@@ -229,7 +229,7 @@ phases:
                 --query 'Parameter.Value' --output text)
               if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
                 echo "[configure-php] Mounting /var/www from $FSX_DNS"
-                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,noatime \
+                mount -t nfs4 -o vers=4.1,port=2049 \
                   "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
               fi
 
@@ -280,4 +280,4 @@ phases:
           - path: /etc/fstab
             content: |
               # FSx NFS mount (activated at boot by configure-php.sh)
-              # {fsx_dns}:/fsx /var/www nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev,noatime,nofail 0 0
+              # {fsx_dns}:/fsx /var/www nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
