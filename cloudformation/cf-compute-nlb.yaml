@@ -99,9 +99,8 @@ Resources:
         Fn::Sub: '${EnvironmentName}-vpc-id'
       TargetType: instance
       HealthCheckEnabled: true
-      HealthCheckProtocol: HTTP
-      HealthCheckPort: '9100'
-      HealthCheckPath: /health
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '9000'
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 3
       UnhealthyThresholdCount: 3
@@ -126,9 +125,8 @@ Resources:
         Fn::Sub: '${EnvironmentName}-vpc-id'
       TargetType: instance
       HealthCheckEnabled: true
-      HealthCheckProtocol: HTTP
-      HealthCheckPort: '9100'
-      HealthCheckPath: /health
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '9000'
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 3
       UnhealthyThresholdCount: 3
