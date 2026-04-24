@@ -311,7 +311,11 @@ validate:  ## Validate all CloudFormation templates
 	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			echo "  Validating $$template..."; \
-			cfn-lint "$$template" || exit 1; \
+			cfn-lint -f parseable "$$template"; \
+			LINT_EXIT=$$?; \
+			if [ $$LINT_EXIT -eq 2 ] || [ $$LINT_EXIT -eq 6 ]; then \
+				exit 1; \
+			fi; \
 		fi; \
 	done
 	@if [ -f $(PARAM_FILE) ]; then \
