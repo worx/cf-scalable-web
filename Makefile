@@ -883,7 +883,7 @@ deploy-compute-nginx: validate  ## Deploy NGINX compute stack
 	@time aws cloudformation deploy \
 		--template-file $(COMPUTE_NGINX_TEMPLATE) \
 		--stack-name $(COMPUTE_NGINX_STACK) \
-		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_NGINX_PARAMS)) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_NGINX_PARAMS)) ForceUpdateToken=$$(date +%s) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
@@ -898,7 +898,7 @@ deploy-compute-php: validate  ## Deploy PHP compute stack
 	@time aws cloudformation deploy \
 		--template-file $(COMPUTE_PHP_TEMPLATE) \
 		--stack-name $(COMPUTE_PHP_STACK) \
-		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_PHP_PARAMS)) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(COMPUTE_PHP_PARAMS)) ForceUpdateToken=$$(date +%s) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset

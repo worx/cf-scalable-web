@@ -59,6 +59,11 @@ Parameters:
     ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
     Default: production
 
+  ForceUpdateToken:
+    Type: String
+    Description: Change this value to force CloudFormation to re-resolve SSM AMI parameters
+    Default: initial
+
   NginxInstanceType:
     Type: String
     Description: EC2 instance type for NGINX servers

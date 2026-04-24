@@ -66,6 +66,11 @@ Parameters:
     ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
     Default: production
 
+  ForceUpdateToken:
+    Type: String
+    Description: Change this value to force CloudFormation to re-resolve SSM AMI parameters
+    Default: initial
+
   EnablePHP74:
     Type: String
     Description: Enable PHP 7.4 ASG
