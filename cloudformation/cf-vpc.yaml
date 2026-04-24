@@ -747,6 +747,16 @@ Resources:
       DestinationSecurityGroupId: !Ref AWSServicesEndpointSecurityGroup
       Description: HTTPS to AWS service VPC endpoints (SSM, Secrets Manager)
 
+  NginxToS3:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+      Description: HTTPS to S3 via gateway endpoint (S3 uses public IPs routed through VPC endpoint)
+
   # NLB Security Group (Internal)
   # Egress: Only to PHP-FPM instances
   NLBSecurityGroup:
@@ -879,6 +889,16 @@ Resources:
       ToPort: 443
       DestinationSecurityGroupId: !Ref AWSServicesEndpointSecurityGroup
       Description: HTTPS to AWS service VPC endpoints (SSM, Secrets Manager)
+
+  PHPToS3:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref PHPSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+      Description: HTTPS to S3 via gateway endpoint (S3 uses public IPs routed through VPC endpoint)
 
   # RDS Security Group
   # Egress: None (managed service, no outbound needed)
