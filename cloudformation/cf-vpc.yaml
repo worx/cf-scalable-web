@@ -1309,6 +1309,35 @@ Outputs:
     Export:
       Name: !Sub '${EnvironmentName}-ses-endpoint-id'
 
+  # ----------------------------------------
+  # Route Table IDs (used by cf-deploy-peering for cross-VPC routes)
+  # ----------------------------------------
+  PublicRouteTableId:
+    Description: Public route table ID
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub '${EnvironmentName}-public-rt-id'
+
+  PrivateRouteTable1Id:
+    Description: Private route table ID for AZ1
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub '${EnvironmentName}-private-rt-1-id'
+
+  PrivateRouteTable2Id:
+    Description: Private route table ID for AZ2 (only when HasTwoAZs)
+    Condition: HasTwoAZs
+    Value: !Ref PrivateRouteTable2
+    Export:
+      Name: !Sub '${EnvironmentName}-private-rt-2-id'
+
+  PrivateRouteTable3Id:
+    Description: Private route table ID for AZ3 (only when HasThreeAZs)
+    Condition: HasThreeAZs
+    Value: !Ref PrivateRouteTable3
+    Export:
+      Name: !Sub '${EnvironmentName}-private-rt-3-id'
+
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
 # Author: Kurt Vanderwater <kurt@worxco.net>

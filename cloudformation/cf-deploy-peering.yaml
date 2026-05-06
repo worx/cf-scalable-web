@@ -1,0 +1,216 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: VPC Peering between Deploy Host VPC and Project VPC
+#
+# Purpose: Connect the deploy host's default VPC (172.31.0.0/16) to a project
+#          VPC (e.g., sandbox 10.200.0.0/16) so the deploy host can reach
+#          FSx (NFS), RDS (PostgreSQL), and ElastiCache Valkey directly.
+#
+# Why per-environment: The deploy host VPC is one global resource; project
+#          VPCs are per-environment. Therefore a peering connection is needed
+#          for EACH environment that wants deploy-host operational access.
+#
+# Resources Created:
+#   - VPC Peering Connection (default VPC <-> project VPC)
+#   - Routes in default VPC (project CIDR -> peering)
+#   - Routes in project VPC public + private route tables (172.31/16 -> peering)
+#   - Security group ingress rules:
+#       FSx SG     <- deploy-host SG (NFS 2049, portmapper 111)
+#       RDS SG     <- deploy-host SG (PostgreSQL 5432)
+#       Valkey SG  <- deploy-host SG (Valkey 6379)
+#
+# Dependencies:
+#   - cf-vpc.yaml stack must exist for ${EnvironmentName} (provides project
+#     VPC, route tables, and security groups)
+#   - cf-deploy-host.yaml stack must exist (provides deploy host SG)
+#
+# Outputs: Peering connection ID, status
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC peering between deploy host default VPC and project VPC for cross-VPC operational access'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (must match the project VPC stack)
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Must contain only lowercase letters, numbers, and hyphens
+    Default: sandbox
+
+  DeployHostStackName:
+    Type: String
+    Description: Stack name of the deploy host (used to import its SG)
+    Default: cf-deploy-host
+
+  DefaultVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID of the AWS default VPC where the deploy host lives (e.g., vpc-xxxxxxxx for 172.31.0.0/16)
+
+  DefaultVpcCidr:
+    Type: String
+    Description: CIDR of the deploy host VPC (typically 172.31.0.0/16 for AWS default VPC)
+    Default: 172.31.0.0/16
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+  DefaultVpcRouteTableId:
+    Type: String
+    Description: Main route table ID of the default VPC (where we add a route to the project CIDR)
+    AllowedPattern: '^rtb-[a-f0-9]+$'
+
+  AZCount:
+    Type: String
+    Description: Number of AZs in the project VPC (matches cf-vpc.yaml's AZCount)
+    AllowedValues: ['1', '2', '3']
+    Default: '2'
+
+Conditions:
+  HasTwoAZs: !Or
+    - !Equals [!Ref AZCount, '2']
+    - !Equals [!Ref AZCount, '3']
+  HasThreeAZs: !Equals [!Ref AZCount, '3']
+
+Resources:
+  # ========================================
+  # VPC Peering Connection
+  # ========================================
+
+  VPCPeeringConnection:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-vpc-id'
+      PeerVpcId: !Ref DefaultVpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-deploy-host-peering'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
+  # Routes: Default VPC -> Project VPC (via peering)
+  # ========================================
+
+  RouteFromDefaultToProject:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref DefaultVpcRouteTableId
+      DestinationCidrBlock: !ImportValue
+        Fn::Sub: '${EnvironmentName}-vpc-cidr'
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  # ========================================
+  # Routes: Project VPC -> Default VPC (via peering)
+  # One route per route table — public + private (1-3 depending on AZCount)
+  # ========================================
+
+  RouteFromProjectPublic:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-public-rt-id'
+      DestinationCidrBlock: !Ref DefaultVpcCidr
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  RouteFromProjectPrivate1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-private-rt-1-id'
+      DestinationCidrBlock: !Ref DefaultVpcCidr
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  RouteFromProjectPrivate2:
+    Type: AWS::EC2::Route
+    Condition: HasTwoAZs
+    Properties:
+      RouteTableId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-private-rt-2-id'
+      DestinationCidrBlock: !Ref DefaultVpcCidr
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  RouteFromProjectPrivate3:
+    Type: AWS::EC2::Route
+    Condition: HasThreeAZs
+    Properties:
+      RouteTableId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-private-rt-3-id'
+      DestinationCidrBlock: !Ref DefaultVpcCidr
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  # ========================================
+  # Security Group ingress: project SGs <- deploy-host SG
+  # NOTE: Cross-VPC SG references work only when peering is established.
+  #       That's true here because these rules are CREATED AFTER the peering
+  #       connection in this same stack.
+  # ========================================
+
+  # FSx allows NFS (2049) from deploy host
+  FSxIngressNFSFromDeployHost:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-fsx-sg-id'
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: '${DeployHostStackName}-sg-id'
+      Description: NFS from deploy host (via VPC peering)
+
+  # FSx allows portmapper (111) from deploy host
+  FSxIngressPortmapperFromDeployHost:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-fsx-sg-id'
+      IpProtocol: tcp
+      FromPort: 111
+      ToPort: 111
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: '${DeployHostStackName}-sg-id'
+      Description: NFS portmapper from deploy host (via VPC peering)
+
+  # RDS allows PostgreSQL (5432) from deploy host
+  RDSIngressFromDeployHost:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-rds-sg-id'
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: '${DeployHostStackName}-sg-id'
+      Description: PostgreSQL from deploy host (via VPC peering)
+
+  # ElastiCache Valkey (6379) from deploy host
+  ValkeyIngressFromDeployHost:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-elasticache-sg-id'
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: '${DeployHostStackName}-sg-id'
+      Description: Valkey from deploy host (via VPC peering)
+
+Outputs:
+  PeeringConnectionId:
+    Description: VPC peering connection ID
+    Value: !Ref VPCPeeringConnection
+    Export:
+      Name: !Sub '${EnvironmentName}-deploy-host-peering-id'
+
+  DefaultVPCCidr:
+    Description: Default VPC CIDR (routes added in project VPC for this CIDR)
+    Value: !Ref DefaultVpcCidr
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

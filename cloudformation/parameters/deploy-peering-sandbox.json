@@ -1,0 +1,8 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "DeployHostStackName": "cf-deploy-host",
+    "DefaultVpcCidr": "172.31.0.0/16",
+    "AZCount": "2"
+  }
+}

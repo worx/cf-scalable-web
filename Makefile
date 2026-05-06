@@ -68,6 +68,11 @@ DEPLOY_HOST_TEMPLATE := cloudformation/cf-deploy-host.yaml
 DEPLOY_HOST_PARAMS := cloudformation/parameters/deploy-host.json
 DEPLOY_HOST_SECRET_PATH := worxco/deploy-host/root-password
 
+# Deploy Host VPC Peering (per environment, bridges deploy-host VPC to project VPC)
+DEPLOY_PEERING_STACK := $(STACK_PREFIX)-deploy-peering
+DEPLOY_PEERING_TEMPLATE := cloudformation/cf-deploy-peering.yaml
+DEPLOY_PEERING_PARAMS := cloudformation/parameters/deploy-peering-$(ENV).json
+
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
 IAM_TEMPLATE := cloudformation/cf-iam.yaml
@@ -263,6 +268,11 @@ help:  ## Show this help message
 	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
 	@echo "  make destroy-deploy-host      Delete deploy host"
 	@echo ""
+	@echo "$(YELLOW)Deploy Host Peering (ENV=sandbox|staging|production):$(NC)"
+	@echo "  make deploy-peering           Peer deploy-host VPC to project VPC"
+	@echo "  make destroy-peering          Delete peering stack"
+	@echo "  make test-peering             Verify deploy-host can reach FSx/RDS/Valkey"
+	@echo ""
 	@echo "$(YELLOW)Image Builder (ENV=sandbox|staging|production):$(NC)"
 	@echo "  make find-default-subnet      Discover default VPC subnet IDs"
 	@echo "  make upload-build-configs     Sync configs to S3 image-builder bucket"
@@ -453,6 +463,8 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo ""
 	@echo "$(CYAN)Phase 1: Foundation$(NC)"
 	@$(MAKE) deploy-vpc ENV=$(ENV)
+	@$(MAKE) deploy-peering ENV=$(ENV) || \
+		echo "$(YELLOW)  Note: deploy-peering skipped (deploy-host stack may not exist yet)$(NC)"
 	@$(MAKE) deploy-iam ENV=$(ENV)
 	@$(MAKE) deploy-storage ENV=$(ENV)
 	@echo ""
@@ -841,6 +853,7 @@ destroy-all:  ## Delete all stacks (reverse order, with confirmation)
 	@$(MAKE) destroy-database ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-storage ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-iam ENV=$(ENV) CONFIRMED=yes || true
+	@$(MAKE) destroy-peering ENV=$(ENV) || true
 	@$(MAKE) destroy-vpc ENV=$(ENV) CONFIRMED=yes
 	@echo "$(GREEN)✓ All stacks deleted for ENV=$(ENV)$(NC)"
 
@@ -1124,6 +1137,129 @@ destroy-deploy-host:  ## Delete deploy host
 		&& echo "  $(GREEN)✓ SSM-SessionManagerRunShell deleted$(NC)" \
 		|| echo "  $(CYAN)SSM-SessionManagerRunShell not found (already clean)$(NC)"
 	@echo "$(GREEN)✓ Deploy host deleted$(NC)"
+
+# -----------------------------------------------------------------------------
+# Deploy Host VPC Peering (per environment)
+# -----------------------------------------------------------------------------
+# Connects the deploy-host's default VPC to the project VPC for the given ENV
+# so the deploy host can reach FSx (NFS), RDS, and Valkey directly.
+# Requires both cf-deploy-host and cf-vpc stacks to exist for ENV first.
+#
+# DefaultVpcId and DefaultVpcRouteTableId are looked up at deploy time
+# (no need to hand-edit the parameter file).
+
+deploy-peering:  ## Deploy VPC peering between deploy-host and project VPC
+	@echo "$(BLUE)Deploying peering: $(DEPLOY_PEERING_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "$(CYAN)Looking up default VPC info...$(NC)"
+	@DEFAULT_VPC_ID=$$(aws ec2 describe-vpcs \
+		--filters "Name=isDefault,Values=true" \
+		--query 'Vpcs[0].VpcId' \
+		--output text \
+		--region $(AWS_REGION)); \
+	if [ -z "$$DEFAULT_VPC_ID" ] || [ "$$DEFAULT_VPC_ID" = "None" ]; then \
+		echo "$(RED)Error: No default VPC found in $(AWS_REGION)$(NC)"; \
+		exit 1; \
+	fi; \
+	DEFAULT_RT_ID=$$(aws ec2 describe-route-tables \
+		--filters "Name=vpc-id,Values=$$DEFAULT_VPC_ID" "Name=association.main,Values=true" \
+		--query 'RouteTables[0].RouteTableId' \
+		--output text \
+		--region $(AWS_REGION)); \
+	if [ -z "$$DEFAULT_RT_ID" ] || [ "$$DEFAULT_RT_ID" = "None" ]; then \
+		echo "$(RED)Error: Could not find main route table for default VPC $$DEFAULT_VPC_ID$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  $(CYAN)Default VPC: $$DEFAULT_VPC_ID$(NC)"; \
+	echo "  $(CYAN)Default VPC main route table: $$DEFAULT_RT_ID$(NC)"; \
+	echo ""; \
+	BASE_PARAMS=$$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(DEPLOY_PEERING_PARAMS)); \
+	time aws cloudformation deploy \
+		--template-file $(DEPLOY_PEERING_TEMPLATE) \
+		--stack-name $(DEPLOY_PEERING_STACK) \
+		--parameter-overrides $$BASE_PARAMS DefaultVpcId=$$DEFAULT_VPC_ID DefaultVpcRouteTableId=$$DEFAULT_RT_ID \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ Peering stack deployed: $(DEPLOY_PEERING_STACK)$(NC)"
+	@echo ""
+	@echo "$(CYAN)Run 'make test-peering ENV=$(ENV)' to verify connectivity.$(NC)"
+
+destroy-peering:  ## Delete VPC peering stack
+	@echo "$(YELLOW)Deleting peering stack: $(DEPLOY_PEERING_STACK)$(NC)"
+	@time aws cloudformation delete-stack \
+		--stack-name $(DEPLOY_PEERING_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	$(call cf-wait,stack-delete-complete,$(DEPLOY_PEERING_STACK))
+	@echo "$(GREEN)✓ Peering stack deleted: $(DEPLOY_PEERING_STACK)$(NC)"
+
+test-peering:  ## Verify deploy host can reach project VPC services (FSx, RDS, Valkey)
+	@echo "$(BLUE)Testing peering connectivity from deploy host to $(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@INSTANCE_ID=$$(aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(DEPLOY_HOST_STACK)" \
+			"Name=instance-state-name,Values=running" \
+		--query 'Reservations[].Instances[0].InstanceId' \
+		--output text \
+		--region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
+		echo "$(RED)Error: Deploy host not running. Run: make start-deploy-host$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  $(CYAN)Deploy host: $$INSTANCE_ID$(NC)"; \
+	FSX_DNS=$$(aws cloudformation describe-stacks \
+		--stack-name $(STORAGE_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`FSxDNSName`].OutputValue' \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	RDS_ENDPOINT=$$(aws cloudformation describe-stacks \
+		--stack-name $(DATABASE_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`DBEndpoint`].OutputValue' \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	VALKEY_ENDPOINT=$$(aws cloudformation describe-stacks \
+		--stack-name $(CACHE_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`CachePrimaryEndpoint`].OutputValue' \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	echo "  $(CYAN)Targets:$(NC)"; \
+	echo "    FSx:    $${FSX_DNS:-(not deployed)}:2049"; \
+	echo "    RDS:    $${RDS_ENDPOINT:-(not deployed)}:5432"; \
+	echo "    Valkey: $${VALKEY_ENDPOINT:-(not deployed)}:6379"; \
+	echo ""; \
+	CMD="echo '=== FSx (NFS 2049) ==='; nc -zv $${FSX_DNS:-skip-fsx} 2049 2>&1 || true; "; \
+	CMD="$$CMD echo '=== RDS (PostgreSQL 5432) ==='; nc -zv $${RDS_ENDPOINT:-skip-rds} 5432 2>&1 || true; "; \
+	CMD="$$CMD echo '=== Valkey (6379) ==='; nc -zv $${VALKEY_ENDPOINT:-skip-valkey} 6379 2>&1 || true"; \
+	CMD_ID=$$(aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters "commands=[\"$$CMD\"]" \
+		--query 'Command.CommandId' \
+		--output text \
+		--region $(AWS_REGION)); \
+	echo "$(CYAN)Running connectivity test (SSM command $$CMD_ID)...$(NC)"; \
+	sleep 5; \
+	for i in 1 2 3 4 5; do \
+		STATUS=$$(aws ssm get-command-invocation \
+			--command-id "$$CMD_ID" \
+			--instance-id "$$INSTANCE_ID" \
+			--query 'Status' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null); \
+		if [ "$$STATUS" = "Success" ] || [ "$$STATUS" = "Failed" ]; then break; fi; \
+		sleep 3; \
+	done; \
+	echo ""; \
+	echo "$(CYAN)Output:$(NC)"; \
+	aws ssm get-command-invocation \
+		--command-id "$$CMD_ID" \
+		--instance-id "$$INSTANCE_ID" \
+		--query 'StandardOutputContent' \
+		--output text \
+		--region $(AWS_REGION); \
+	aws ssm get-command-invocation \
+		--command-id "$$CMD_ID" \
+		--instance-id "$$INSTANCE_ID" \
+		--query 'StandardErrorContent' \
+		--output text \
+		--region $(AWS_REGION)
 
 stop-deploy-host:  ## Stop deploy host instance
 	@echo "$(BLUE)Stopping deploy host instance...$(NC)"
