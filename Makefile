@@ -1086,8 +1086,22 @@ destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb d
 deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
 	@echo "$(BLUE)Deploying deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@aws ssm delete-document --name SSM-SessionManagerRunShell \
-		--region $(AWS_REGION) 2>/dev/null || true
+	@# Pre-delete the SSM-SessionManagerRunShell document only when the
+	@# stack does NOT exist. If the stack DOES exist, CloudFormation already
+	@# owns the document (CREATE_COMPLETE state) — deleting it here would
+	@# leave the stack thinking the doc is fine while it's actually gone,
+	@# silently breaking SSM session preferences. The pre-delete is only
+	@# meant to clean up orphans from a prior stack lifecycle, not to
+	@# re-bootstrap on every deploy.
+	@if aws cloudformation describe-stacks \
+		--stack-name $(DEPLOY_HOST_STACK) \
+		--region $(AWS_REGION) >/dev/null 2>&1; then \
+		echo "$(CYAN)Stack exists — skipping orphan SSM document cleanup$(NC)"; \
+	else \
+		echo "$(CYAN)Stack does not exist — pre-cleaning any orphan SSM document$(NC)"; \
+		aws ssm delete-document --name SSM-SessionManagerRunShell \
+			--region $(AWS_REGION) 2>/dev/null || true; \
+	fi
 	@time aws cloudformation deploy \
 		--template-file $(DEPLOY_HOST_TEMPLATE) \
 		--stack-name $(DEPLOY_HOST_STACK) \
