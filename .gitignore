@@ -36,6 +36,7 @@ venv/
 # Logs (but keep PROMPT_LOGS/ for audit trail)
 *.log
 PROMPT_LOGS/.current_prompt
+PROMPT_LOGS/.last_commit_hash
 
 # Temporary files
 tmp/
