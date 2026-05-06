@@ -361,8 +361,8 @@ Outputs:
     Value: !Sub 'aws ssm start-session --target ${DeployHostInstance}'
 
   SecurityGroupId:
-    Description: Deploy host security group ID
-    Value: !Ref DeployHostSecurityGroup
+    Description: Deploy host security group ID (sg-xxxxxxxxx)
+    Value: !GetAtt DeployHostSecurityGroup.GroupId
     Export:
       Name: !Sub '${AWS::StackName}-sg-id'
 
