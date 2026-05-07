@@ -301,6 +301,198 @@ Resources:
                 fi
               fi
 
+              # ===========================================
+              # Phase B: Drupal Management Toolchain
+              # ===========================================
+              # Tools that turn the deploy host into a Drupal management
+              # workstation. Available once cf-deploy-peering is in place
+              # (see docs/plans/drupal-install.md).
+
+              echo "=== Installing Drupal management toolchain ==="
+
+              # NFS client — mount FSx OpenZFS for Drupal codebase
+              # PostgreSQL client — psql for ad-hoc DB ops + install bootstrap
+              # redis-tools — provides redis-cli (Valkey is wire-compatible)
+              apt-get install -y \
+                nfs-common \
+                postgresql-client \
+                redis-tools
+
+              # PHP 8.3 CLI + extensions required for Drupal 11 + Drush
+              # (Ubuntu 24.04 ships PHP 8.3 in default repos — no PPA needed)
+              apt-get install -y \
+                php8.3-cli \
+                php8.3-common \
+                php8.3-curl \
+                php8.3-mbstring \
+                php8.3-xml \
+                php8.3-zip \
+                php8.3-gd \
+                php8.3-pgsql \
+                php8.3-intl \
+                php8.3-bcmath \
+                php8.3-opcache
+
+              # Composer (latest stable)
+              curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php
+              php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+              rm /tmp/composer-setup.php
+              echo "Composer installed: $(composer --version 2>&1 | head -1)"
+
+              # Drush via composer global (installs to ~ubuntu/.config/composer/vendor)
+              su - ubuntu -c 'composer global require drush/drush' || {
+                echo "WARNING: drush install failed (non-fatal — install manually if needed)"
+              }
+              # Add composer global bin to PATH for ubuntu user
+              echo 'export PATH="$HOME/.config/composer/vendor/bin:$PATH"' \
+                >> /home/ubuntu/.bashrc
+
+              # AWS Session Manager plugin (better SSM CLI experience)
+              curl -sS \
+                "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb" \
+                -o /tmp/session-manager-plugin.deb
+              dpkg -i /tmp/session-manager-plugin.deb || true
+              rm -f /tmp/session-manager-plugin.deb
+
+              # mount-env: helper to mount a project FSx for the named environment
+              # Usage: sudo mount-env sandbox
+              # Looks up FSx DNS from SSM /<env>/fsx/dns-name and mounts at /var/www/<env>
+              mkdir -p /usr/local/sbin
+              cat > /usr/local/sbin/mount-env << 'MOUNTEOF'
+              #!/bin/bash
+              set -euo pipefail
+              if [ "$#" -lt 1 ]; then
+                echo "Usage: mount-env <environment>"
+                echo "Mounts /var/www/<env> from FSx OpenZFS for the named environment."
+                echo "Example: mount-env sandbox"
+                exit 1
+              fi
+              ENV="$1"
+              MOUNT_POINT="/var/www/$ENV"
+              if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+                echo "$MOUNT_POINT is already mounted"
+                exit 0
+              fi
+              FSX_DNS=$(aws ssm get-parameter \
+                --name "/$ENV/fsx/dns-name" \
+                --query 'Parameter.Value' \
+                --output text 2>/dev/null) || {
+                echo "ERROR: SSM parameter /$ENV/fsx/dns-name not found."
+                echo "FSx for environment '$ENV' may not be deployed yet,"
+                echo "or VPC peering (cf-deploy-peering) is not in place."
+                exit 1
+              }
+              mkdir -p "$MOUNT_POINT"
+              mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
+              echo "Mounted $FSX_DNS:/fsx -> $MOUNT_POINT"
+              MOUNTEOF
+              chmod +x /usr/local/sbin/mount-env
+
+              # info-env: print all project endpoints for a named environment
+              # Usage: info-env sandbox
+              # No-arg variant attempts to auto-detect (single env in account).
+              cat > /usr/local/bin/info-env << 'INFOEOF'
+              #!/bin/bash
+              set -euo pipefail
+              if [ "$#" -lt 1 ]; then
+                echo "Usage: info-env <environment>"
+                echo "Prints RDS, FSx, and Valkey endpoints for the named environment."
+                echo "Pulls live from SSM Parameter Store — always current."
+                exit 1
+              fi
+              ENV="$1"
+              get_ssm() {
+                aws ssm get-parameter --name "$1" --query 'Parameter.Value' --output text 2>/dev/null \
+                  || echo "(not deployed)"
+              }
+              echo "Endpoints for environment: $ENV"
+              echo "  RDS:        $(get_ssm /$ENV/rds/endpoint):5432"
+              echo "  FSx (NFS):  $(get_ssm /$ENV/fsx/dns-name):/fsx"
+              echo "  Valkey:     $(get_ssm /$ENV/cache/endpoint):6379"
+              echo "  ALB DNS:    $(get_ssm /$ENV/compute/alb-dns-name)"
+              echo ""
+              echo "Database name:    drupal (from cf-database parameter)"
+              echo "Database user:    dbadmin (from cf-database parameter)"
+              echo "Master password:  worxco/$ENV/rds/master-password (Secrets Manager)"
+              INFOEOF
+              chmod +x /usr/local/bin/info-env
+
+              # psql-env: connect to a project's RDS PostgreSQL with auto-resolved
+              # endpoint and master password from Secrets Manager.
+              # Usage: psql-env sandbox             # interactive shell
+              #        psql-env sandbox -c "SELECT version();"  # one-off command
+              cat > /usr/local/bin/psql-env << 'PSQLEOF'
+              #!/bin/bash
+              set -euo pipefail
+              if [ "$#" -lt 1 ]; then
+                echo "Usage: psql-env <environment> [psql args...]"
+                echo "Examples:"
+                echo "  psql-env sandbox"
+                echo "  psql-env sandbox -c 'SELECT now();'"
+                echo "  psql-env sandbox -d postgres   # different database"
+                exit 1
+              fi
+              ENV="$1"
+              shift
+              RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
+                --query 'Parameter.Value' --output text 2>/dev/null) || {
+                echo "ERROR: SSM parameter /$ENV/rds/endpoint not found." >&2
+                echo "Is RDS deployed for environment '$ENV'?" >&2
+                exit 1
+              }
+              PASS=$(aws secretsmanager get-secret-value \
+                --secret-id "worxco/$ENV/rds/master-password" \
+                --query SecretString --output text 2>/dev/null) || {
+                echo "ERROR: Secret worxco/$ENV/rds/master-password not found." >&2
+                exit 1
+              }
+              # Default to the drupal database; user args can override with -d
+              PGPASSWORD="$PASS" psql -h "$RDS" -U dbadmin -d drupal "$@"
+              PSQLEOF
+              chmod +x /usr/local/bin/psql-env
+
+              # valkey-env: connect to a project's ElastiCache Valkey with
+              # auto-resolved endpoint and AUTH token.
+              # Usage: valkey-env sandbox            # interactive shell
+              #        valkey-env sandbox PING       # one-off command
+              cat > /usr/local/bin/valkey-env << 'VALKEYEOF'
+              #!/bin/bash
+              set -euo pipefail
+              if [ "$#" -lt 1 ]; then
+                echo "Usage: valkey-env <environment> [redis-cli args...]"
+                echo "Examples:"
+                echo "  valkey-env sandbox PING"
+                echo "  valkey-env sandbox INFO server"
+                echo "  valkey-env sandbox            # interactive shell"
+                exit 1
+              fi
+              ENV="$1"
+              shift
+              HOST=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" \
+                --query 'Parameter.Value' --output text 2>/dev/null) || {
+                echo "ERROR: SSM parameter /$ENV/cache/endpoint not found." >&2
+                echo "Is ElastiCache deployed for environment '$ENV'?" >&2
+                exit 1
+              }
+              AUTH=$(aws secretsmanager get-secret-value \
+                --secret-id "worxco/$ENV/cache/auth-token" \
+                --query SecretString --output text 2>/dev/null) || {
+                echo "ERROR: Secret worxco/$ENV/cache/auth-token not found." >&2
+                exit 1
+              }
+              # ElastiCache Valkey uses TLS by default — pass --tls
+              redis-cli -h "$HOST" -p 6379 --tls -a "$AUTH" "$@"
+              VALKEYEOF
+              chmod +x /usr/local/bin/valkey-env
+
+              # Marker file: lets scripts and Make targets detect "running on deploy host"
+              # vs running on the user's Mac (and needing to dispatch via SSM).
+              mkdir -p /etc/worxco
+              echo "deploy-host" > /etc/worxco/deploy-host-marker
+              chmod 644 /etc/worxco/deploy-host-marker
+
+              echo "=== Drupal management toolchain installed ==="
+
               # Create static /etc/motd (SSM doesn't run update-motd.d scripts)
               cat > /etc/motd <<MOTDEOF
 
@@ -321,6 +513,19 @@ Resources:
               AWS:    Instance role provides AdministratorAccess
               Region: $CF_REGION (override with export AWS_DEFAULT_REGION=...)
               Tools:  aws, git, make, tmux, screen, vim, claude
+                      php, composer, drush, psql, redis-cli, mount-env
+
+              Project helpers (look up endpoints automatically):
+                info-env sandbox                  # show all endpoints for env
+                sudo mount-env sandbox            # mount FSx at /var/www/sandbox
+                psql-env sandbox                  # psql shell against env's RDS
+                psql-env sandbox -c "SELECT now();"
+                valkey-env sandbox PING           # Valkey/Redis CLI
+
+              Drupal management (after sandbox is fully deployed):
+                cd /var/www/sandbox/drupal        # navigate to Drupal install
+                drush cr                          # clear caches
+                drush updb -y                     # apply pending DB updates
 
               MOTDEOF
 

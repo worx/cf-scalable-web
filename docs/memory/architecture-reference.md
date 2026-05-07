@@ -43,6 +43,40 @@ originSessionId: f483de33-7dee-4185-b1a3-72a0ada5c58e
 - `worxco/deploy-host/github-ssh-key` → Deploy key (private + public)
 - `worxco/deploy-host/root-password` → Optional root password
 
+## Deploy Host Toolchain (Phase B, post-2026-05-06)
+The deploy-host UserData installs a Drupal management toolchain on every fresh
+boot. Available tools (in PATH for `ubuntu` user):
+
+- `aws`, `git`, `make`, `tmux`, `screen`, `vim`, `claude` (original toolset)
+- `php` (8.3 CLI) + extensions: cli, common, curl, mbstring, xml, zip, gd, pgsql, intl, bcmath, opcache
+- `composer` (latest stable, in /usr/local/bin)
+- `drush` (composer global, in ~/.config/composer/vendor/bin — added to PATH via .bashrc)
+- `psql` (postgresql-client, latest from Ubuntu 24.04)
+- `redis-cli` (redis-tools — wire-compatible with Valkey)
+- `nfs-common` (FSx mount support)
+- `session-manager-plugin` (better SSM CLI experience)
+
+### Marker file
+`/etc/worxco/deploy-host-marker` — exists only on the deploy host. Scripts and
+Make targets check this to detect "I'm running on the deploy host" vs "I'm on
+local Mac and need to dispatch via SSM".
+
+### Helper commands (all auto-resolve endpoints from SSM/Secrets — no manual lookups)
+
+- `info-env <env>` — print RDS, FSx, Valkey, ALB endpoints for the named env
+- `mount-env <env>` — mount FSx OpenZFS at `/var/www/<env>` (requires sudo)
+- `psql-env <env> [args]` — connect to env's RDS as dbadmin (auto-fetches password)
+- `valkey-env <env> [args]` — connect to env's Valkey via redis-cli (auto-fetches AUTH token, uses TLS)
+
+All idempotent and consistent. Examples:
+```
+info-env sandbox                    # what are my endpoints?
+sudo mount-env sandbox              # mount FSx
+psql-env sandbox                    # interactive psql
+psql-env sandbox -c 'SELECT now();' # one-off SQL
+valkey-env sandbox PING             # one-off Valkey
+```
+
 ## Boot Script Flow (PHP instances)
 1. UserData calls `/opt/worxco/configure-php.sh` (baked into AMI)
 2. Script gets IMDS token → region → reads `/environment/name` from SSM
