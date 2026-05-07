@@ -165,11 +165,12 @@ systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
 # ============================================================
-step "Drupal management apt packages (NFS, psql, redis-cli, PHP 8.3 + 11 extensions)"
+step "Drupal management apt packages (NFS, psql, sqlite, redis-cli, PHP 8.3 + 12 extensions)"
 # ============================================================
 apt-get install -y \
   nfs-common \
   postgresql-client \
+  sqlite3 \
   redis-tools \
   php8.3-cli \
   php8.3-common \
@@ -179,6 +180,7 @@ apt-get install -y \
   php8.3-zip \
   php8.3-gd \
   php8.3-pgsql \
+  php8.3-sqlite3 \
   php8.3-intl \
   php8.3-bcmath \
   php8.3-opcache

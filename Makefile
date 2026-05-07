@@ -235,6 +235,11 @@ help:  ## Show this help message
 	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
 	@echo "  make deploy-allX              Same + database + cache (set it and forget it, ~65 min)"
 	@echo ""
+	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
+	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
+	@echo "  make remove-drupal-local      Wipe local Drupal install"
+	@echo "  make reinstall-drupal-local   Wipe and reinstall (full cycle for testing)"
+	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
 	@echo "  make verify-all               Verify all stacks"
 	@echo "  make verify-vpc               Verify VPC deployment"
@@ -610,6 +615,32 @@ deploy-allX:  ## Deploy ALL including database and cache (~65 min) — set it an
 	else \
 		echo "$(YELLOW)Note: run on the deploy host: sudo refresh-env-config $(ENV)$(NC)"; \
 	fi
+
+# -----------------------------------------------------------------------------
+# Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
+# -----------------------------------------------------------------------------
+
+install-drupal-local:  ## Install Drupal 11 locally on deploy-host (SQLite, no FSx/RDS)
+	@if [ -f /etc/worxco/deploy-host-marker ]; then \
+		bash scripts/deploy-host/install-drupal-local.sh; \
+	else \
+		echo "$(YELLOW)This target runs on the deploy-host (where /etc/worxco/deploy-host-marker exists).$(NC)"; \
+		echo "$(YELLOW)Connect to the deploy-host first:$(NC)"; \
+		echo "  $(CYAN)ssh deploy-host    # or: aws ssm start-session --target <instance-id>$(NC)"; \
+		echo "  $(CYAN)cd ~/projects/cf-scalable-web && git pull$(NC)"; \
+		echo "  $(CYAN)make install-drupal-local$(NC)"; \
+		exit 1; \
+	fi
+
+remove-drupal-local:  ## Wipe local Drupal install (run on deploy-host)
+	@if [ -f /etc/worxco/deploy-host-marker ]; then \
+		bash scripts/deploy-host/remove-drupal-local.sh; \
+	else \
+		echo "$(YELLOW)Run this on the deploy-host. See: make install-drupal-local$(NC)"; \
+		exit 1; \
+	fi
+
+reinstall-drupal-local: remove-drupal-local install-drupal-local  ## Wipe + install Drupal locally
 
 # -----------------------------------------------------------------------------
 # Verify Targets
