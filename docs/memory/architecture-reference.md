@@ -63,17 +63,31 @@ local Mac and need to dispatch via SSM".
 
 ### Helper commands (all auto-resolve endpoints from SSM/Secrets — no manual lookups)
 
-- `info-env <env>` — print RDS, FSx, Valkey, ALB endpoints for the named env
+- `info-env <env>` — print **live** RDS, FSx, Valkey, ALB endpoints from SSM (~3-5s, network call)
+- `show-env <env>` — print **cached** endpoints from `/etc/worxco/envs/<env>` (instant, no network)
+- `sudo refresh-env-config [envs...]` — regenerate cache from SSM (NOPASSWD via sudoers.d, no password prompt)
 - `mount-env <env>` — mount FSx OpenZFS at `/var/www/<env>` (requires sudo)
-- `psql-env <env> [args]` — connect to env's RDS as dbadmin (auto-fetches password)
+- `psql-env <env> [args]` — connect to env's RDS as dbadmin (auto-fetches password from Secrets Manager)
 - `valkey-env <env> [args]` — connect to env's Valkey via redis-cli (auto-fetches AUTH token, uses TLS)
 
-All idempotent and consistent. Examples:
+### Endpoint cache files
+
+`/etc/worxco/envs/<env>` — sourceable shell config with all endpoint variables for an environment.
+Generated automatically at deploy-host boot (best-effort, skips envs with no infrastructure).
+Regenerate after a destroy/redeploy with `sudo refresh-env-config <env>`. No secrets stored —
+passwords stay in Secrets Manager and are fetched by the `*-env` helpers as needed.
+
 ```
-info-env sandbox                    # what are my endpoints?
-sudo mount-env sandbox              # mount FSx
-psql-env sandbox                    # interactive psql
-psql-env sandbox -c 'SELECT now();' # one-off SQL
+source /etc/worxco/envs/sandbox    # exports RDS_ENDPOINT, FSX_DNS, VALKEY_HOST, ALB_DNS, ...
+echo $RDS_ENDPOINT                  # or use directly: psql -h $RDS_ENDPOINT ...
+```
+
+Examples:
+```
+info-env sandbox                    # live truth
+show-env sandbox                    # cached (instant)
+sudo refresh-env-config sandbox     # rebuild cache after destroy/deploy
+psql-env sandbox -c 'SELECT now();' # query without thinking about endpoints
 valkey-env sandbox PING             # one-off Valkey
 ```
 
