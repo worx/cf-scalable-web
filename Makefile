@@ -233,6 +233,7 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
 	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
+	@echo "  make deploy-allX              Same + database + cache (set it and forget it, ~65 min)"
 	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
 	@echo "  make verify-all               Verify all stacks"
@@ -565,6 +566,50 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo "$(YELLOW)Optional (deploy when needed):$(NC)"
 	@echo "  make deploy-database ENV=$(ENV)    # RDS PostgreSQL (~15 min, ~\$$75/mo)"
 	@echo "  make deploy-cache ENV=$(ENV)       # ElastiCache Valkey (~2 min, ~\$$12/mo)"
+	@echo ""
+	@echo "  make deploy-allX ENV=$(ENV)        # everything above + database + cache"
+
+deploy-allX:  ## Deploy ALL including database and cache (~65 min) — set it and forget it
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "$(BLUE)  Full Deployment + Data Layer: ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Phase 1: Standard deploy-all (VPC through compute)$(NC)"
+	@$(MAKE) deploy-all ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Phase 5: Data layer (RDS + ElastiCache, in parallel)$(NC)"
+	@# Both stacks are independent — kick off in parallel for speed.
+	@# Capture stdout/err to files; show output and propagate failures
+	@# after both finish, so user sees both results regardless of which
+	@# one had problems.
+	@TMPDB=$$(mktemp); TMPCACHE=$$(mktemp); \
+	$(MAKE) deploy-database ENV=$(ENV) > "$$TMPDB" 2>&1 & \
+	DB_PID=$$!; \
+	$(MAKE) deploy-cache ENV=$(ENV) > "$$TMPCACHE" 2>&1 & \
+	CACHE_PID=$$!; \
+	echo "$(CYAN)  database deploy started (pid $$DB_PID, log $$TMPDB)$(NC)"; \
+	echo "$(CYAN)  cache deploy started    (pid $$CACHE_PID, log $$TMPCACHE)$(NC)"; \
+	echo "$(CYAN)  waiting for both to complete (typically ~15 min)...$(NC)"; \
+	wait $$DB_PID; DB_RC=$$?; \
+	wait $$CACHE_PID; CACHE_RC=$$?; \
+	echo ""; \
+	echo "$(BLUE)=== database output ===$(NC)"; cat "$$TMPDB"; rm -f "$$TMPDB"; \
+	echo "$(BLUE)=== cache output ===$(NC)"; cat "$$TMPCACHE"; rm -f "$$TMPCACHE"; \
+	if [ $$DB_RC -ne 0 ] || [ $$CACHE_RC -ne 0 ]; then \
+		echo "$(RED)One or both data-layer deploys failed (db=$$DB_RC cache=$$CACHE_RC)$(NC)"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)  ✓ Full deployment + data layer complete: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
+	@echo ""
+	@if command -v refresh-env-config >/dev/null 2>&1; then \
+		echo "$(CYAN)Refreshing /etc/worxco/envs/$(ENV) and /etc/hosts FSx entry...$(NC)"; \
+		sudo refresh-env-config $(ENV) || true; \
+	else \
+		echo "$(YELLOW)Note: run on the deploy host: sudo refresh-env-config $(ENV)$(NC)"; \
+	fi
 
 # -----------------------------------------------------------------------------
 # Verify Targets
