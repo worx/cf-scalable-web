@@ -1,5 +1,5 @@
 {
   "Parameters": {
-    "InstanceType": "t4g.micro"
+    "InstanceType": "t4g.small"
   }
 }
