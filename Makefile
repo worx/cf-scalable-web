@@ -1195,6 +1195,30 @@ deploy-peering:  ## Deploy VPC peering between deploy-host and project VPC
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ Peering stack deployed: $(DEPLOY_PEERING_STACK)$(NC)"
+	@# Enable cross-VPC DNS resolution on the peering connection.
+	@# CloudFormation's AWS::EC2::VPCPeeringConnection does not expose
+	@# this flag, so we set it via the API after the stack is deployed.
+	@# Without this, FSx hostnames (which resolve only from inside their
+	@# home VPC) cannot be resolved from the peered deploy-host VPC.
+	@# RDS and ElastiCache work without this flag because their DNS names
+	@# are AWS-public with split-horizon resolution.
+	@echo "$(BLUE)Enabling cross-VPC DNS resolution on peering connection...$(NC)"
+	@PCX_ID=$$(aws cloudformation describe-stacks \
+		--stack-name $(DEPLOY_PEERING_STACK) \
+		--query 'Stacks[0].Outputs[?OutputKey==`PeeringConnectionId`].OutputValue' \
+		--output text \
+		--region $(AWS_REGION)); \
+	if [ -n "$$PCX_ID" ] && [ "$$PCX_ID" != "None" ]; then \
+		aws ec2 modify-vpc-peering-connection-options \
+			--vpc-peering-connection-id "$$PCX_ID" \
+			--requester-peering-connection-options AllowDnsResolutionFromRemoteVpc=true \
+			--accepter-peering-connection-options AllowDnsResolutionFromRemoteVpc=true \
+			--region $(AWS_REGION) >/dev/null && \
+		echo "$(GREEN)✓ DNS resolution enabled on $$PCX_ID$(NC)" || \
+		echo "$(YELLOW)Warning: failed to enable DNS resolution on peering$(NC)"; \
+	else \
+		echo "$(YELLOW)Warning: could not determine PeeringConnectionId$(NC)"; \
+	fi
 	@echo ""
 	@echo "$(CYAN)Run 'make test-peering ENV=$(ENV)' to verify connectivity.$(NC)"
 
