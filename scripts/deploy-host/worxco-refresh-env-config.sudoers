@@ -1,0 +1,4 @@
+# Allow ubuntu to refresh /etc/worxco/envs/* and /etc/hosts FSx block
+# without password. The script reads SSM and writes endpoint configuration.
+# No secrets are written to /etc/worxco/envs/<env> files.
+ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/refresh-env-config

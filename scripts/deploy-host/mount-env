@@ -1,0 +1,38 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# mount-env: Mount a project's FSx OpenZFS for the named environment.
+# Installed at /usr/local/sbin/mount-env (requires sudo to mount).
+# Usage: sudo mount-env sandbox
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "Usage: mount-env <environment>"
+  echo "Mounts /var/www/<env> from FSx OpenZFS for the named environment."
+  echo "Example: sudo mount-env sandbox"
+  exit 1
+fi
+ENV="$1"
+
+MOUNT_POINT="/var/www/$ENV"
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+  echo "$MOUNT_POINT is already mounted"
+  exit 0
+fi
+
+FSX_DNS=$(aws ssm get-parameter \
+  --name "/$ENV/fsx/dns-name" \
+  --query 'Parameter.Value' \
+  --output text 2>/dev/null) || {
+  echo "ERROR: SSM parameter /$ENV/fsx/dns-name not found."
+  echo "FSx for environment '$ENV' may not be deployed yet,"
+  echo "or VPC peering (cf-deploy-peering) is not in place."
+  exit 1
+}
+
+mkdir -p "$MOUNT_POINT"
+mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
+echo "Mounted $FSX_DNS:/fsx -> $MOUNT_POINT"

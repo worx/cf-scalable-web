@@ -354,290 +354,38 @@ Resources:
               dpkg -i /tmp/session-manager-plugin.deb || true
               rm -f /tmp/session-manager-plugin.deb
 
-              # mount-env: helper to mount a project FSx for the named environment
-              # Usage: sudo mount-env sandbox
-              # Looks up FSx DNS from SSM /<env>/fsx/dns-name and mounts at /var/www/<env>
-              mkdir -p /usr/local/sbin
-              cat > /usr/local/sbin/mount-env << 'MOUNTEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -lt 1 ]; then
-                echo "Usage: mount-env <environment>"
-                echo "Mounts /var/www/<env> from FSx OpenZFS for the named environment."
-                echo "Example: mount-env sandbox"
-                exit 1
-              fi
-              ENV="$1"
-              MOUNT_POINT="/var/www/$ENV"
-              if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-                echo "$MOUNT_POINT is already mounted"
-                exit 0
-              fi
-              FSX_DNS=$(aws ssm get-parameter \
-                --name "/$ENV/fsx/dns-name" \
-                --query 'Parameter.Value' \
-                --output text 2>/dev/null) || {
-                echo "ERROR: SSM parameter /$ENV/fsx/dns-name not found."
-                echo "FSx for environment '$ENV' may not be deployed yet,"
-                echo "or VPC peering (cf-deploy-peering) is not in place."
-                exit 1
-              }
-              mkdir -p "$MOUNT_POINT"
-              mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
-              echo "Mounted $FSX_DNS:/fsx -> $MOUNT_POINT"
-              MOUNTEOF
-              chmod +x /usr/local/sbin/mount-env
-
-              # info-env: print all project endpoints for a named environment
-              # Usage: info-env sandbox
-              # No-arg variant attempts to auto-detect (single env in account).
-              cat > /usr/local/bin/info-env << 'INFOEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -lt 1 ]; then
-                echo "Usage: info-env <environment>"
-                echo "Prints RDS, FSx, and Valkey endpoints for the named environment."
-                echo "Pulls live from SSM Parameter Store — always current."
-                exit 1
-              fi
-              ENV="$1"
-              get_ssm() {
-                aws ssm get-parameter --name "$1" --query 'Parameter.Value' --output text 2>/dev/null \
-                  || echo "(not deployed)"
-              }
-              echo "Endpoints for environment: $ENV"
-              echo "  RDS:        $(get_ssm /$ENV/rds/endpoint):5432"
-              echo "  FSx (NFS):  $(get_ssm /$ENV/fsx/dns-name):/fsx"
-              echo "  Valkey:     $(get_ssm /$ENV/cache/endpoint):6379"
-              echo "  ALB DNS:    $(get_ssm /$ENV/compute/alb-dns-name)"
-              echo ""
-              echo "Database name:    drupal (from cf-database parameter)"
-              echo "Database user:    dbadmin (from cf-database parameter)"
-              echo "Master password:  worxco/$ENV/rds/master-password (Secrets Manager)"
-              INFOEOF
-              chmod +x /usr/local/bin/info-env
-
-              # psql-env: connect to a project's RDS PostgreSQL with auto-resolved
-              # endpoint and master password from Secrets Manager.
-              # Usage: psql-env sandbox             # interactive shell
-              #        psql-env sandbox -c "SELECT version();"  # one-off command
-              cat > /usr/local/bin/psql-env << 'PSQLEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -lt 1 ]; then
-                echo "Usage: psql-env <environment> [psql args...]"
-                echo "Examples:"
-                echo "  psql-env sandbox"
-                echo "  psql-env sandbox -c 'SELECT now();'"
-                echo "  psql-env sandbox -d postgres   # different database"
-                exit 1
-              fi
-              ENV="$1"
-              shift
-              RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
-                --query 'Parameter.Value' --output text 2>/dev/null) || {
-                echo "ERROR: SSM parameter /$ENV/rds/endpoint not found." >&2
-                echo "Is RDS deployed for environment '$ENV'?" >&2
-                exit 1
-              }
-              PASS=$(aws secretsmanager get-secret-value \
-                --secret-id "worxco/$ENV/rds/master-password" \
-                --query SecretString --output text 2>/dev/null) || {
-                echo "ERROR: Secret worxco/$ENV/rds/master-password not found." >&2
-                exit 1
-              }
-              # Default to the drupal database; user args can override with -d
-              PGPASSWORD="$PASS" psql -h "$RDS" -U dbadmin -d drupal "$@"
-              PSQLEOF
-              chmod +x /usr/local/bin/psql-env
-
-              # valkey-env: connect to a project's ElastiCache Valkey with
-              # auto-resolved endpoint and AUTH token.
-              # Usage: valkey-env sandbox            # interactive shell
-              #        valkey-env sandbox PING       # one-off command
-              cat > /usr/local/bin/valkey-env << 'VALKEYEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -lt 1 ]; then
-                echo "Usage: valkey-env <environment> [redis-cli args...]"
-                echo "Examples:"
-                echo "  valkey-env sandbox PING"
-                echo "  valkey-env sandbox INFO server"
-                echo "  valkey-env sandbox            # interactive shell"
-                exit 1
-              fi
-              ENV="$1"
-              shift
-              HOST=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" \
-                --query 'Parameter.Value' --output text 2>/dev/null) || {
-                echo "ERROR: SSM parameter /$ENV/cache/endpoint not found." >&2
-                echo "Is ElastiCache deployed for environment '$ENV'?" >&2
-                exit 1
-              }
-              AUTH=$(aws secretsmanager get-secret-value \
-                --secret-id "worxco/$ENV/cache/auth-token" \
-                --query SecretString --output text 2>/dev/null) || {
-                echo "ERROR: Secret worxco/$ENV/cache/auth-token not found." >&2
-                exit 1
-              }
-              # ElastiCache Valkey uses TLS by default — pass --tls
-              redis-cli -h "$HOST" -p 6379 --tls -a "$AUTH" "$@"
-              VALKEYEOF
-              chmod +x /usr/local/bin/valkey-env
-
-              # Marker file: lets scripts and Make targets detect "running on deploy host"
-              # vs running on the user's Mac (and needing to dispatch via SSM).
+              # Marker file: lets scripts and Make targets detect "running on
+              # deploy host" vs "running on the user's Mac".
               mkdir -p /etc/worxco
               echo "deploy-host" > /etc/worxco/deploy-host-marker
               chmod 644 /etc/worxco/deploy-host-marker
 
               # Per-environment cached endpoint config directory.
-              # Files written by refresh-env-config (root) and read by show-env (anyone).
               mkdir -p /etc/worxco/envs
               chmod 755 /etc/worxco/envs
 
-              # refresh-env-config: regenerate /etc/worxco/envs/<env> from SSM
-              # AND maintain /etc/hosts entries for FSx hostnames (which don't
-              # resolve across VPC peering even with AllowDnsResolutionFromRemoteVpc).
-              # Usage: sudo refresh-env-config              # all known envs (skips missing)
-              #        sudo refresh-env-config sandbox      # specific env
-              cat > /usr/local/sbin/refresh-env-config << 'REFRESHEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -eq 0 ]; then
-                set -- sandbox staging production
-              fi
+              # Install helper scripts from the cloned repo.
+              # The scripts live in scripts/deploy-host/ in the project repo
+              # as normal editable bash files (no UserData escaping pain).
+              # To update an existing deploy host without redeploying the
+              # stack, edit a script in the repo and re-run the install line.
+              REPO_DIR=/home/ubuntu/projects/cf-scalable-web
+              if [ -d "$REPO_DIR/scripts/deploy-host" ]; then
+                echo "=== Installing helper scripts from repo ==="
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/info-env"           /usr/local/bin/info-env
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/show-env"           /usr/local/bin/show-env
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/psql-env"           /usr/local/bin/psql-env
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/valkey-env"         /usr/local/bin/valkey-env
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/mount-env"          /usr/local/sbin/mount-env
+                install -m 0755 "$REPO_DIR/scripts/deploy-host/refresh-env-config" /usr/local/sbin/refresh-env-config
+                install -m 0440 "$REPO_DIR/scripts/deploy-host/worxco-refresh-env-config.sudoers" /etc/sudoers.d/worxco-refresh-env-config
+                echo "Helper scripts installed."
 
-              # Pass 1: write /etc/worxco/envs/<env> for each requested env
-              for ENV in "$@"; do
-                RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
-                  --query 'Parameter.Value' --output text 2>/dev/null) || RDS=""
-                FSX=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" \
-                  --query 'Parameter.Value' --output text 2>/dev/null) || FSX=""
-                VALKEY=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" \
-                  --query 'Parameter.Value' --output text 2>/dev/null) || VALKEY=""
-                ALB=$(aws ssm get-parameter --name "/$ENV/compute/alb-dns-name" \
-                  --query 'Parameter.Value' --output text 2>/dev/null) || ALB=""
-                if [ -z "$RDS" ] && [ -z "$FSX" ] && [ -z "$VALKEY" ]; then
-                  echo "Skipping $ENV (no infrastructure deployed)"
-                  continue
-                fi
-                OUT="/etc/worxco/envs/$ENV"
-                cat > "$OUT" << EOF_INNER
-              # Generated by refresh-env-config on $(date -u +'%Y-%m-%dT%H:%M:%SZ')
-              # Source from a shell with: source /etc/worxco/envs/$ENV
-              # Re-run: sudo refresh-env-config $ENV
-              DRUPAL_ENV=$ENV
-              RDS_ENDPOINT=$RDS
-              RDS_PORT=5432
-              RDS_USER=dbadmin
-              RDS_DATABASE=drupal
-              FSX_DNS=$FSX
-              VALKEY_HOST=$VALKEY
-              VALKEY_PORT=6379
-              ALB_DNS=$ALB
-              DRUPAL_PATH=/var/www/$ENV/drupal
-              EOF_INNER
-                chmod 644 "$OUT"
-                echo "Wrote $OUT"
-              done
-
-              # Pass 2: rebuild the /etc/hosts FSx block.
-              # FSx hostnames live in the project VPC's internal DNS resolver
-              # only — they do NOT resolve across VPC peering even when the
-              # AllowDnsResolutionFromRemoteVpc flag is set. We bridge the gap
-              # by maintaining a marker block in /etc/hosts mapping each
-              # deployed FSx hostname to its private IP.
-              #
-              # Always check all three known envs (sandbox, staging, production)
-              # so a partial refresh doesn't drop entries for other envs.
-              HOSTS_BLOCK=$(mktemp)
-              trap "rm -f $HOSTS_BLOCK" EXIT
-              for HENV in sandbox staging production; do
-                HFSX=$(aws ssm get-parameter --name "/$HENV/fsx/dns-name" \
-                  --query 'Parameter.Value' --output text 2>/dev/null) || continue
-                [ -z "$HFSX" ] && continue
-                [ "$HFSX" = "None" ] && continue
-                HFSX_ID=$(echo "$HFSX" | cut -d. -f1)
-                HNIC=$(aws fsx describe-file-systems \
-                  --file-system-ids "$HFSX_ID" \
-                  --query 'FileSystems[0].NetworkInterfaceIds[0]' \
-                  --output text 2>/dev/null) || continue
-                [ -z "$HNIC" ] && continue
-                [ "$HNIC" = "None" ] && continue
-                HIP=$(aws ec2 describe-network-interfaces \
-                  --network-interface-ids "$HNIC" \
-                  --query 'NetworkInterfaces[0].PrivateIpAddress' \
-                  --output text 2>/dev/null) || continue
-                [ -z "$HIP" ] && continue
-                [ "$HIP" = "None" ] && continue
-                echo "$HIP $HFSX  # $HENV" >> $HOSTS_BLOCK
-              done
-
-              # Replace the managed block in /etc/hosts atomically
-              HOSTS_NEW=$(mktemp)
-              awk '
-                /# BEGIN worxco-fsx-hosts/ {skip=1; next}
-                /# END worxco-fsx-hosts/ {skip=0; next}
-                !skip
-              ' /etc/hosts > $HOSTS_NEW
-              if [ -s "$HOSTS_BLOCK" ]; then
-                {
-                  echo ""
-                  echo "# BEGIN worxco-fsx-hosts (managed by refresh-env-config — do not edit)"
-                  cat $HOSTS_BLOCK
-                  echo "# END worxco-fsx-hosts"
-                } >> $HOSTS_NEW
-                echo "Updated /etc/hosts: $(wc -l < $HOSTS_BLOCK) FSx entries (managed block)"
+                # Best-effort: refresh now for any envs already deployed
+                /usr/local/sbin/refresh-env-config sandbox staging production || true
               else
-                echo "No FSx entries to manage in /etc/hosts (no environments deployed)"
+                echo "WARNING: $REPO_DIR/scripts/deploy-host not found — helpers not installed."
               fi
-              mv $HOSTS_NEW /etc/hosts
-              chmod 644 /etc/hosts
-              REFRESHEOF
-              chmod 755 /usr/local/sbin/refresh-env-config
-
-              # show-env: pretty-print the cached config (no sudo, no AWS calls — fast)
-              # Usage: show-env sandbox
-              cat > /usr/local/bin/show-env << 'SHOWEOF'
-              #!/bin/bash
-              set -euo pipefail
-              if [ "$#" -lt 1 ]; then
-                echo "Usage: show-env <environment>"
-                echo "Pretty-prints the CACHED endpoint config for the named env."
-                echo "(Run 'sudo refresh-env-config <env>' to refresh from SSM.)"
-                echo ""
-                echo "Available cached environments:"
-                ls /etc/worxco/envs/ 2>/dev/null | sed 's/^/  /' || echo "  (none yet)"
-                exit 1
-              fi
-              ENV="$1"
-              FILE="/etc/worxco/envs/$ENV"
-              if [ ! -f "$FILE" ]; then
-                echo "ERROR: $FILE does not exist."
-                echo "Run: sudo refresh-env-config $ENV"
-                exit 1
-              fi
-              echo "Cached endpoints for: $ENV"
-              echo "----------------------------------------"
-              cat "$FILE"
-              echo "----------------------------------------"
-              echo "(For LIVE values from SSM, run: info-env $ENV)"
-              SHOWEOF
-              chmod 755 /usr/local/bin/show-env
-
-              # sudoers.d entry: ubuntu can run refresh-env-config without password.
-              # Mode 0440 is required by sudo (refuses to read otherwise).
-              cat > /etc/sudoers.d/worxco-refresh-env-config << 'SUDOEOF'
-              # Allow ubuntu to refresh /etc/worxco/envs/* without password.
-              # The script reads SSM and writes /etc/worxco/envs/<env> with
-              # endpoint configuration. No secrets are written to these files.
-              ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/refresh-env-config
-              SUDOEOF
-              chmod 440 /etc/sudoers.d/worxco-refresh-env-config
-
-              # Best-effort: refresh now for any envs already deployed
-              /usr/local/sbin/refresh-env-config sandbox staging production || true
 
               echo "=== Drupal management toolchain installed ==="
 

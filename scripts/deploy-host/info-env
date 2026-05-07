@@ -1,0 +1,34 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# info-env: Print live RDS, FSx, Valkey, ALB endpoints for an environment.
+# Pulls fresh from SSM each call. For cached values use show-env instead.
+# Installed at /usr/local/bin/info-env (no sudo required).
+# Usage: info-env sandbox
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "Usage: info-env <environment>"
+  echo "Prints LIVE endpoints for the named environment from SSM."
+  echo "(For cached values from /etc/worxco/envs/<env>, use: show-env <env>)"
+  exit 1
+fi
+ENV="$1"
+
+get_ssm() {
+  aws ssm get-parameter --name "$1" --query 'Parameter.Value' --output text 2>/dev/null \
+    || echo "(not deployed)"
+}
+
+echo "Endpoints for environment: $ENV (live from SSM)"
+echo "  RDS:        $(get_ssm /$ENV/rds/endpoint):5432"
+echo "  FSx (NFS):  $(get_ssm /$ENV/fsx/dns-name):/fsx"
+echo "  Valkey:     $(get_ssm /$ENV/cache/endpoint):6379"
+echo "  ALB DNS:    $(get_ssm /$ENV/compute/alb-dns-name)"
+echo ""
+echo "Database name:    drupal (from cf-database parameter)"
+echo "Database user:    dbadmin (from cf-database parameter)"
+echo "Master password:  worxco/$ENV/rds/master-password (Secrets Manager)"

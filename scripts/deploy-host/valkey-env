@@ -1,0 +1,39 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# valkey-env: Connect to a project's ElastiCache Valkey with auto-resolved
+# endpoint and AUTH token. Uses TLS (TransitEncryptionEnabled=true).
+# Installed at /usr/local/bin/valkey-env (no sudo required).
+# Usage: valkey-env sandbox            # interactive shell
+#        valkey-env sandbox PING       # one-off command
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "Usage: valkey-env <environment> [redis-cli args...]"
+  echo "Examples:"
+  echo "  valkey-env sandbox PING"
+  echo "  valkey-env sandbox INFO server"
+  echo "  valkey-env sandbox            # interactive shell"
+  exit 1
+fi
+ENV="$1"
+shift
+
+HOST=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" \
+  --query 'Parameter.Value' --output text 2>/dev/null) || {
+  echo "ERROR: SSM parameter /$ENV/cache/endpoint not found." >&2
+  echo "Is ElastiCache deployed for environment '$ENV'?" >&2
+  exit 1
+}
+
+AUTH=$(aws secretsmanager get-secret-value \
+  --secret-id "worxco/$ENV/cache/auth-token" \
+  --query SecretString --output text 2>/dev/null) || {
+  echo "ERROR: Secret worxco/$ENV/cache/auth-token not found." >&2
+  exit 1
+}
+
+redis-cli -h "$HOST" -p 6379 --tls -a "$AUTH" "$@"

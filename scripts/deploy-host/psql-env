@@ -1,0 +1,40 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# psql-env: Connect to a project's RDS PostgreSQL with auto-resolved
+# endpoint and master password from Secrets Manager.
+# Installed at /usr/local/bin/psql-env (no sudo required).
+# Usage: psql-env sandbox             # interactive shell
+#        psql-env sandbox -c "SELECT version();"
+#        psql-env sandbox -d postgres # different database
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "Usage: psql-env <environment> [psql args...]"
+  echo "Examples:"
+  echo "  psql-env sandbox"
+  echo "  psql-env sandbox -c 'SELECT now();'"
+  echo "  psql-env sandbox -d postgres   # different database"
+  exit 1
+fi
+ENV="$1"
+shift
+
+RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
+  --query 'Parameter.Value' --output text 2>/dev/null) || {
+  echo "ERROR: SSM parameter /$ENV/rds/endpoint not found." >&2
+  echo "Is RDS deployed for environment '$ENV'?" >&2
+  exit 1
+}
+
+PASS=$(aws secretsmanager get-secret-value \
+  --secret-id "worxco/$ENV/rds/master-password" \
+  --query SecretString --output text 2>/dev/null) || {
+  echo "ERROR: Secret worxco/$ENV/rds/master-password not found." >&2
+  exit 1
+}
+
+PGPASSWORD="$PASS" psql -h "$RDS" -U dbadmin -d drupal "$@"

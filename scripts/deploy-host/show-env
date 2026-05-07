@@ -1,0 +1,35 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# show-env: Pretty-print the cached endpoint config for an environment.
+# Reads /etc/worxco/envs/<env> (no sudo, no AWS calls — instant).
+# Installed at /usr/local/bin/show-env.
+# Run 'sudo refresh-env-config <env>' to refresh the cache from SSM.
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "Usage: show-env <environment>"
+  echo "Pretty-prints the CACHED endpoint config for the named env."
+  echo "(Run 'sudo refresh-env-config <env>' to refresh from SSM.)"
+  echo ""
+  echo "Available cached environments:"
+  ls /etc/worxco/envs/ 2>/dev/null | sed 's/^/  /' || echo "  (none yet)"
+  exit 1
+fi
+ENV="$1"
+
+FILE="/etc/worxco/envs/$ENV"
+if [ ! -f "$FILE" ]; then
+  echo "ERROR: $FILE does not exist."
+  echo "Run: sudo refresh-env-config $ENV"
+  exit 1
+fi
+
+echo "Cached endpoints for: $ENV"
+echo "----------------------------------------"
+cat "$FILE"
+echo "----------------------------------------"
+echo "(For LIVE values from SSM, run: info-env $ENV)"
