@@ -47,6 +47,10 @@ fi
 
 log "=== Drupal Local Install Starting ==="
 
+# Composer can briefly use 500MB-1GB of memory for dependency resolution.
+# Lift PHP's memory limit so it never OOMs on us mid-install.
+export COMPOSER_MEMORY_LIMIT=-1
+
 # Verify required tools are present
 for tool in composer php sqlite3; do
   command -v "$tool" >/dev/null 2>&1 || \
@@ -59,7 +63,7 @@ for ext in pdo_sqlite mbstring gd curl xml dom; do
     fail "PHP extension '$ext' not loaded. Check apt installs in bootstrap.sh."
 done
 
-# Ensure /var/www/local exists and is writable by ubuntu
+# Ensure /var/www/local exists and is writable by the running user
 if [ ! -d /var/www/local ]; then
   log "Creating /var/www/local (sudo)"
   sudo mkdir -p /var/www/local
@@ -68,7 +72,13 @@ fi
 
 # ----- composer create-project (the slow step, ~2 min) -----
 log "composer create-project drupal/recommended-project (~2 min, fetches Drupal core + deps)..."
-composer create-project drupal/recommended-project "$INSTALL_DIR" --no-interaction
+START_TS=$(date +%s)
+composer create-project drupal/recommended-project "$INSTALL_DIR" \
+  --no-interaction \
+  --no-progress \
+  --prefer-dist
+ELAPSED=$(( $(date +%s) - START_TS ))
+log "  composer create-project finished in ${ELAPSED}s"
 
 # ----- drush in the project -----
 log "Adding drush/drush to the project..."
@@ -114,11 +124,13 @@ log "  Database:  $SQLITE_FILE"
 log "  Admin:     $ADMIN_USER / $ADMIN_PASS"
 log "  Marker:    $MARKER"
 log ""
-log "Validate:"
-log "  cd $INSTALL_DIR && vendor/bin/drush status"
-log "  cd $INSTALL_DIR && vendor/bin/drush user:information $ADMIN_USER"
+log "Useful Make targets:"
+log "  make verify-drupal-local       # health check (drush status + queries)"
+log "  make serve-drupal-local        # start drush runserver in tmux"
+log "  make stop-drupal-local-server  # kill the runserver tmux session"
+log "  make reinstall-drupal-local    # wipe + reinstall (full cycle)"
 log ""
-log "Browser test (optional, deploy-host has no inbound port 8080 — needs SSH tunnel):"
-log "  cd $INSTALL_DIR && vendor/bin/drush runserver 0.0.0.0:8080"
-log ""
-log "To wipe and start over: make reinstall-drupal-local"
+log "Browser preview via SSH tunnel:"
+log "  # 1. Start the server (on deploy-host):  make serve-drupal-local"
+log "  # 2. Tunnel from your Mac:               ssh -L 8080:localhost:8080 deploy-host"
+log "  # 3. Browse:                             http://localhost:8080"

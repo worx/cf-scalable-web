@@ -237,6 +237,9 @@ help:  ## Show this help message
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
 	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
+	@echo "  make verify-drupal-local      Health check (drush status + queries)"
+	@echo "  make serve-drupal-local       Start drush runserver in tmux (port 8080)"
+	@echo "  make stop-drupal-local-server Stop the runserver tmux session"
 	@echo "  make remove-drupal-local      Wipe local Drupal install"
 	@echo "  make reinstall-drupal-local   Wipe and reinstall (full cycle for testing)"
 	@echo ""
@@ -641,6 +644,72 @@ remove-drupal-local:  ## Wipe local Drupal install (run on deploy-host)
 	fi
 
 reinstall-drupal-local: remove-drupal-local install-drupal-local  ## Wipe + install Drupal locally
+
+verify-drupal-local:  ## Run health checks on local Drupal install (drush status + queries)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host. See: make install-drupal-local$(NC)"; exit 1; \
+	fi
+	@if [ ! -f /var/www/local/drupal/.installed ]; then \
+		echo "$(RED)Drupal not installed locally. Run: make install-drupal-local$(NC)"; exit 1; \
+	fi
+	@echo "$(BLUE)=== drush status ==="
+	@cd /var/www/local/drupal && vendor/bin/drush status \
+		--fields=drupal-version,db-driver,db-status,bootstrap,site-uri,php-version
+	@echo ""
+	@echo "$(BLUE)=== admin user ==="
+	@cd /var/www/local/drupal && vendor/bin/drush user:information admin
+	@echo ""
+	@echo "$(BLUE)=== database row counts ==="
+	@cd /var/www/local/drupal && vendor/bin/drush sqlq \
+		"SELECT 'users' AS what, count(*) FROM users_field_data UNION ALL \
+		 SELECT 'nodes',           count(*) FROM node_field_data UNION ALL \
+		 SELECT 'config',          count(*) FROM config UNION ALL \
+		 SELECT 'sessions',        count(*) FROM sessions;"
+	@echo ""
+	@echo "$(BLUE)=== recent watchdog entries ==="
+	@cd /var/www/local/drupal && vendor/bin/drush watchdog:show --count=5 2>/dev/null \
+		|| echo "  (no log entries yet)"
+	@echo ""
+	@echo "$(GREEN)✓ Local Drupal install looks healthy$(NC)"
+
+serve-drupal-local:  ## Start drush runserver in tmux (port 8080) — survives detach
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ ! -f /var/www/local/drupal/.installed ]; then \
+		echo "$(RED)Drupal not installed locally. Run: make install-drupal-local$(NC)"; exit 1; \
+	fi
+	@if tmux has-session -t drupal-local 2>/dev/null; then \
+		echo "$(CYAN)drush runserver is already running in tmux session 'drupal-local'.$(NC)"; \
+	else \
+		echo "$(BLUE)Starting drush runserver in tmux session 'drupal-local'...$(NC)"; \
+		tmux new-session -d -s drupal-local \
+			"cd /var/www/local/drupal && vendor/bin/drush runserver 0.0.0.0:8080"; \
+		sleep 2; \
+		echo "$(GREEN)✓ Server started$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(YELLOW)To view server logs (Ctrl-B D to detach):$(NC)"
+	@echo "  $(CYAN)tmux attach -t drupal-local$(NC)"
+	@echo ""
+	@echo "$(YELLOW)To browse from your Mac:$(NC)"
+	@echo "  $(CYAN)# In a Mac terminal:$(NC)"
+	@echo "  $(CYAN)ssh -L 8080:localhost:8080 deploy-host$(NC)"
+	@echo "  $(CYAN)# Then open http://localhost:8080 in your browser$(NC)"
+	@echo "  $(CYAN)# Login: admin / admin$(NC)"
+	@echo ""
+	@echo "$(YELLOW)To stop the server: make stop-drupal-local-server$(NC)"
+
+stop-drupal-local-server:  ## Stop the drush runserver tmux session
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if tmux has-session -t drupal-local 2>/dev/null; then \
+		tmux kill-session -t drupal-local; \
+		echo "$(GREEN)✓ Server stopped (tmux session 'drupal-local' killed)$(NC)"; \
+	else \
+		echo "$(CYAN)No drush runserver session running.$(NC)"; \
+	fi
 
 # -----------------------------------------------------------------------------
 # Verify Targets
