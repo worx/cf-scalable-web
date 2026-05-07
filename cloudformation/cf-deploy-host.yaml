@@ -159,6 +159,9 @@ Resources:
 
               # System updates
               export DEBIAN_FRONTEND=noninteractive
+              # cloud-init runs UserData without HOME set, which breaks tools
+              # like composer that require it. Set it for the entire script.
+              export HOME=/root
               apt-get update -y
 
               # Upgrade is best-effort: transient mirror 404s on fresh AMIs are common
@@ -337,7 +340,7 @@ Resources:
               curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php
               php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
               rm /tmp/composer-setup.php
-              echo "Composer installed: $(composer --version 2>&1 | head -1)"
+              ls -la /usr/local/bin/composer
 
               # Drush via composer global (installs to ~ubuntu/.config/composer/vendor)
               su - ubuntu -c 'composer global require drush/drush' || {
