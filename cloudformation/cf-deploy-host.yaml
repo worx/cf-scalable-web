@@ -497,17 +497,19 @@ Resources:
               chmod 755 /etc/worxco/envs
 
               # refresh-env-config: regenerate /etc/worxco/envs/<env> from SSM
+              # AND maintain /etc/hosts entries for FSx hostnames (which don't
+              # resolve across VPC peering even with AllowDnsResolutionFromRemoteVpc).
               # Usage: sudo refresh-env-config              # all known envs (skips missing)
               #        sudo refresh-env-config sandbox      # specific env
-              #        sudo refresh-env-config sandbox staging
               cat > /usr/local/sbin/refresh-env-config << 'REFRESHEOF'
               #!/bin/bash
               set -euo pipefail
               if [ "$#" -eq 0 ]; then
                 set -- sandbox staging production
               fi
+
+              # Pass 1: write /etc/worxco/envs/<env> for each requested env
               for ENV in "$@"; do
-                # Probe — if no RDS endpoint exists, this env isn't deployed
                 RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
                   --query 'Parameter.Value' --output text 2>/dev/null) || RDS=""
                 FSX=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" \
@@ -539,6 +541,59 @@ Resources:
                 chmod 644 "$OUT"
                 echo "Wrote $OUT"
               done
+
+              # Pass 2: rebuild the /etc/hosts FSx block.
+              # FSx hostnames live in the project VPC's internal DNS resolver
+              # only — they do NOT resolve across VPC peering even when the
+              # AllowDnsResolutionFromRemoteVpc flag is set. We bridge the gap
+              # by maintaining a marker block in /etc/hosts mapping each
+              # deployed FSx hostname to its private IP.
+              #
+              # Always check all three known envs (sandbox, staging, production)
+              # so a partial refresh doesn't drop entries for other envs.
+              HOSTS_BLOCK=$(mktemp)
+              trap "rm -f $HOSTS_BLOCK" EXIT
+              for HENV in sandbox staging production; do
+                HFSX=$(aws ssm get-parameter --name "/$HENV/fsx/dns-name" \
+                  --query 'Parameter.Value' --output text 2>/dev/null) || continue
+                [ -z "$HFSX" ] && continue
+                [ "$HFSX" = "None" ] && continue
+                HFSX_ID=$(echo "$HFSX" | cut -d. -f1)
+                HNIC=$(aws fsx describe-file-systems \
+                  --file-system-ids "$HFSX_ID" \
+                  --query 'FileSystems[0].NetworkInterfaceIds[0]' \
+                  --output text 2>/dev/null) || continue
+                [ -z "$HNIC" ] && continue
+                [ "$HNIC" = "None" ] && continue
+                HIP=$(aws ec2 describe-network-interfaces \
+                  --network-interface-ids "$HNIC" \
+                  --query 'NetworkInterfaces[0].PrivateIpAddress' \
+                  --output text 2>/dev/null) || continue
+                [ -z "$HIP" ] && continue
+                [ "$HIP" = "None" ] && continue
+                echo "$HIP $HFSX  # $HENV" >> $HOSTS_BLOCK
+              done
+
+              # Replace the managed block in /etc/hosts atomically
+              HOSTS_NEW=$(mktemp)
+              awk '
+                /# BEGIN worxco-fsx-hosts/ {skip=1; next}
+                /# END worxco-fsx-hosts/ {skip=0; next}
+                !skip
+              ' /etc/hosts > $HOSTS_NEW
+              if [ -s "$HOSTS_BLOCK" ]; then
+                {
+                  echo ""
+                  echo "# BEGIN worxco-fsx-hosts (managed by refresh-env-config — do not edit)"
+                  cat $HOSTS_BLOCK
+                  echo "# END worxco-fsx-hosts"
+                } >> $HOSTS_NEW
+                echo "Updated /etc/hosts: $(wc -l < $HOSTS_BLOCK) FSx entries (managed block)"
+              else
+                echo "No FSx entries to manage in /etc/hosts (no environments deployed)"
+              fi
+              mv $HOSTS_NEW /etc/hosts
+              chmod 644 /etc/hosts
               REFRESHEOF
               chmod 755 /usr/local/sbin/refresh-env-config
 
