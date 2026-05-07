@@ -43,6 +43,21 @@ originSessionId: f483de33-7dee-4185-b1a3-72a0ada5c58e
 - `worxco/deploy-host/github-ssh-key` → Deploy key (private + public)
 - `worxco/deploy-host/root-password` → Optional root password
 
+## Control Plane vs Data Plane (the architectural model)
+
+The system has two roles that share the same FSx volume and RDS database but have very different network postures:
+
+| Role | Where | What | Internet egress |
+|------|-------|------|-----------------|
+| **Data plane** (serves traffic) | PHP-FPM auto-scaling group in project VPC | Reads code from FSx, queries RDS, returns HTTP via NLB → NGINX → ALB | **No** — sealed by design (no NAT, no IGW route) |
+| **Control plane** (manages code) | Deploy host in default VPC | Runs CloudFormation, fetches packages, writes Drupal code to FSx, runs drush | **Yes** — full egress |
+
+**Key insight**: when the deploy host writes new Drupal code via `composer require`, every PHP-FPM instance sees it on its NFS mount immediately. No restarts, no rotation, no SSH-into-PHP. The deploy host is the *only* path through which new code enters the system, by design.
+
+This is why the deploy host has internet access AND mounts FSx AND has VPC peering — it's the controlled, audited entry point. Day-two operations (module installs, config changes, drush operations) all run through it.
+
+See `docs/DEPLOY-HOST.md` "Control Plane vs Data Plane" and "Day-Two Operations" sections for the full pattern.
+
 ## Deploy Host Toolchain (Phase B, post-2026-05-06)
 The deploy-host UserData installs a Drupal management toolchain on every fresh
 boot. Available tools (in PATH for `ubuntu` user):
