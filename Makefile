@@ -654,7 +654,7 @@ verify-drupal-local:  ## Run health checks on local Drupal install (drush status
 	fi
 	@echo "$(BLUE)=== drush status ==="
 	@cd /var/www/local/drupal && vendor/bin/drush status \
-		--fields=drupal-version,db-driver,db-status,bootstrap,site-uri,php-version
+		--fields=drupal-version,db-driver,db-status,bootstrap,uri,php-version
 	@echo ""
 	@echo "$(BLUE)=== admin user ==="
 	@cd /var/www/local/drupal && vendor/bin/drush user:information admin
