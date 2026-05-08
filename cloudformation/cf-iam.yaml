@@ -174,6 +174,9 @@ Resources:
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/root-password*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/rds/*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/cache/*'
+                  # configure-php.sh reads drupal/db-password at boot to populate
+                  # env[DRUPAL_DB_PASS] in the PHP-FPM pool config (cf-app-drupal stack).
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretNamePrefix}/drupal/*'
         - PolicyName: SSMParameterAccess
           PolicyDocument:
             Version: '2012-10-17'
