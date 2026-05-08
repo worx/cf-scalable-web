@@ -244,6 +244,30 @@ step "First refresh-env-config (best-effort, populates /etc/worxco/envs/*)"
   echo "WARN: refresh-env-config had no envs to refresh (none deployed yet?)"
 
 # ============================================================
+step "Auto-mount FSx for any deployed environments"
+# ============================================================
+# After refresh-env-config populates /etc/worxco/envs/<env> for envs that
+# have infrastructure deployed, ensure FSx is mounted for each. mount-env
+# also writes /etc/fstab so the mount survives stop/start of this instance.
+#
+# This is best-effort: a failed mount logs a WARN and continues. The user
+# can run `sudo mount-env <env>` manually to retry.
+if [ -d /etc/worxco/envs ]; then
+  for envfile in /etc/worxco/envs/*; do
+    [ -f "$envfile" ] || continue
+    env_name=$(basename "$envfile")
+    fsx_dns=$(grep '^FSX_DNS=' "$envfile" | cut -d= -f2-)
+    if [ -n "$fsx_dns" ] && [ "$fsx_dns" != "" ]; then
+      echo "Mounting FSx for $env_name..."
+      /usr/local/sbin/mount-env "$env_name" || \
+        echo "  WARN: mount-env $env_name failed (non-fatal)"
+    fi
+  done
+else
+  echo "No /etc/worxco/envs/ — skipping auto-mount"
+fi
+
+# ============================================================
 step "MOTD"
 # ============================================================
 cat > /etc/motd <<MOTDEOF

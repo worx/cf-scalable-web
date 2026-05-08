@@ -81,7 +81,7 @@ local Mac and need to dispatch via SSM".
 - `info-env <env>` — print **live** RDS, FSx, Valkey, ALB endpoints from SSM (~3-5s, network call)
 - `show-env <env>` — print **cached** endpoints from `/etc/worxco/envs/<env>` (instant, no network)
 - `sudo refresh-env-config [envs...]` — regenerate cache from SSM (NOPASSWD via sudoers.d, no password prompt)
-- `mount-env <env>` — mount FSx OpenZFS at `/var/www/<env>` (requires sudo)
+- `mount-env <env>` — mount FSx OpenZFS at `/var/www/<env>` (requires sudo). Writes `/etc/fstab` entry so mount survives stop/start. bootstrap.sh auto-runs this for each deployed env on terminate/replace, so the persistence story is automatic across both lifecycle types.
 - `psql-env <env> [args]` — connect to env's RDS as dbadmin (auto-fetches password from Secrets Manager)
 - `valkey-env <env> [args]` — connect to env's Valkey via redis-cli (auto-fetches AUTH token, uses TLS)
 

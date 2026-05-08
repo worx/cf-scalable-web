@@ -36,3 +36,28 @@ FSX_DNS=$(aws ssm get-parameter \
 mkdir -p "$MOUNT_POINT"
 mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
 echo "Mounted $FSX_DNS:/fsx -> $MOUNT_POINT"
+
+# Persist the mount in /etc/fstab so it survives stop/start of the EC2
+# instance (fstab is on the EBS root volume which persists). Each env
+# gets its own marker comment so re-runs cleanly replace stale entries.
+#
+# Mount options:
+#   vers=4.1,port=2049   matches our manual mount (NFSv4.1 on TCP 2049)
+#   nofail               don't hang boot if FSx is unreachable (e.g.,
+#                        peering down or FSx destroyed) — boot continues
+#                        and the user can run mount-env again to fix
+#   _netdev              wait for network before attempting this mount
+#   noatime              don't update access times (small write reduction)
+FSTAB_TAG="# worxco-mount-env: $ENV"
+FSTAB_LINE="$FSX_DNS:/fsx $MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
+
+# Remove any existing entry for this env (the marker line plus the next),
+# then append the fresh entry.
+sed -i.bak "/^# worxco-mount-env: $ENV\$/,+1d" /etc/fstab
+{
+  echo ""
+  echo "$FSTAB_TAG"
+  echo "$FSTAB_LINE"
+} >> /etc/fstab
+rm -f /etc/fstab.bak
+echo "Updated /etc/fstab so the mount survives stop/start"
