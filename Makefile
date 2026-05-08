@@ -283,6 +283,8 @@ help:  ## Show this help message
 	@echo "  make destroy-compute-nlb      Delete NLB stack"
 	@echo "  make destroy-compute-alb      Delete ALB stack"
 	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
+	@echo "  make pause-compute            Scale NGINX and PHP ASGs to 0 (saves ~\$$30-50/mo for short pauses)"
+	@echo "  make resume-compute           Restore ASGs to pre-pause sizes"
 	@echo "  make destroy-all              Delete all stacks (reverse order; CONFIRMED=yes to skip prompt)"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host:$(NC)"
@@ -1404,6 +1406,83 @@ destroy-compute-alb:  ## Delete ALB stack
 
 destroy-compute: destroy-compute-php destroy-compute-nginx destroy-compute-nlb destroy-compute-alb  ## Delete all compute stacks (reverse order)
 	@echo "$(GREEN)✓ All compute stacks deleted for ENV=$(ENV)$(NC)"
+
+# -----------------------------------------------------------------------------
+# Compute Pause / Resume (cost optimization for short pauses)
+# -----------------------------------------------------------------------------
+# Scales NGINX and PHP auto-scaling groups to 0 to stop EC2 hour charges
+# during short pauses (overnight, between sessions). ALB/NLB still cost
+# (~$32/mo combined) but EC2 hour charges go to zero.
+#
+# State is preserved per-ASG in SSM at /<env>/asg-pause-state/<asg-name>
+# so resume restores the exact same min/max/desired sizes you had.
+#
+# Note: 'make deploy-compute' resets ASG sizes from CFN parameters and
+# would unpause without going through resume. Orphaned SSM state is
+# harmless — delete with 'aws ssm delete-parameters-by-path' if it bothers
+# you.
+
+pause-compute:  ## Scale NGINX and PHP ASGs to 0 (saves state for resume; ~$30-50/mo savings)
+	@echo "$(BLUE)Pausing compute ASGs for $(ENV)...$(NC)"
+	@for ASG in $(ENV)-nginx-asg $(ENV)-php74-asg $(ENV)-php83-asg; do \
+		STATE=$$(aws autoscaling describe-auto-scaling-groups \
+			--auto-scaling-group-names "$$ASG" \
+			--query 'AutoScalingGroups[0].[MinSize,MaxSize,DesiredCapacity]' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$STATE" ] || echo "$$STATE" | grep -q "None"; then \
+			echo "  $(YELLOW)$$ASG: not found, skipping$(NC)"; \
+			continue; \
+		fi; \
+		MIN=$$(echo "$$STATE" | cut -f1); \
+		MAX=$$(echo "$$STATE" | cut -f2); \
+		DESIRED=$$(echo "$$STATE" | cut -f3); \
+		if [ "$$DESIRED" -eq 0 ] && [ "$$MIN" -eq 0 ] && [ "$$MAX" -eq 0 ]; then \
+			echo "  $(CYAN)$$ASG: already paused$(NC)"; \
+			continue; \
+		fi; \
+		aws ssm put-parameter \
+			--name "/$(ENV)/asg-pause-state/$$ASG" \
+			--type String \
+			--value "$$MIN:$$MAX:$$DESIRED" \
+			--overwrite \
+			--region $(AWS_REGION) >/dev/null; \
+		aws autoscaling update-auto-scaling-group \
+			--auto-scaling-group-name "$$ASG" \
+			--min-size 0 --max-size 0 --desired-capacity 0 \
+			--region $(AWS_REGION); \
+		echo "  $(GREEN)$$ASG: was MIN=$$MIN MAX=$$MAX DESIRED=$$DESIRED → 0/0/0$(NC)"; \
+	done
+	@echo "$(GREEN)✓ Compute paused.$(NC) Resume with: make resume-compute ENV=$(ENV)"
+	@echo "$(CYAN)Note: ALB and NLB still running (~\$$32/mo combined) — their hourly charges continue.$(NC)"
+	@echo "$(CYAN)To save ALB/NLB cost too, use: make destroy-compute ENV=$(ENV) CONFIRMED=yes$(NC)"
+
+resume-compute:  ## Restore NGINX and PHP ASGs to pre-pause sizes
+	@echo "$(BLUE)Resuming compute ASGs for $(ENV)...$(NC)"
+	@for ASG in $(ENV)-nginx-asg $(ENV)-php74-asg $(ENV)-php83-asg; do \
+		SAVED=$$(aws ssm get-parameter \
+			--name "/$(ENV)/asg-pause-state/$$ASG" \
+			--query 'Parameter.Value' \
+			--output text \
+			--region $(AWS_REGION) 2>/dev/null) || SAVED=""; \
+		if [ -z "$$SAVED" ]; then \
+			echo "  $(YELLOW)$$ASG: no saved state in SSM, skipping (run pause-compute first or it was never paused)$(NC)"; \
+			continue; \
+		fi; \
+		MIN=$$(echo "$$SAVED" | cut -d: -f1); \
+		MAX=$$(echo "$$SAVED" | cut -d: -f2); \
+		DESIRED=$$(echo "$$SAVED" | cut -d: -f3); \
+		aws autoscaling update-auto-scaling-group \
+			--auto-scaling-group-name "$$ASG" \
+			--min-size $$MIN --max-size $$MAX --desired-capacity $$DESIRED \
+			--region $(AWS_REGION); \
+		aws ssm delete-parameter \
+			--name "/$(ENV)/asg-pause-state/$$ASG" \
+			--region $(AWS_REGION) >/dev/null 2>&1 || true; \
+		echo "  $(GREEN)$$ASG: restored to MIN=$$MIN MAX=$$MAX DESIRED=$$DESIRED$(NC)"; \
+	done
+	@echo "$(GREEN)✓ Compute resumed.$(NC) Instances will spin up over the next ~2-3 minutes."
+	@echo "$(CYAN)Watch progress: make verify-compute ENV=$(ENV)$(NC)"
 
 # -----------------------------------------------------------------------------
 # Deploy Host (Standalone)
