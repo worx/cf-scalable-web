@@ -39,23 +39,24 @@ for ENV in "$@"; do
 # Source from a shell with: source /etc/worxco/envs/$ENV
 # Re-run: sudo refresh-env-config $ENV
 #
-# Variable names match Drupal settings.php and PHP-FPM pool config so a
-# 'source' is sufficient — no manual var translation needed.
+# Each line uses 'export' so variables propagate to child processes
+# (drush, php-fpm, etc.). Variable names match Drupal settings.php
+# and PHP-FPM pool config — a single 'source' is sufficient.
 
 # Drupal application config (matches getenv() calls in settings.php)
-ENVIRONMENT_NAME=$ENV
-DRUPAL_DB_HOST=$RDS
-DRUPAL_DB_PORT=5432
-DRUPAL_DB_NAME=drupal
-DRUPAL_DB_USER=drupal_user
-DRUPAL_SITE_NAME=drupal-${ENV}.test
-DRUPAL_PATH=/var/www/$ENV/drupal
+export ENVIRONMENT_NAME=$ENV
+export DRUPAL_DB_HOST=$RDS
+export DRUPAL_DB_PORT=5432
+export DRUPAL_DB_NAME=drupal
+export DRUPAL_DB_USER=drupal_user
+export DRUPAL_SITE_NAME=drupal-${ENV}.test
+export DRUPAL_PATH=/var/www/$ENV/drupal
 
 # Other infrastructure endpoints (for ad-hoc / debugging)
-FSX_DNS=$FSX
-VALKEY_HOST=$VALKEY
-VALKEY_PORT=6379
-ALB_DNS=$ALB
+export FSX_DNS=$FSX
+export VALKEY_HOST=$VALKEY
+export VALKEY_PORT=6379
+export ALB_DNS=$ALB
 EOF_INNER
   chmod 644 "$OUT"
   echo "Wrote $OUT"
