@@ -29,11 +29,16 @@ HOST=$(aws ssm get-parameter --name "/$ENV/cache/endpoint" \
   exit 1
 }
 
-AUTH=$(aws secretsmanager get-secret-value \
+RAW=$(aws secretsmanager get-secret-value \
   --secret-id "worxco/$ENV/cache/auth-token" \
   --query SecretString --output text 2>/dev/null) || {
   echo "ERROR: Secret worxco/$ENV/cache/auth-token not found." >&2
   exit 1
 }
+
+# Defensive: if a future change makes this a JSON object, extract token field.
+# Today the Valkey auth-token secret is plaintext, so this just passes through.
+AUTH=$(echo "$RAW" | jq -r '.password // .token // empty' 2>/dev/null || true)
+[ -z "$AUTH" ] && AUTH="$RAW"
 
 redis-cli -h "$HOST" -p 6379 --tls -a "$AUTH" "$@"

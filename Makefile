@@ -746,9 +746,11 @@ verify-drupal:  ## Health check on the cloud Drupal install for ENV (drush statu
 	fi
 	@RDS_ENDPOINT=$$(aws ssm get-parameter --name "/$(ENV)/rds/endpoint" \
 		--query 'Parameter.Value' --output text); \
-	DRUPAL_DB_PW=$$(aws secretsmanager get-secret-value \
+	DRUPAL_DB_RAW=$$(aws secretsmanager get-secret-value \
 		--secret-id "worxco/$(ENV)/drupal/db-password" \
 		--query SecretString --output text); \
+	DRUPAL_DB_PW=$$(echo "$$DRUPAL_DB_RAW" | jq -r '.password // empty' 2>/dev/null || true); \
+	[ -z "$$DRUPAL_DB_PW" ] && DRUPAL_DB_PW="$$DRUPAL_DB_RAW"; \
 	export ENVIRONMENT_NAME="$(ENV)" \
 		DRUPAL_DB_HOST="$$RDS_ENDPOINT" DRUPAL_DB_PORT="5432" \
 		DRUPAL_DB_NAME="drupal" DRUPAL_DB_USER="drupal_user" \

@@ -30,11 +30,16 @@ RDS=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
   exit 1
 }
 
-PASS=$(aws secretsmanager get-secret-value \
+RAW=$(aws secretsmanager get-secret-value \
   --secret-id "worxco/$ENV/rds/master-password" \
   --query SecretString --output text 2>/dev/null) || {
   echo "ERROR: Secret worxco/$ENV/rds/master-password not found." >&2
   exit 1
 }
+
+# AWS-managed RDS master credentials are stored as JSON: {"username":..., "password":...}.
+# Hand-created secrets are typically plaintext. Handle both.
+PASS=$(echo "$RAW" | jq -r '.password // empty' 2>/dev/null || true)
+[ -z "$PASS" ] && PASS="$RAW"
 
 PGPASSWORD="$PASS" psql -h "$RDS" -U dbadmin -d drupal "$@"

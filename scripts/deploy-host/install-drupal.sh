@@ -115,16 +115,25 @@ step "Drupal Cloud Install Starting (env=$ENV)"
 step "Fetch credentials (RDS master + create/read Drupal secrets)"
 # ============================================================
 log "Reading RDS master password from worxco/$ENV/rds/master-password..."
-RDS_MASTER_PW=$(aws secretsmanager get-secret-value \
+RDS_MASTER_RAW=$(aws secretsmanager get-secret-value \
   --secret-id "worxco/$ENV/rds/master-password" \
   --query SecretString --output text 2>/dev/null) || \
   fail "Cannot read RDS master password. Is cf-database deployed for $ENV?"
+# AWS-managed RDS master credentials are JSON: {"username":..., "password":...}
+# Hand-created secrets are plaintext. Handle both.
+RDS_MASTER_PW=$(echo "$RDS_MASTER_RAW" | jq -r '.password // empty' 2>/dev/null || true)
+[ -z "$RDS_MASTER_PW" ] && RDS_MASTER_PW="$RDS_MASTER_RAW"
+unset RDS_MASTER_RAW
 
 # Drupal DB user password — read from Secrets Manager, generate if missing
 log "Resolving Drupal DB user password (Secrets Manager: $DRUPAL_DB_SECRET)..."
-if DRUPAL_DB_PW=$(aws secretsmanager get-secret-value \
+if DRUPAL_DB_RAW=$(aws secretsmanager get-secret-value \
     --secret-id "$DRUPAL_DB_SECRET" \
     --query SecretString --output text 2>/dev/null); then
+  # Same JSON-or-plaintext defensive handling
+  DRUPAL_DB_PW=$(echo "$DRUPAL_DB_RAW" | jq -r '.password // empty' 2>/dev/null || true)
+  [ -z "$DRUPAL_DB_PW" ] && DRUPAL_DB_PW="$DRUPAL_DB_RAW"
+  unset DRUPAL_DB_RAW
   log "  Using existing password from Secrets Manager"
 else
   log "  Secret not found — generating new password and storing"
@@ -140,9 +149,12 @@ fi
 
 # Drupal admin password — same pattern
 log "Resolving Drupal admin password (Secrets Manager: $DRUPAL_ADMIN_SECRET)..."
-if DRUPAL_ADMIN_PW=$(aws secretsmanager get-secret-value \
+if DRUPAL_ADMIN_RAW=$(aws secretsmanager get-secret-value \
     --secret-id "$DRUPAL_ADMIN_SECRET" \
     --query SecretString --output text 2>/dev/null); then
+  DRUPAL_ADMIN_PW=$(echo "$DRUPAL_ADMIN_RAW" | jq -r '.password // empty' 2>/dev/null || true)
+  [ -z "$DRUPAL_ADMIN_PW" ] && DRUPAL_ADMIN_PW="$DRUPAL_ADMIN_RAW"
+  unset DRUPAL_ADMIN_RAW
   log "  Using existing admin password from Secrets Manager"
 else
   log "  Secret not found — generating new admin password and storing"

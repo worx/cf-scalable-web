@@ -51,9 +51,13 @@ else
     DRUPAL_DB_SECRET="worxco/$ENV/drupal/db-password"
     if RDS_ENDPOINT=$(aws ssm get-parameter --name "/$ENV/rds/endpoint" \
         --query 'Parameter.Value' --output text 2>/dev/null) && \
-       DRUPAL_DB_PW=$(aws secretsmanager get-secret-value \
+       DRUPAL_DB_RAW=$(aws secretsmanager get-secret-value \
         --secret-id "$DRUPAL_DB_SECRET" \
         --query SecretString --output text 2>/dev/null); then
+      # JSON-or-plaintext defensive handling (same pattern as install-drupal.sh)
+      DRUPAL_DB_PW=$(echo "$DRUPAL_DB_RAW" | jq -r '.password // empty' 2>/dev/null || true)
+      [ -z "$DRUPAL_DB_PW" ] && DRUPAL_DB_PW="$DRUPAL_DB_RAW"
+      unset DRUPAL_DB_RAW
       export DRUPAL_DB_HOST="$RDS_ENDPOINT"
       export DRUPAL_DB_PORT="5432"
       export DRUPAL_DB_NAME="drupal"
