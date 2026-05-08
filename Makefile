@@ -243,6 +243,12 @@ help:  ## Show this help message
 	@echo "  make remove-drupal-local      Wipe local Drupal install"
 	@echo "  make reinstall-drupal-local   Wipe and reinstall (full cycle for testing)"
 	@echo ""
+	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
+	@echo "  make install-drupal ENV=...   Install Drupal 11 against env's RDS+FSx"
+	@echo "  make verify-drupal ENV=...    Health check (live env-var-driven settings.php)"
+	@echo "  make remove-drupal ENV=...    Drop Drupal tables and wipe FSx files"
+	@echo "  make reinstall-drupal ENV=... Wipe and reinstall against env"
+	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
 	@echo "  make verify-all               Verify all stacks"
 	@echo "  make verify-vpc               Verify VPC deployment"
@@ -699,6 +705,69 @@ serve-drupal-local:  ## Start drush runserver in tmux (port 8080) — survives d
 	@echo "  $(CYAN)# Login: admin / admin$(NC)"
 	@echo ""
 	@echo "$(YELLOW)To stop the server: make stop-drupal-local-server$(NC)"
+
+# -----------------------------------------------------------------------------
+# Drupal Install (cloud — RDS + FSx, deploy-host only)
+# -----------------------------------------------------------------------------
+
+install-drupal:  ## Install Drupal 11 against ENV's RDS+FSx (~3-5 min)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host (or via SSM dispatch).$(NC)"; \
+		echo "$(CYAN)ssh deploy-host && cd ~/projects/cf-scalable-web && make install-drupal ENV=$(ENV)$(NC)"; \
+		exit 1; \
+	fi
+	@if [ "$(ENV)" = "production" ]; then \
+		echo "$(YELLOW)WARNING: ENV=production. Confirm by typing 'production':$(NC)"; \
+		read -r confirm; \
+		[ "$$confirm" = "production" ] || { echo "Cancelled"; exit 1; }; \
+	fi
+	@bash scripts/deploy-host/install-drupal.sh $(ENV)
+
+remove-drupal:  ## Drop Drupal tables and wipe FSx files for ENV (preserves Secrets Manager)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ "$(ENV)" = "production" ]; then \
+		echo "$(RED)DANGER: ENV=production. Type 'WIPE PRODUCTION' to proceed:$(NC)"; \
+		read -r confirm; \
+		[ "$$confirm" = "WIPE PRODUCTION" ] || { echo "Cancelled"; exit 1; }; \
+	fi
+	@bash scripts/deploy-host/remove-drupal.sh $(ENV)
+
+reinstall-drupal: remove-drupal install-drupal  ## Wipe + reinstall Drupal for ENV
+
+verify-drupal:  ## Health check on the cloud Drupal install for ENV (drush status + queries)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ ! -f /var/www/$(ENV)/drupal/.installed ]; then \
+		echo "$(RED)Drupal not installed for $(ENV). Run: make install-drupal ENV=$(ENV)$(NC)"; \
+		exit 1; \
+	fi
+	@RDS_ENDPOINT=$$(aws ssm get-parameter --name "/$(ENV)/rds/endpoint" \
+		--query 'Parameter.Value' --output text); \
+	DRUPAL_DB_PW=$$(aws secretsmanager get-secret-value \
+		--secret-id "worxco/$(ENV)/drupal/db-password" \
+		--query SecretString --output text); \
+	export ENVIRONMENT_NAME="$(ENV)" \
+		DRUPAL_DB_HOST="$$RDS_ENDPOINT" DRUPAL_DB_PORT="5432" \
+		DRUPAL_DB_NAME="drupal" DRUPAL_DB_USER="drupal_user" \
+		DRUPAL_DB_PASS="$$DRUPAL_DB_PW"; \
+	echo "$(BLUE)=== drush status ==="; \
+	cd /var/www/$(ENV)/drupal && vendor/bin/drush status \
+		--fields=drupal-version,db-driver,db-status,bootstrap,uri,php-version; \
+	echo ""; \
+	echo "$(BLUE)=== admin user ==="; \
+	cd /var/www/$(ENV)/drupal && vendor/bin/drush user:information admin; \
+	echo ""; \
+	echo "$(BLUE)=== database row counts ==="; \
+	cd /var/www/$(ENV)/drupal && vendor/bin/drush sqlq \
+		"SELECT 'users' AS what, count(*) FROM users_field_data UNION ALL \
+		 SELECT 'nodes',           count(*) FROM node_field_data UNION ALL \
+		 SELECT 'config',          count(*) FROM config UNION ALL \
+		 SELECT 'sessions',        count(*) FROM sessions;"
+	@echo ""
+	@echo "$(GREEN)✓ Drupal install for $(ENV) looks healthy$(NC)"
 
 stop-drupal-local-server:  ## Stop the drush runserver tmux session
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
