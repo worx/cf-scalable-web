@@ -282,6 +282,7 @@ help:  ## Show this help message
 	@echo "  make start-deploy-host        Start deploy host instance"
 	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
 	@echo "  make destroy-deploy-host      Delete deploy host"
+	@echo "  make install-helpers          (on deploy-host) Sync /usr/local/{bin,sbin}/* from repo after git pull"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host Peering (ENV=sandbox|staging|production):$(NC)"
 	@echo "  make deploy-peering           Peer deploy-host VPC to project VPC"
@@ -781,6 +782,27 @@ stop-drupal-local-server:  ## Stop the drush runserver tmux session
 	else \
 		echo "$(CYAN)No drush runserver session running.$(NC)"; \
 	fi
+
+# -----------------------------------------------------------------------------
+# Deploy-Host Helper Sync (after a git pull, refresh installed helpers)
+# -----------------------------------------------------------------------------
+# Avoids the friction of running 'sudo install' for each helper after every
+# 'git pull'. Equivalent to the helper-installation portion of bootstrap.sh
+# but doesn't run apt installs or replace already-running services.
+
+install-helpers:  ## Re-install /usr/local/bin/* helpers from scripts/deploy-host/
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@echo "$(BLUE)Installing helpers from $(CURDIR)/scripts/deploy-host/$(NC)"
+	@sudo install -m 0755 scripts/deploy-host/info-env           /usr/local/bin/info-env
+	@sudo install -m 0755 scripts/deploy-host/show-env           /usr/local/bin/show-env
+	@sudo install -m 0755 scripts/deploy-host/psql-env           /usr/local/bin/psql-env
+	@sudo install -m 0755 scripts/deploy-host/valkey-env         /usr/local/bin/valkey-env
+	@sudo install -m 0755 scripts/deploy-host/mount-env          /usr/local/sbin/mount-env
+	@sudo install -m 0755 scripts/deploy-host/refresh-env-config /usr/local/sbin/refresh-env-config
+	@sudo install -m 0440 scripts/deploy-host/worxco-refresh-env-config.sudoers /etc/sudoers.d/worxco-refresh-env-config
+	@echo "$(GREEN)✓ Helpers installed.$(NC) Tip: re-run 'sudo refresh-env-config <env>' after this if the file format changed."
 
 # -----------------------------------------------------------------------------
 # Verify Targets
