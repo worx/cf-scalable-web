@@ -41,20 +41,32 @@ CONFIG_DIR="/var/www/$ENV/drupal-config"
 MARKER="$INSTALL_DIR/.installed"
 SALT_FILE="$PRIVATE_DIR/salt.txt"
 
+# Defaults (used when the cf-app-drupal stack is NOT deployed for this env).
+# When cf-app-drupal IS deployed, these are overridden by the SSM parameters
+# it owns (resolved a few lines below).
 DB_NAME="drupal"
 DB_USER="drupal_user"
 DRUPAL_ADMIN_USER="admin"
+SITE_NAME_DEFAULT="drupal-${ENV}.test"
 
-# Where the secrets live in Secrets Manager. The install script
-# auto-creates these on first run if they don't exist; the upcoming
-# cf-app-drupal.yaml stack (Phase C step 3) will create them
-# explicitly with the proper retention/rotation policies.
+# Where the secrets live in Secrets Manager. cf-app-drupal owns these
+# when deployed. install-drupal auto-creates as a fallback if absent.
 DRUPAL_DB_SECRET="worxco/$ENV/drupal/db-password"
 DRUPAL_ADMIN_SECRET="worxco/$ENV/drupal/admin-password"
 
-# Default site name — override with: DRUPAL_SITE_NAME=mysite.test bash install-drupal.sh ...
-SITE_NAME="${DRUPAL_SITE_NAME:-drupal-${ENV}.test}"
-ADMIN_EMAIL="admin@${SITE_NAME}"
+# Resolve config from SSM parameters if cf-app-drupal is deployed.
+# Each lookup falls back to the local default on failure (parameter
+# not found = stack not deployed = use defaults).
+ssm_or() {
+  # Args: parameter name, fallback value
+  aws ssm get-parameter --name "$1" --query 'Parameter.Value' \
+    --output text 2>/dev/null || echo "$2"
+}
+DB_NAME=$(ssm_or "/$ENV/drupal/db-name" "$DB_NAME")
+DB_USER=$(ssm_or "/$ENV/drupal/db-user" "$DB_USER")
+DRUPAL_ADMIN_USER=$(ssm_or "/$ENV/drupal/admin-username" "$DRUPAL_ADMIN_USER")
+SITE_NAME=$(ssm_or "/$ENV/drupal/site-name" "${DRUPAL_SITE_NAME:-$SITE_NAME_DEFAULT}")
+ADMIN_EMAIL=$(ssm_or "/$ENV/drupal/admin-email" "admin@${SITE_NAME}")
 
 # ============================================================
 # Pretty logging

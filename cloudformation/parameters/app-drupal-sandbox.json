@@ -1,0 +1,12 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "DrupalDatabaseName": "drupal",
+    "DrupalDatabaseUser": "drupal_user",
+    "DrupalSiteName": "drupal-sandbox.test",
+    "DrupalAdminUsername": "admin",
+    "DrupalAdminEmail": "",
+    "AdminPasswordLength": "24",
+    "DBPasswordLength": "32"
+  }
+}

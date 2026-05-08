@@ -1,0 +1,284 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Drupal Application Lifecycle (per environment)
+#
+# Purpose: Formalize the Secrets Manager entries and SSM parameters that
+#          install-drupal.sh currently auto-creates on first run. Brings
+#          Drupal secret/config management under CloudFormation lifecycle
+#          for proper auditing, retention policies, and tear-down clarity.
+#
+# What this stack OWNS:
+#   - worxco/${env}/drupal/admin-password   (Secrets Manager, auto-generated)
+#   - worxco/${env}/drupal/db-password      (Secrets Manager, auto-generated)
+#   - /${env}/drupal/db-name                (SSM Parameter)
+#   - /${env}/drupal/db-user                (SSM Parameter)
+#   - /${env}/drupal/site-name              (SSM Parameter)
+#   - /${env}/drupal/install-path           (SSM Parameter)
+#   - /${env}/drupal/admin-username         (SSM Parameter)
+#   - /${env}/drupal/admin-email            (SSM Parameter)
+#
+# What this stack DOES NOT touch:
+#   - Drupal codebase on FSx                (managed by install-drupal.sh)
+#   - Drupal database tables on RDS         (managed by install-drupal.sh)
+#   - hash_salt file on FSx                 (managed by install-drupal.sh)
+#
+# Lifecycle:
+#   - DEPLOY this stack BEFORE running install-drupal.sh — install-drupal
+#     reads existing secrets if present, auto-creates only as fallback.
+#   - DESTROY this stack only when fully decommissioning Drupal for an
+#     environment. Existing Drupal install will fail at next boot if
+#     secrets are gone but FSx files / RDS tables remain.
+#
+# Migration from auto-created secrets (existing install-drupal-managed env):
+#   - Option A (clean): make remove-drupal ENV=<env>, then delete secrets
+#     manually via aws CLI, then deploy this stack, then make install-drupal
+#   - Option B (preserve): use 'aws cloudformation import' to bring existing
+#     resources under this stack's management — preserves passwords
+#
+# Dependencies: None (lifecycle parallel to install-drupal.sh)
+#
+# Outputs: Secret ARNs, summary parameters
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Drupal application lifecycle: Secrets Manager + SSM parameters per environment'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (sandbox/staging/production); must match cf-vpc and cf-database
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: Lowercase letters, numbers, and hyphens only
+    Default: sandbox
+
+  DrupalDatabaseName:
+    Type: String
+    Description: PostgreSQL database name for the Drupal install
+    Default: drupal
+
+  DrupalDatabaseUser:
+    Type: String
+    Description: PostgreSQL user that Drupal connects as (NOT the master user)
+    Default: drupal_user
+
+  DrupalSiteName:
+    Type: String
+    Description: 'Canonical site hostname for trusted_host_patterns and admin email (e.g., drupal-sandbox.test)'
+    Default: ''
+    # When empty, computed from EnvironmentName below.
+
+  DrupalAdminUsername:
+    Type: String
+    Description: Username for the Drupal admin account
+    Default: admin
+
+  DrupalAdminEmail:
+    Type: String
+    Description: Email for the Drupal admin account (when empty, defaults to admin@<site-name>)
+    Default: ''
+
+  AdminPasswordLength:
+    Type: Number
+    Description: Length of the auto-generated admin password
+    Default: 24
+    MinValue: 16
+    MaxValue: 64
+
+  DBPasswordLength:
+    Type: Number
+    Description: Length of the auto-generated database user password
+    Default: 32
+    MinValue: 16
+    MaxValue: 64
+
+Conditions:
+  UseDefaultSiteName:  !Equals [!Ref DrupalSiteName,  '']
+  UseDefaultAdminEmail: !Equals [!Ref DrupalAdminEmail, '']
+
+Resources:
+  # ========================================
+  # Secrets Manager: Drupal admin password
+  # ========================================
+  DrupalAdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'worxco/${EnvironmentName}/drupal/admin-password'
+      Description: !Sub 'Drupal admin user password for ${EnvironmentName} (managed by cf-app-drupal)'
+      GenerateSecretString:
+        # Plaintext password (no JSON template) for direct use as a string.
+        # install-drupal.sh has defensive parsing for both formats anyway.
+        PasswordLength: !Ref AdminPasswordLength
+        ExcludeCharacters: '"@/\'''
+        ExcludePunctuation: false
+        IncludeSpace: false
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: drupal
+        - Key: ManagedBy
+          Value: cf-app-drupal
+
+  # ========================================
+  # Secrets Manager: Drupal database user password
+  # ========================================
+  DrupalDBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'worxco/${EnvironmentName}/drupal/db-password'
+      Description: !Sub 'Drupal DB user password for ${EnvironmentName} (managed by cf-app-drupal)'
+      GenerateSecretString:
+        PasswordLength: !Ref DBPasswordLength
+        # Stricter exclusions for DB password — pgsql connection strings
+        # are picky about embedded special characters in URL-encoded form.
+        ExcludeCharacters: '"@/\''#%&+:;=?[]'
+        ExcludePunctuation: false
+        IncludeSpace: false
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: drupal
+        - Key: ManagedBy
+          Value: cf-app-drupal
+
+  # ========================================
+  # SSM Parameters: Drupal config
+  # ========================================
+  DrupalDBNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/db-name'
+      Description: 'Drupal database name (matches RDS DBName parameter)'
+      Type: String
+      Value: !Ref DrupalDatabaseName
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+  DrupalDBUserParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/db-user'
+      Description: 'PostgreSQL user that Drupal connects as'
+      Type: String
+      Value: !Ref DrupalDatabaseUser
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+  DrupalSiteNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/site-name'
+      Description: 'Canonical site hostname (used in trusted_host_patterns)'
+      Type: String
+      Value: !If
+        - UseDefaultSiteName
+        - !Sub 'drupal-${EnvironmentName}.test'
+        - !Ref DrupalSiteName
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+  DrupalInstallPathParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/install-path'
+      Description: 'Filesystem path to the Drupal install on FSx'
+      Type: String
+      Value: !Sub '/var/www/${EnvironmentName}/drupal'
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+  DrupalAdminUsernameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/admin-username'
+      Description: 'Username for the Drupal admin account'
+      Type: String
+      Value: !Ref DrupalAdminUsername
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+  DrupalAdminEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/drupal/admin-email'
+      Description: 'Email for the Drupal admin account'
+      Type: String
+      Value: !If
+        - UseDefaultAdminEmail
+        - !If
+          - UseDefaultSiteName
+          - !Sub 'admin@drupal-${EnvironmentName}.test'
+          - !Sub 'admin@${DrupalSiteName}'
+        - !Ref DrupalAdminEmail
+      Tier: Standard
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: drupal
+        ManagedBy: cf-app-drupal
+
+Outputs:
+  DrupalAdminPasswordSecretArn:
+    Description: ARN of the Drupal admin password secret
+    Value: !Ref DrupalAdminPasswordSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-drupal-admin-password-arn'
+
+  DrupalAdminPasswordSecretName:
+    Description: Secrets Manager name of the Drupal admin password
+    Value: !Sub 'worxco/${EnvironmentName}/drupal/admin-password'
+
+  DrupalDBPasswordSecretArn:
+    Description: ARN of the Drupal DB user password secret
+    Value: !Ref DrupalDBPasswordSecret
+    Export:
+      Name: !Sub '${EnvironmentName}-drupal-db-password-arn'
+
+  DrupalDBPasswordSecretName:
+    Description: Secrets Manager name of the Drupal DB user password
+    Value: !Sub 'worxco/${EnvironmentName}/drupal/db-password'
+
+  DrupalDatabaseName:
+    Description: 'PostgreSQL database name (also at SSM /<env>/drupal/db-name)'
+    Value: !Ref DrupalDatabaseName
+
+  DrupalDatabaseUser:
+    Description: 'PostgreSQL user (also at SSM /<env>/drupal/db-user)'
+    Value: !Ref DrupalDatabaseUser
+
+  DrupalSiteName:
+    Description: 'Canonical site hostname (also at SSM /<env>/drupal/site-name)'
+    Value: !If
+      - UseDefaultSiteName
+      - !Sub 'drupal-${EnvironmentName}.test'
+      - !Ref DrupalSiteName
+
+  DrupalInstallPath:
+    Description: 'Filesystem path to Drupal install on FSx (also at SSM /<env>/drupal/install-path)'
+    Value: !Sub '/var/www/${EnvironmentName}/drupal'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

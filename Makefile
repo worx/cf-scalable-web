@@ -73,6 +73,11 @@ DEPLOY_PEERING_STACK := $(STACK_PREFIX)-deploy-peering
 DEPLOY_PEERING_TEMPLATE := cloudformation/cf-deploy-peering.yaml
 DEPLOY_PEERING_PARAMS := cloudformation/parameters/deploy-peering-$(ENV).json
 
+# Drupal application lifecycle (per environment — Secrets Manager + SSM params)
+APP_DRUPAL_STACK := $(STACK_PREFIX)-app-drupal
+APP_DRUPAL_TEMPLATE := cloudformation/cf-app-drupal.yaml
+APP_DRUPAL_PARAMS := cloudformation/parameters/app-drupal-$(ENV).json
+
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
 IAM_TEMPLATE := cloudformation/cf-iam.yaml
@@ -242,6 +247,11 @@ help:  ## Show this help message
 	@echo "  make stop-drupal-local-server Stop the runserver tmux session"
 	@echo "  make remove-drupal-local      Wipe local Drupal install"
 	@echo "  make reinstall-drupal-local   Wipe and reinstall (full cycle for testing)"
+	@echo ""
+	@echo "$(YELLOW)Drupal App Stack (cf-app-drupal — Secrets Manager + SSM params, runs anywhere):$(NC)"
+	@echo "  make deploy-app-drupal ENV=...    Create Drupal secrets + SSM params (deploy BEFORE install-drupal)"
+	@echo "  make verify-app-drupal ENV=...    Show stack outputs + SSM params"
+	@echo "  make destroy-app-drupal ENV=...   Delete the stack (CONFIRMED=yes to skip prompt)"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
 	@echo "  make install-drupal ENV=...   Install Drupal 11 against env's RDS+FSx"
@@ -706,6 +716,81 @@ serve-drupal-local:  ## Start drush runserver in tmux (port 8080) — survives d
 	@echo "  $(CYAN)# Login: admin / admin$(NC)"
 	@echo ""
 	@echo "$(YELLOW)To stop the server: make stop-drupal-local-server$(NC)"
+
+# -----------------------------------------------------------------------------
+# Drupal Application Lifecycle Stack (cf-app-drupal)
+# -----------------------------------------------------------------------------
+# Owns Secrets Manager entries and SSM parameters for a Drupal install in a
+# given environment. Deploy this BEFORE install-drupal — install-drupal will
+# read the existing secrets rather than auto-creating them. Optional but
+# recommended for production: brings audit trail and rotation policy under
+# CloudFormation lifecycle.
+
+deploy-app-drupal:  ## Deploy Drupal app stack (Secrets Manager + SSM params)
+	@echo "$(BLUE)Deploying app-drupal stack: $(APP_DRUPAL_STACK)$(NC)"
+	@if [ ! -f $(APP_DRUPAL_PARAMS) ]; then \
+		echo "$(RED)Error: Parameter file not found: $(APP_DRUPAL_PARAMS)$(NC)"; \
+		exit 1; \
+	fi
+	@time aws cloudformation deploy \
+		--template-file $(APP_DRUPAL_TEMPLATE) \
+		--stack-name $(APP_DRUPAL_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(APP_DRUPAL_PARAMS)) \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ app-drupal stack deployed: $(APP_DRUPAL_STACK)$(NC)"
+	@echo ""
+	@echo "$(CYAN)Secrets created (or pre-existing) and managed by this stack:$(NC)"
+	@echo "  worxco/$(ENV)/drupal/admin-password"
+	@echo "  worxco/$(ENV)/drupal/db-password"
+	@echo ""
+	@echo "$(CYAN)SSM parameters under /$(ENV)/drupal/ (db-name, db-user, site-name,$(NC)"
+	@echo "$(CYAN)install-path, admin-username, admin-email)$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Next: run 'make install-drupal ENV=$(ENV)' on the deploy-host$(NC)"
+
+destroy-app-drupal:  ## Delete Drupal app stack (Secrets Manager + SSM params; CONFIRMED=yes to skip prompt)
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(RED)WARNING: This deletes all Secrets Manager entries and SSM parameters$(NC)"; \
+		echo "$(RED)for Drupal in $(ENV). The Drupal install on FSx + RDS is NOT touched$(NC)"; \
+		echo "$(RED)by this — but it will fail to load until secrets are restored.$(NC)"; \
+		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt for unattended runs.)$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then echo "Cancelled"; exit 0; fi; \
+	fi
+	@if [ "$(ENV)" = "production" ] && [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(RED)Production destroy: type 'WIPE PRODUCTION SECRETS' to proceed$(NC)"; \
+		read -r prod_confirm; \
+		[ "$$prod_confirm" = "WIPE PRODUCTION SECRETS" ] || { echo "Cancelled"; exit 1; }; \
+	fi
+	@echo "$(YELLOW)Deleting app-drupal stack: $(APP_DRUPAL_STACK)$(NC)"
+	@time aws cloudformation delete-stack \
+		--stack-name $(APP_DRUPAL_STACK) \
+		--region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	$(call cf-wait,stack-delete-complete,$(APP_DRUPAL_STACK))
+	@echo "$(GREEN)✓ app-drupal stack deleted: $(APP_DRUPAL_STACK)$(NC)"
+	@echo "$(CYAN)Note: Secrets are scheduled for deletion with a 30-day recovery window.$(NC)"
+	@echo "$(CYAN)To force-delete immediately:$(NC)"
+	@echo "  aws secretsmanager delete-secret --secret-id worxco/$(ENV)/drupal/admin-password --force-delete-without-recovery"
+	@echo "  aws secretsmanager delete-secret --secret-id worxco/$(ENV)/drupal/db-password    --force-delete-without-recovery"
+
+verify-app-drupal:  ## Show app-drupal stack outputs and the secrets/params it owns
+	@echo "$(BLUE)app-drupal stack: $(APP_DRUPAL_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@aws cloudformation describe-stacks \
+		--stack-name $(APP_DRUPAL_STACK) \
+		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null \
+		|| { echo "$(RED)Stack not found — run: make deploy-app-drupal ENV=$(ENV)$(NC)"; exit 1; }
+	@echo ""
+	@echo "$(CYAN)SSM parameters:$(NC)"
+	@aws ssm get-parameters-by-path \
+		--path "/$(ENV)/drupal/" \
+		--query 'Parameters[].{Name:Name,Value:Value}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null
 
 # -----------------------------------------------------------------------------
 # Drupal Install (cloud — RDS + FSx, deploy-host only)
