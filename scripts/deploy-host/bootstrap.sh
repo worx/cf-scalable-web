@@ -294,7 +294,7 @@ Tools:  aws, git, make, tmux, screen, vim, claude
 Project helpers (auto-resolve endpoints — no manual lookups):
   info-env sandbox                  # live endpoints from SSM
   show-env sandbox                  # cached endpoints (instant)
-  source /etc/worxco/envs/sandbox   # set RDS_ENDPOINT, FSX_DNS, etc.
+  source /etc/worxco/envs/sandbox   # exports DRUPAL_DB_HOST, FSX_DNS, etc.
   sudo refresh-env-config sandbox   # rebuild cache from SSM
   sudo mount-env sandbox            # mount FSx at /var/www/sandbox
   psql-env sandbox                  # psql shell against env's RDS
