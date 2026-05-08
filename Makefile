@@ -273,7 +273,7 @@ help:  ## Show this help message
 	@echo "  make destroy-compute-nlb      Delete NLB stack"
 	@echo "  make destroy-compute-alb      Delete ALB stack"
 	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
-	@echo "  make destroy-all              Delete all stacks (reverse order)"
+	@echo "  make destroy-all              Delete all stacks (reverse order; CONFIRMED=yes to skip prompt)"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host:$(NC)"
 	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
@@ -281,7 +281,7 @@ help:  ## Show this help message
 	@echo "  make stop-deploy-host         Stop deploy host"
 	@echo "  make start-deploy-host        Start deploy host instance"
 	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
-	@echo "  make destroy-deploy-host      Delete deploy host"
+	@echo "  make destroy-deploy-host      Delete deploy host (CONFIRMED=yes to skip prompt)"
 	@echo "  make install-helpers          (on deploy-host) Sync /usr/local/{bin,sbin}/* from repo after git pull"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host Peering (ENV=sandbox|staging|production):$(NC)"
@@ -1075,15 +1075,18 @@ destroy-cache:  ## Delete cache stack
 	$(call cf-wait,stack-delete-complete,$(CACHE_STACK))
 	@echo "$(GREEN)✓ Cache stack deleted: $(CACHE_STACK)$(NC)"
 
-destroy-all:  ## Delete all stacks (reverse order, with confirmation)
+destroy-all:  ## Delete all stacks (reverse order; pass CONFIRMED=yes to skip prompt)
 	@echo "$(RED)========================================$(NC)"
 	@echo "$(RED)WARNING: This will DELETE ALL STACKS$(NC)"
 	@echo "$(RED)Environment: $(ENV)$(NC)"
 	@echo "$(RED)========================================$(NC)"
-	@read -p "Type 'yes' to confirm COMPLETE TEARDOWN: " confirm; \
-	if [ "$$confirm" != "yes" ]; then \
-		echo "Cancelled"; \
-		exit 0; \
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt for unattended runs.)$(NC)"; \
+		read -p "Type 'yes' to confirm COMPLETE TEARDOWN: " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Cancelled"; \
+			exit 0; \
+		fi; \
 	fi
 	@$(MAKE) destroy-compute ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-image-builder ENV=$(ENV) CONFIRMED=yes || true
@@ -1369,12 +1372,15 @@ verify-deploy-host:  ## Show deploy host connection info
 	@echo ""
 	@echo "$(GREEN)✓ Deploy host verification complete$(NC)"
 
-destroy-deploy-host:  ## Delete deploy host
-	@echo "$(RED)WARNING: This will delete the deploy host!$(NC)"
-	@read -p "Type 'yes' to confirm: " confirm; \
-	if [ "$$confirm" != "yes" ]; then \
-		echo "Cancelled"; \
-		exit 0; \
+destroy-deploy-host:  ## Delete deploy host (pass CONFIRMED=yes to skip prompt)
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(RED)WARNING: This will delete the deploy host!$(NC)"; \
+		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt for unattended runs.)$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Cancelled"; \
+			exit 0; \
+		fi; \
 	fi
 	@echo "$(YELLOW)Deleting deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@time aws cloudformation delete-stack \
