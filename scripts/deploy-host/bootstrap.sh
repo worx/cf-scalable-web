@@ -256,11 +256,19 @@ if [ -d /etc/worxco/envs ]; then
   for envfile in /etc/worxco/envs/*; do
     [ -f "$envfile" ] || continue
     env_name=$(basename "$envfile")
-    fsx_dns=$(grep '^FSX_DNS=' "$envfile" | cut -d= -f2-)
-    if [ -n "$fsx_dns" ] && [ "$fsx_dns" != "" ]; then
-      echo "Mounting FSx for $env_name..."
+    # Read FSX_DNS by sourcing in a subshell — works whether the file uses
+    # 'KEY=value' or 'export KEY=value' format. Subshell isolates the env
+    # change from this script. The '|| true' is defensive against future
+    # bash versions where command sub failure under pipefail+set -e might
+    # propagate; we don't care if the source fails (we just won't have a
+    # value, which is the same as "FSX not deployed for this env").
+    fsx_dns=$(. "$envfile" 2>/dev/null; echo "${FSX_DNS:-}") || true
+    if [ -n "$fsx_dns" ]; then
+      echo "Mounting FSx for $env_name (FSx DNS: $fsx_dns)..."
       /usr/local/sbin/mount-env "$env_name" || \
         echo "  WARN: mount-env $env_name failed (non-fatal)"
+    else
+      echo "Skipping $env_name (no FSX_DNS in $envfile)"
     fi
   done
 else
