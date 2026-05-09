@@ -14,6 +14,8 @@ originSessionId: f483de33-7dee-4185-b1a3-72a0ada5c58e
 
 - **Image Builder components are immutable**: Updating the CloudFormation template creates new component CONTENT, but the recipe continues using the old version until `RecipeVersion` is bumped in the parameter file. Always bump RecipeVersion when changing component content.
 
+- **AWS::ImageBuilder::Component `Data` field has a hard 16,000-char limit**: The component-data string AWS validates is post-`Fn::Sub` size, NOT the YAML source size. **cfn-lint's `W1031` warning ("Fn::Sub when resolved is longer than 16000") is the canary** — exit code is "warnings only" (4) but the AWS API will reject the deploy with `Model validation failed (#/Data: expected maxLength: 16000, actual: NNNNN)`, the stack rolls back, and `build-amis` will silently make AMIs from the previous (rolled-back) component versions — so subsequent compute deploys ship STALE code that LOOKS like it deployed cleanly. **Never dismiss W1031 on `AWS::ImageBuilder::Component` resources**. Fix: move large boot scripts to `image-builder/configs/<file>`, sync to S3 via `make upload-build-configs`, and have the component just `aws s3 cp` it down. Discovered 2026-05-08 — first attempt to deploy configure-php.sh changes hit 21,094/16,000 and rolled back undetected.
+
 - **.env file format**: `.env` uses bare `KEY=VALUE` (no `export`). Make reads it via `-include .env` + bare `export`. Adding `export` keywords would break Make. For bash, use `set -a; source .env; set +a` or `export AWS_PROFILE=ZI-Sandbox` explicitly.
 
 ## VPC / Networking
