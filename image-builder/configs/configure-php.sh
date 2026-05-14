@@ -115,13 +115,17 @@ if [ -n "$DRUPAL_DB_HOST" ] && [ "$DRUPAL_DB_HOST" != "None" ]; then
     echo "; worxco/${ENV}/cache/auth-token). DO NOT EDIT — regenerated on every boot."
     echo ";"
     echo "; Drupal env vars (read by settings.php via getenv())"
-    printf 'env[ENVIRONMENT_NAME] = %s\n' "$ENV"
-    printf 'env[DRUPAL_DB_HOST]   = %s\n' "$DRUPAL_DB_HOST"
-    printf 'env[DRUPAL_DB_PORT]   = %s\n' "$DRUPAL_DB_PORT"
-    printf 'env[DRUPAL_DB_NAME]   = %s\n' "$DRUPAL_DB_NAME"
-    printf 'env[DRUPAL_DB_USER]   = %s\n' "$DRUPAL_DB_USER"
-    printf 'env[DRUPAL_DB_PASS]   = %s\n' "$DRUPAL_DB_PASS"
-    printf 'env[DRUPAL_SITE_NAME] = %s\n' "$DRUPAL_SITE_NAME"
+    # Quote every value. PHP-FPM's INI scanner rejects unquoted barewords
+    # that contain shell-metacharacters like ~ ` * < > & — the cf-app-drupal
+    # password generator can include any of those. We strip any embedded
+    # double quote first so the resulting line stays well-formed.
+    printf 'env[ENVIRONMENT_NAME] = "%s"\n' "${ENV//\"/}"
+    printf 'env[DRUPAL_DB_HOST]   = "%s"\n' "${DRUPAL_DB_HOST//\"/}"
+    printf 'env[DRUPAL_DB_PORT]   = "%s"\n' "${DRUPAL_DB_PORT//\"/}"
+    printf 'env[DRUPAL_DB_NAME]   = "%s"\n' "${DRUPAL_DB_NAME//\"/}"
+    printf 'env[DRUPAL_DB_USER]   = "%s"\n' "${DRUPAL_DB_USER//\"/}"
+    printf 'env[DRUPAL_DB_PASS]   = "%s"\n' "${DRUPAL_DB_PASS//\"/}"
+    printf 'env[DRUPAL_SITE_NAME] = "%s"\n' "${DRUPAL_SITE_NAME//\"/}"
     if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ] && [ -n "$CACHE_AUTH" ]; then
       echo ";"
       echo "; Valkey session handler (TLS + AUTH; cf-cache TransitEncryptionEnabled=true)"
