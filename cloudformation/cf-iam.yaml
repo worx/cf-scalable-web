@@ -202,6 +202,17 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*'
                   - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*/*'
+              # Read-only on the image-builder bucket so configure-php.sh
+              # (and any future helper) can pull updated configs from S3 at
+              # runtime without rebuilding the AMI. Discovered 2026-05-14:
+              # `aws s3 cp` from the bucket failed silently with AccessDenied.
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder-*'
+                  - !Sub 'arn:aws:s3:::${EnvironmentName}-image-builder-*/*'
               - Effect: Allow
                 Action:
                   - s3:ListAllMyBuckets
