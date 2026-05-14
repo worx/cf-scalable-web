@@ -113,7 +113,11 @@ Resources:
         # Plaintext password (no JSON template) for direct use as a string.
         # install-drupal.sh has defensive parsing for both formats anyway.
         PasswordLength: !Ref AdminPasswordLength
-        ExcludeCharacters: '"@/\'''
+        # Exclusions cover: INI parser (",'), shell metacharacters that get
+        # interpreted in unquoted heredocs in install-drupal.sh ($,`,*,~,<,>,|,!,(,),{,},^),
+        # and URL-special chars (@,/,\). Discovered 2026-05-14: an X~ at start
+        # broke PHP-FPM www.conf parsing; tightened to defense-in-depth.
+        ExcludeCharacters: '"@/\''~$`<>*|^!(){}'
         ExcludePunctuation: false
         IncludeSpace: false
       Tags:
@@ -136,9 +140,12 @@ Resources:
       Description: !Sub 'Drupal DB user password for ${EnvironmentName} (managed by cf-app-drupal)'
       GenerateSecretString:
         PasswordLength: !Ref DBPasswordLength
-        # Stricter exclusions for DB password — pgsql connection strings
-        # are picky about embedded special characters in URL-encoded form.
-        ExcludeCharacters: '"@/\''#%&+:;=?[]'
+        # Stricter exclusions: pgsql URL-special chars (#%&+:;=?[]) plus
+        # shell metacharacters that break unquoted-heredoc usage in
+        # install-drupal.sh ($,`,*,~,<,>,|,!,(,),{,},^) plus INI parser (",').
+        # Discovered 2026-05-14: a literal `~` near the start of the value
+        # caused PHP-FPM to reject www.conf parsing entirely.
+        ExcludeCharacters: '"@/\''#%&+:;=?[]~$`<>*|^!(){}'
         ExcludePunctuation: false
         IncludeSpace: false
       Tags:
