@@ -28,8 +28,9 @@ if [ -z "$ENV" ]; then
   exit 1
 fi
 
-INSTALL_DIR="/var/www/$ENV/drupal"
-CONFIG_DIR="/var/www/$ENV/drupal-config"
+INSTALL_DIR="/var/www/drupal"
+CONFIG_DIR="/var/www/drupal-config"
+PRIVATE_DIR="/var/www/drupal-private"
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 fail() { echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2; exit 1; }
@@ -39,10 +40,15 @@ fail() { echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2; exit 1; }
 # ============================================================
 log "=== Drupal Cloud Remove (env=$ENV) ==="
 
-# Verify FSx mounted (we need to wipe files there)
-if ! mountpoint -q "/var/www/$ENV" 2>/dev/null; then
-  log "FSx not mounted at /var/www/$ENV — skipping file removal"
+# Verify the right env is active — single-mount model means /var/www
+# could be holding a different env's FSx than the one we're asked to remove.
+if ! mountpoint -q /var/www 2>/dev/null; then
+  log "FSx not mounted at /var/www — skipping file removal"
 else
+  ACTIVE_ENV=$(cat /etc/worxco/current-env 2>/dev/null || echo "NONE")
+  if [ "$ACTIVE_ENV" != "$ENV" ]; then
+    fail "Active env is '$ACTIVE_ENV' but remove requested for '$ENV'. Run: sudo use-env $ENV"
+  fi
   if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/vendor/bin/drush" ]; then
     log "Dropping all Drupal tables via drush sql:drop..."
 
@@ -87,13 +93,13 @@ log ""
 log "Done. Reinstall with: make install-drupal ENV=$ENV"
 log ""
 log "Preserved (intentional):"
-log "  - /var/www/$ENV/drupal-private (hash_salt persists across reinstalls)"
+log "  - $PRIVATE_DIR (hash_salt persists across reinstalls)"
 log "  - drupal_user role in PostgreSQL"
 log "  - Secrets Manager: worxco/$ENV/drupal/db-password"
 log "  - Secrets Manager: worxco/$ENV/drupal/admin-password"
 log ""
 log "To wipe the preserved items too (rare):"
-log "  rm -rf /var/www/$ENV/drupal-private"
+log "  rm -rf $PRIVATE_DIR"
 log "  psql-env $ENV -c 'DROP USER drupal_user;'"
 log "  aws secretsmanager delete-secret --secret-id worxco/$ENV/drupal/db-password --force-delete-without-recovery"
 log "  aws secretsmanager delete-secret --secret-id worxco/$ENV/drupal/admin-password --force-delete-without-recovery"

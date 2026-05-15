@@ -35,9 +35,15 @@ if [ -z "$ENV" ]; then
   exit 1
 fi
 
-INSTALL_DIR="/var/www/$ENV/drupal"
-PRIVATE_DIR="/var/www/$ENV/drupal-private"
-CONFIG_DIR="/var/www/$ENV/drupal-config"
+# Paths are mount-target-relative — every host (deploy-host with use-env
+# mounted, PHP fleet, nginx fleet) sees Drupal at /var/www/drupal regardless
+# of which env is active. The deploy-host's `use-env <env>` mounts the
+# target env's FSx at /var/www, so running install-drupal.sh after
+# `use-env sandbox` installs into sandbox's FSx (visible to the runtime
+# fleet at the same /var/www/drupal path).
+INSTALL_DIR="/var/www/drupal"
+PRIVATE_DIR="/var/www/drupal-private"
+CONFIG_DIR="/var/www/drupal-config"
 MARKER="$INSTALL_DIR/.installed"
 SALT_FILE="$PRIVATE_DIR/salt.txt"
 
@@ -97,9 +103,16 @@ if [ -f "$MARKER" ]; then
 fi
 
 # Verify FSx is mounted (we don't auto-mount — it's a separate concern,
-# kept explicit for clearer failure modes).
-if ! mountpoint -q "/var/www/$ENV" 2>/dev/null; then
-  fail "FSx not mounted at /var/www/$ENV. Run: sudo mount-env $ENV"
+# kept explicit for clearer failure modes). We also verify the active env
+# matches what we're installing for, so the operator doesn't accidentally
+# install sandbox's Drupal into staging's FSx (the new single-mount model
+# makes this confusion possible).
+if ! mountpoint -q /var/www 2>/dev/null; then
+  fail "FSx not mounted at /var/www. Run: sudo use-env $ENV"
+fi
+ACTIVE_ENV=$(cat /etc/worxco/current-env 2>/dev/null || echo "NONE")
+if [ "$ACTIVE_ENV" != "$ENV" ]; then
+  fail "Active env is '$ACTIVE_ENV' but install requested for '$ENV'. Run: sudo use-env $ENV"
 fi
 
 # Verify required tools
@@ -215,10 +228,14 @@ unset RDS_MASTER_PW
 # ============================================================
 step "Create directories on FSx (drupal/, drupal-private/, drupal-config/)"
 # ============================================================
-log "Ensuring /var/www/$ENV is writable by $(whoami)..."
+log "Ensuring $INSTALL_DIR (and siblings) writable by $(whoami)..."
 sudo mkdir -p "$INSTALL_DIR" "$PRIVATE_DIR" "$CONFIG_DIR"
-sudo chown -R "$(id -u):$(id -g)" \
+# Ownership: install user (ubuntu) for code, www-data group for read access
+# from PHP-FPM workers on the runtime fleet. Sensitive files (salt.txt) get
+# tightened later in this script.
+sudo chown -R "$(id -u):www-data" \
   "$INSTALL_DIR" "$PRIVATE_DIR" "$CONFIG_DIR"
+sudo chmod -R g+rX "$INSTALL_DIR" "$PRIVATE_DIR" "$CONFIG_DIR"
 
 # ============================================================
 step "composer create-project drupal/recommended-project (~2 min)"

@@ -205,9 +205,11 @@ Resources:
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub '/${EnvironmentName}/drupal/install-path'
-      Description: 'Filesystem path to the Drupal install on FSx'
+      Description: 'Filesystem path to the Drupal install on FSx — mount-target-relative, same on every host'
       Type: String
-      Value: !Sub '/var/www/${EnvironmentName}/drupal'
+      # No env prefix — FSx is per-env, but every host mounts at /var/www
+      # so paths line up across deploy-host and the runtime fleet.
+      Value: '/var/www/drupal'
       Tier: Standard
       Tags:
         Environment: !Ref EnvironmentName
@@ -284,7 +286,7 @@ Outputs:
 
   DrupalInstallPath:
     Description: 'Filesystem path to Drupal install on FSx (also at SSM /<env>/drupal/install-path)'
-    Value: !Sub '/var/www/${EnvironmentName}/drupal'
+    Value: '/var/www/drupal'
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
