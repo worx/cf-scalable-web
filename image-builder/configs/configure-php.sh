@@ -49,14 +49,21 @@ ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
 echo "[configure-php] Starting PHP $PHP_VER configuration for $ENV"
 
 # ============================================================
-# Mount FSx webroot at /var/www
+# Mount FSx webroot at /var/www. This path is identical on every host
+# (PHP fleet, nginx fleet, deploy-host) — env-awareness lives in WHICH
+# FSx is mounted, not WHERE. Drupal at /var/www/drupal/web regardless
+# of environment.
 # ============================================================
 FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
   --query 'Parameter.Value' --output text 2>/dev/null || echo "")
-if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
-  echo "[configure-php] Mounting /var/www from $FSX_DNS"
-  mount -t nfs4 -o vers=4.1,port=2049 \
-    "$FSX_DNS:/fsx" /var/www || echo "[configure-php] WARNING: Failed to mount /var/www"
+if [ -z "$FSX_DNS" ] || [ "$FSX_DNS" = "None" ]; then
+  echo "[configure-php] FATAL: /$ENV/fsx/dns-name not set in SSM" >&2
+  exit 1
+fi
+echo "[configure-php] Mounting $FSX_DNS:/fsx at /var/www"
+if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" /var/www; then
+  echo "[configure-php] FATAL: mount of $FSX_DNS:/fsx at /var/www failed" >&2
+  exit 1
 fi
 
 # ============================================================
