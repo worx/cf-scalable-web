@@ -1,0 +1,147 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+#
+# use-env: Switch the deploy-host's active environment.
+#
+# Each deploy-host operates on ONE environment at a time. The mount target
+# is always /var/www — the env-awareness lives in WHICH FSx is mounted,
+# not WHERE. This matches the runtime fleet's mount layout exactly, so
+# paths like /var/www/drupal/web are identical on every host.
+#
+# Operations:
+#   1. Unmount /var/www (if currently mounted)
+#   2. Strip any old worxco fstab entry
+#   3. Look up the target env's FSx DNS via SSM
+#   4. Refresh /etc/worxco/envs/<env> and /etc/hosts (refresh-env-config)
+#   5. Mount the target env's FSx at /var/www
+#   6. Write a new /etc/fstab entry so the mount survives stop/start
+#   7. Write the env name to /etc/worxco/current-env (read by zsh RPROMPT)
+#
+# Installed at /usr/local/sbin/use-env (requires sudo).
+# Allowed for the ubuntu user without password via /etc/sudoers.d.
+#
+# Usage:
+#   sudo use-env <environment>   # switch to env, mount its FSx
+#   sudo use-env none            # unmount, leave /var/www empty
+#   sudo use-env                 # print current state (no sudo needed for this)
+
+set -euo pipefail
+
+CURRENT_ENV_FILE="/etc/worxco/current-env"
+MOUNT_POINT="/var/www"
+FSTAB_TAG="# worxco-use-env"
+
+# ----- no-arg: print current state and exit -----
+if [ "$#" -eq 0 ]; then
+  if [ -r "$CURRENT_ENV_FILE" ]; then
+    echo "Current environment: $(< "$CURRENT_ENV_FILE")"
+  else
+    echo "Current environment: NONE (file $CURRENT_ENV_FILE missing)"
+  fi
+  if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    echo "Mount:               $(mount | awk -v mp="$MOUNT_POINT" '$3==mp{print $1,"->",$3,"("$5")"}')"
+  else
+    echo "Mount:               $MOUNT_POINT is not mounted"
+  fi
+  echo ""
+  echo "Usage: sudo use-env <environment>"
+  echo "       sudo use-env none       (unmount + clear)"
+  exit 0
+fi
+
+# All mutating actions require root
+if [ "$EUID" -ne 0 ]; then
+  echo "ERROR: use-env mutates /etc/fstab and /var/www mount — run with sudo" >&2
+  exit 1
+fi
+
+ENV="$1"
+
+# ----- safety: refuse to umount if user's shell is inside /var/www -----
+# umount would fail with EBUSY, but a clear up-front message is friendlier.
+# We can't see the user's PWD from inside sudo, but we can look at their
+# parent shell via /proc/$PPID/cwd.
+if [ -e "/proc/$PPID/cwd" ]; then
+  parent_cwd=$(readlink "/proc/$PPID/cwd" 2>/dev/null || true)
+  case "$parent_cwd" in
+    "$MOUNT_POINT"|"$MOUNT_POINT"/*)
+      echo "ERROR: caller's shell is in $parent_cwd — cd elsewhere first" >&2
+      echo "  cd /home/ubuntu  # (or anywhere outside $MOUNT_POINT)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# ----- common cleanup: unmount + clear fstab -----
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+  echo "Unmounting current $MOUNT_POINT..."
+  if ! umount "$MOUNT_POINT"; then
+    echo "ERROR: umount failed — something is still using $MOUNT_POINT" >&2
+    echo "  lsof +D $MOUNT_POINT  # to see what" >&2
+    exit 1
+  fi
+fi
+# Remove any prior worxco fstab block (marker line + the entry that follows)
+if grep -q "^${FSTAB_TAG}\$" /etc/fstab 2>/dev/null; then
+  sed -i.bak "/^${FSTAB_TAG}\$/,+1d" /etc/fstab
+  rm -f /etc/fstab.bak
+fi
+
+# ----- "none": already unmounted and cleared; just record the state -----
+if [ "$ENV" = "none" ] || [ "$ENV" = "NONE" ]; then
+  mkdir -p "$(dirname "$CURRENT_ENV_FILE")"
+  echo "NONE" > "$CURRENT_ENV_FILE"
+  echo "Done. $MOUNT_POINT is unmounted, no active environment."
+  exit 0
+fi
+
+# ----- resolve target env's FSx DNS -----
+FSX_DNS=$(aws ssm get-parameter \
+  --name "/$ENV/fsx/dns-name" \
+  --query 'Parameter.Value' \
+  --output text 2>/dev/null || true)
+if [ -z "$FSX_DNS" ] || [ "$FSX_DNS" = "None" ]; then
+  echo "ERROR: cannot read SSM /$ENV/fsx/dns-name." >&2
+  echo "       Either the env isn't deployed, VPC peering is down," >&2
+  echo "       or this deploy-host lacks IAM perms for that env." >&2
+  exit 1
+fi
+
+# ----- refresh /etc/worxco/envs/<env> and /etc/hosts FSx block -----
+# FSx hostnames don't resolve across VPC peering — refresh-env-config
+# maintains a /etc/hosts block that bridges the gap. Without it, the mount
+# below would fail to resolve $FSX_DNS to a private IP.
+if command -v refresh-env-config >/dev/null; then
+  refresh-env-config "$ENV" || \
+    echo "WARN: refresh-env-config failed; trying mount anyway (existing /etc/hosts may suffice)"
+else
+  echo "WARN: refresh-env-config not on PATH — /etc/hosts FSx block may be stale"
+fi
+
+# ----- mount target env's FSx at /var/www -----
+mkdir -p "$MOUNT_POINT"
+echo "Mounting $FSX_DNS:/fsx -> $MOUNT_POINT (env=$ENV)"
+mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
+
+# ----- persist in fstab for stop/start cycles -----
+{
+  echo ""
+  echo "$FSTAB_TAG"
+  echo "$FSX_DNS:/fsx $MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
+} >> /etc/fstab
+
+# ----- record active env (read by zsh RPROMPT every prompt cycle) -----
+mkdir -p "$(dirname "$CURRENT_ENV_FILE")"
+echo "$ENV" > "$CURRENT_ENV_FILE"
+
+echo ""
+echo "Active environment: $ENV"
+echo "  /var/www -> $FSX_DNS:/fsx"
+echo "  /etc/worxco/current-env updated (zsh prompt will refresh next render)"
+echo ""
+echo "To pull env vars (DB host, secrets, etc.) into your current shell:"
+echo "  source /etc/worxco/envs/$ENV"
+echo "(The zsh \`use-env\` wrapper does this automatically. Direct calls to"
+echo "  the binary at /usr/local/sbin/use-env don't propagate vars upward.)"

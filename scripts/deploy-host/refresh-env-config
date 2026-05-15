@@ -50,7 +50,11 @@ export DRUPAL_DB_PORT=5432
 export DRUPAL_DB_NAME=drupal
 export DRUPAL_DB_USER=drupal_user
 export DRUPAL_SITE_NAME=drupal-${ENV}.test
-export DRUPAL_PATH=/var/www/$ENV/drupal
+# DRUPAL_PATH is mount-target-relative — every host (deploy-host with
+# use-env mounted, PHP fleet, nginx fleet) sees Drupal at /var/www/drupal
+# regardless of which env is active. Env-awareness lives in WHICH FSx is
+# mounted, not WHERE.
+export DRUPAL_PATH=/var/www/drupal
 
 # Other infrastructure endpoints (for ad-hoc / debugging)
 export FSX_DNS=$FSX

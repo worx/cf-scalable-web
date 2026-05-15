@@ -2,3 +2,10 @@
 # without password. The script reads SSM and writes endpoint configuration.
 # No secrets are written to /etc/worxco/envs/<env> files.
 ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/refresh-env-config
+
+# Allow ubuntu to switch the active environment without password.
+# use-env mutates /etc/fstab and the /var/www mount but does NOT read or
+# write secrets — switching to an env makes its FSx visible at /var/www
+# (the operator still needs explicit `source /etc/worxco/envs/<env>` to
+# pull DB credentials into a shell session).
+ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/use-env

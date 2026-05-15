@@ -139,6 +139,28 @@ HISTFILE=~/.zsh_history
 HISTSIZE=100000
 SAVEHIST=100000
 setopt INC_APPEND_HISTORY SHARE_HISTORY
+
+# Wrap /usr/local/sbin/use-env so the env's DB/cache exports flow into
+# the current shell. The binary itself can't propagate variables up to
+# its caller (process boundaries), so the shell sources the env file
+# after a successful switch.
+use-env() {
+  if [ "$#" -eq 0 ]; then
+    /usr/local/sbin/use-env
+    return $?
+  fi
+  if sudo /usr/local/sbin/use-env "$@"; then
+    local _cur
+    if [[ -r /etc/worxco/current-env ]]; then
+      _cur=$(< /etc/worxco/current-env)
+      if [[ -n "$_cur" && "$_cur" != "NONE" && -r "/etc/worxco/envs/$_cur" ]]; then
+        # shellcheck disable=SC1090
+        source "/etc/worxco/envs/$_cur"
+        echo "Sourced /etc/worxco/envs/$_cur into current shell."
+      fi
+    fi
+  fi
+}
 ZSHEOF
 
 # Ensure system-wide /etc/zsh/zshrc sources the drop-in dir. Ubuntu's
@@ -313,9 +335,15 @@ install -m 0755 "$REPO_DIR/scripts/deploy-host/info-env"           /usr/local/bi
 install -m 0755 "$REPO_DIR/scripts/deploy-host/show-env"           /usr/local/bin/show-env
 install -m 0755 "$REPO_DIR/scripts/deploy-host/psql-env"           /usr/local/bin/psql-env
 install -m 0755 "$REPO_DIR/scripts/deploy-host/valkey-env"         /usr/local/bin/valkey-env
-install -m 0755 "$REPO_DIR/scripts/deploy-host/mount-env"          /usr/local/sbin/mount-env
+install -m 0755 "$REPO_DIR/scripts/deploy-host/use-env"            /usr/local/sbin/use-env
 install -m 0755 "$REPO_DIR/scripts/deploy-host/refresh-env-config" /usr/local/sbin/refresh-env-config
 install -m 0440 "$REPO_DIR/scripts/deploy-host/worxco-refresh-env-config.sudoers" /etc/sudoers.d/worxco-refresh-env-config
+
+# Remove the deprecated mount-env if it was installed by an older bootstrap.
+# (Replaced by use-env, which mounts at /var/www regardless of env so paths
+# match the runtime fleet. mount-env's per-env mount points are incompatible
+# with the new model — keeping both side-by-side would be confusing.)
+rm -f /usr/local/sbin/mount-env
 
 # ============================================================
 step "First refresh-env-config (best-effort, populates /etc/worxco/envs/*)"
@@ -324,35 +352,33 @@ step "First refresh-env-config (best-effort, populates /etc/worxco/envs/*)"
   echo "WARN: refresh-env-config had no envs to refresh (none deployed yet?)"
 
 # ============================================================
-step "Auto-mount FSx for any deployed environments"
+step "Restore last active env mount (if recorded in /etc/worxco/current-env)"
 # ============================================================
-# After refresh-env-config populates /etc/worxco/envs/<env> for envs that
-# have infrastructure deployed, ensure FSx is mounted for each. mount-env
-# also writes /etc/fstab so the mount survives stop/start of this instance.
+# Deploy-host operates on ONE env at a time. /etc/worxco/current-env
+# records which env the operator was last working on. On a fresh deploy-
+# host that file is "NONE" — the operator runs `sudo use-env sandbox`
+# explicitly. On a re-bootstrap of a host with an existing current-env,
+# we restore the mount so the prompt and any tooling come back to a
+# consistent state.
 #
-# This is best-effort: a failed mount logs a WARN and continues. The user
-# can run `sudo mount-env <env>` manually to retry.
-if [ -d /etc/worxco/envs ]; then
-  for envfile in /etc/worxco/envs/*; do
-    [ -f "$envfile" ] || continue
-    env_name=$(basename "$envfile")
-    # Read FSX_DNS by sourcing in a subshell — works whether the file uses
-    # 'KEY=value' or 'export KEY=value' format. Subshell isolates the env
-    # change from this script. The '|| true' is defensive against future
-    # bash versions where command sub failure under pipefail+set -e might
-    # propagate; we don't care if the source fails (we just won't have a
-    # value, which is the same as "FSX not deployed for this env").
-    fsx_dns=$(. "$envfile" 2>/dev/null; echo "${FSX_DNS:-}") || true
-    if [ -n "$fsx_dns" ]; then
-      echo "Mounting FSx for $env_name (FSx DNS: $fsx_dns)..."
-      /usr/local/sbin/mount-env "$env_name" || \
-        echo "  WARN: mount-env $env_name failed (non-fatal)"
+# If /etc/fstab already has a worxco-use-env entry, that mount has
+# already happened automatically at boot via systemd-fstab-generator —
+# this block is a no-op in that case.
+if [ -r /etc/worxco/current-env ]; then
+  prev_env=$(< /etc/worxco/current-env)
+  if [ -n "$prev_env" ] && [ "$prev_env" != "NONE" ]; then
+    if mountpoint -q /var/www 2>/dev/null; then
+      echo "/var/www already mounted (env=$prev_env via fstab) — nothing to do"
     else
-      echo "Skipping $env_name (no FSX_DNS in $envfile)"
+      echo "Restoring mount for env=$prev_env via use-env..."
+      /usr/local/sbin/use-env "$prev_env" || \
+        echo "  WARN: use-env $prev_env failed; run \`sudo use-env <env>\` manually"
     fi
-  done
+  else
+    echo "No active env recorded (/etc/worxco/current-env=NONE) — operator must run \`sudo use-env <env>\`"
+  fi
 else
-  echo "No /etc/worxco/envs/ — skipping auto-mount"
+  echo "/etc/worxco/current-env not yet created — operator must run \`sudo use-env <env>\`"
 fi
 
 # ============================================================
@@ -374,23 +400,31 @@ Reconnect:
   tmux attach -t deploy
 
 Access: SSM Session Manager only (no SSH)
+Shell:  zsh (RPROMPT shows [env:<name>] from /etc/worxco/current-env)
 AWS:    Instance role provides AdministratorAccess
 Region: $AWS_DEFAULT_REGION (override with export AWS_DEFAULT_REGION=...)
-Tools:  aws, git, make, tmux, screen, vim, claude
-        php, composer, drush, psql, redis-cli, mount-env
+Tools:  aws, git, make, tmux, screen, vim, claude, zsh
+        php, composer, drush, psql, redis-cli, use-env
+
+Pick an environment to operate on (one at a time per deploy-host):
+  use-env                           # show current env + mount state
+  use-env sandbox                   # mount sandbox's FSx at /var/www
+  use-env none                      # unmount, leave /var/www empty
+
+Once an env is active, /var/www holds that env's FSx contents.
+Drupal lives at /var/www/drupal regardless of which env is active.
 
 Project helpers (auto-resolve endpoints — no manual lookups):
   info-env sandbox                  # live endpoints from SSM
   show-env sandbox                  # cached endpoints (instant)
   source /etc/worxco/envs/sandbox   # exports DRUPAL_DB_HOST, FSX_DNS, etc.
   sudo refresh-env-config sandbox   # rebuild cache from SSM
-  sudo mount-env sandbox            # mount FSx at /var/www/sandbox
   psql-env sandbox                  # psql shell against env's RDS
   psql-env sandbox -c "SELECT now();"
   valkey-env sandbox PING           # Valkey/Redis CLI
 
-Drupal management (after sandbox is fully deployed):
-  cd /var/www/sandbox/drupal        # navigate to Drupal install
+Drupal management (after env is active and Drupal is deployed):
+  cd /var/www/drupal                # navigate to Drupal install
   drush cr                          # clear caches
   drush updb -y                     # apply pending DB updates
 
