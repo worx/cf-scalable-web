@@ -80,6 +80,7 @@ apt-get install -y \
   tmux \
   tree \
   vim \
+  zsh \
   python3-pip \
   python3-venv
 
@@ -95,6 +96,85 @@ export AWS_CLI_AUTO_PROMPT=off
 export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
 ENVEOF
 su - ubuntu -c 'git config --global core.editor vim' || true
+
+# ============================================================
+step "zsh + right-prompt env indicator"
+# ============================================================
+# SSM Session Manager forces `exec bash -l`, bypassing ubuntu's login shell
+# in /etc/passwd. So we keep bash as the entry shell but have bash auto-exec
+# into zsh on interactive shells. To bypass once for debugging: NO_AUTO_ZSH=1 bash.
+#
+# RPROMPT shows the current Worxco environment on the right side of every
+# prompt — read from /etc/worxco/current-env, which is managed by the
+# `use-env <name>` script (TODO: that command in a follow-up commit).
+
+chsh -s /bin/zsh ubuntu || true
+
+# System-wide zsh interactive config — applies to every user that runs zsh.
+mkdir -p /etc/zsh/zshrc.d
+cat > /etc/zsh/zshrc.d/worxco-prompt.zsh <<'ZSHEOF'
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+#
+# Worxco deploy-host zsh interactive setup. Installed by bootstrap.sh.
+
+autoload -U colors && colors
+
+# PROMPT_SUBST is REQUIRED for $(...) substitution to work inside prompts.
+# Without it, the $(_worxco_env) expression below is treated as a literal string.
+setopt PROMPT_SUBST
+
+_worxco_env() {
+  if [[ -r /etc/worxco/current-env ]]; then
+    echo "[env:$(< /etc/worxco/current-env)]"
+  else
+    echo "[env:NONE]"
+  fi
+}
+
+PROMPT='%n@%m:%~%# '
+RPROMPT='%F{yellow}$(_worxco_env)%f'
+
+HISTFILE=~/.zsh_history
+HISTSIZE=100000
+SAVEHIST=100000
+setopt INC_APPEND_HISTORY SHARE_HISTORY
+ZSHEOF
+
+# Ensure system-wide /etc/zsh/zshrc sources the drop-in dir. Ubuntu's
+# default /etc/zsh/zshrc doesn't include zshrc.d, so we append idempotently.
+if ! grep -q '/etc/zsh/zshrc.d/' /etc/zsh/zshrc 2>/dev/null; then
+  cat >> /etc/zsh/zshrc <<'SHRCEOF'
+
+# Worxco drop-in dir for system-wide zsh interactive config
+if [ -d /etc/zsh/zshrc.d ]; then
+  for f in /etc/zsh/zshrc.d/*.zsh; do
+    [ -r "$f" ] && source "$f"
+  done
+  unset f
+fi
+SHRCEOF
+fi
+
+# Auto-exec zsh from bash on interactive logins (Option A: keep bash as the
+# SSM entry shell, swap to zsh for the user). Append idempotently to the
+# system-wide bashrc so it applies even on a freshly-created user account.
+if ! grep -q 'NO_AUTO_ZSH' /etc/bash.bashrc 2>/dev/null; then
+  cat >> /etc/bash.bashrc <<'BASHEOF'
+
+# Worxco: auto-exec into zsh for interactive logins (escape with NO_AUTO_ZSH=1 bash)
+if [[ $- == *i* ]] && [ -x /usr/bin/zsh ] && [ "${NO_AUTO_ZSH:-0}" != 1 ] && [ -z "${ZSH_VERSION:-}" ]; then
+  exec zsh -l
+fi
+BASHEOF
+fi
+
+# Bootstrap /etc/worxco/current-env so a fresh deploy-host shows something
+# meaningful in the prompt. `use-env <name>` will overwrite this later.
+mkdir -p /etc/worxco
+if [ ! -s /etc/worxco/current-env ]; then
+  echo "NONE" > /etc/worxco/current-env
+fi
 
 # ============================================================
 step "/home/ubuntu/.aws README"
