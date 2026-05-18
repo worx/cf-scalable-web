@@ -2122,6 +2122,12 @@ deploy-ami-params: update-ami-params  ## Alias for update-ami-params
 check-drift:  ## Warn when local CFN templates are newer than deployed stacks
 	@scripts/check-cfn-drift.sh $(ENV)
 
+restart-php-fpm:  ## SSM-restart php*-fpm on every PHP box (busts OPcache + reloads www.conf env[])
+	@scripts/restart-php-fpm.sh $(ENV)
+
+clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
+	@scripts/clear-drupal-cache.sh $(ENV)
+
 # -----------------------------------------------------------------------------
 # Secrets Management
 # -----------------------------------------------------------------------------
