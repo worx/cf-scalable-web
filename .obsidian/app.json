@@ -1,0 +1,17 @@
+{
+  "alwaysUpdateLinks": true,
+  "attachmentFolderPath": "assets",
+  "newFileLocation": "folder",
+  "newFileFolderPath": "notes",
+  "showLineNumber": false,
+  "useMarkdownLinks": true,
+  "showUnsupportedFiles": false,
+  "userIgnoreFilters": [
+    "cloudformation/",
+    "deploy-host/",
+    "image-builder/",
+    "PROMPT_LOGS/",
+    "scripts/",
+    "tests/"
+  ]
+}

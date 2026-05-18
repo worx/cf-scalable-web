@@ -42,3 +42,15 @@ PROMPT_LOGS/.last_commit_hash
 # Temporary files
 tmp/
 temp/
+
+# Obsidian volatile state
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache/
+
+# Common engineering noise
+.git/
+node_modules/
+vendor/
+dist/
+build/

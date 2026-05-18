@@ -1,0 +1,13 @@
+{
+  "file-explorer": true,
+  "search": true,
+  "switcher": true,
+  "graph": false,
+  "backlink": true,
+  "outline": true,
+  "tags": false,
+  "page-preview": true,
+  "daily-notes": false,
+  "templates": true,
+  "command-palette": true
+}
