@@ -2015,7 +2015,9 @@ build-ami-php83:  ## Trigger PHP 8.3 pipeline execution
 	echo "$(GREEN)✓ PHP 8.3 build started$(NC)"; \
 	echo "$(YELLOW)Monitor in AWS Console > EC2 Image Builder > Image pipelines$(NC)"
 
-build-amis:  ## Trigger all 3 pipeline executions
+build-amis: build-amis-async wait-amis  ## Trigger all 3 pipeline executions and WAIT for AVAILABLE
+
+build-amis-async:  ## Trigger all 3 pipeline executions (fire-and-forget; no wait)
 	@echo "$(BLUE)Triggering all AMI builds...$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@$(MAKE) build-ami-nginx ENV=$(ENV)
@@ -2023,6 +2025,45 @@ build-amis:  ## Trigger all 3 pipeline executions
 	@$(MAKE) build-ami-php83 ENV=$(ENV)
 	@echo ""
 	@echo "$(GREEN)✓ All 3 builds triggered$(NC)"
+
+wait-amis:  ## Poll Image Builder pipelines until all 3 reach AVAILABLE or any FAIL
+	@echo "$(BLUE)Waiting for all 3 pipelines to reach AVAILABLE...$(NC)"
+	@echo "$(YELLOW)(checks every 30s; ~10-15 min per pipeline in parallel, hard cap 40 min)$(NC)"
+	@TIMEOUT_SECS=2400; \
+	START=$$(date +%s); \
+	while true; do \
+		ELAPSED=$$(( $$(date +%s) - $$START )); \
+		if [ "$$ELAPSED" -gt "$$TIMEOUT_SECS" ]; then \
+			echo "$(RED)✗ Timeout after $$TIMEOUT_SECS s — pipelines did not finish$(NC)"; \
+			exit 1; \
+		fi; \
+		ALL_DONE=1; ANY_FAILED=0; \
+		printf "  [%2dm%02ds] " $$((ELAPSED/60)) $$((ELAPSED%60)); \
+		for P in $$(aws imagebuilder list-image-pipelines \
+				--query "imagePipelineList[?contains(name,'$(ENV)')].arn" \
+				--output text --region $(AWS_REGION) 2>/dev/null); do \
+			NAME=$$(echo "$$P" | awk -F/ '{print $$NF}' | sed -e 's/sandbox-//' -e 's/-pipeline//'); \
+			STATUS=$$(aws imagebuilder list-image-pipeline-images --image-pipeline-arn "$$P" \
+				--query "reverse(sort_by(imageSummaryList, &dateCreated))[0].state.status" \
+				--output text --region $(AWS_REGION) 2>/dev/null); \
+			printf "%s=%s  " "$$NAME" "$$STATUS"; \
+			case "$$STATUS" in \
+				AVAILABLE) ;; \
+				FAILED|CANCELLED|DEPRECATED|DELETED) ANY_FAILED=1 ;; \
+				*) ALL_DONE=0 ;; \
+			esac; \
+		done; \
+		echo ""; \
+		if [ "$$ALL_DONE" = "1" ]; then \
+			if [ "$$ANY_FAILED" = "1" ]; then \
+				echo "$(RED)✗ One or more pipelines failed — check the Image Builder console$(NC)"; \
+				exit 1; \
+			fi; \
+			echo "$(GREEN)✓ All pipelines AVAILABLE$(NC)"; \
+			exit 0; \
+		fi; \
+		sleep 30; \
+	done
 
 # PIPELINE variable for update-ami-param (nginx, php74, php83)
 PIPELINE ?= nginx
@@ -2064,6 +2105,19 @@ update-ami-param:  ## Write latest AMI ID to SSM (PIPELINE=nginx|php74|php83)
 		--overwrite \
 		--region $(AWS_REGION) >/dev/null; \
 	echo "$(GREEN)✓ SSM parameter /$(ENV)/ami/$(PIPELINE) = $$AMI_ID$(NC)"
+
+update-ami-params:  ## Write latest AMI IDs to SSM for all 3 pipelines (nginx + php74 + php83)
+	@echo "$(BLUE)Updating SSM AMI parameters for all 3 pipelines...$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=nginx
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php83
+	@echo ""
+	@echo "$(GREEN)✓ All 3 SSM AMI parameters updated$(NC)"
+
+# Alias matching the muscle-memory `deploy-*` naming convention of the
+# surrounding targets (deploy-image-builder, deploy-compute, etc.).
+deploy-ami-params: update-ami-params  ## Alias for update-ami-params
 
 # -----------------------------------------------------------------------------
 # Secrets Management
