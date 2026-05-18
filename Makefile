@@ -2119,6 +2119,9 @@ update-ami-params:  ## Write latest AMI IDs to SSM for all 3 pipelines (nginx + 
 # surrounding targets (deploy-image-builder, deploy-compute, etc.).
 deploy-ami-params: update-ami-params  ## Alias for update-ami-params
 
+check-drift:  ## Warn when local CFN templates are newer than deployed stacks
+	@scripts/check-cfn-drift.sh $(ENV)
+
 # -----------------------------------------------------------------------------
 # Secrets Management
 # -----------------------------------------------------------------------------
