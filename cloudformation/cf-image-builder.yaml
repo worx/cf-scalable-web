@@ -576,9 +576,14 @@ Resources:
                       UPEOF
                       fi
 
-                      # Validate and start NGINX
-                      nginx -t && systemctl start nginx
-                      echo "[configure-nginx] NGINX started successfully"
+                      # Validate and RESTART NGINX. `restart` is required because
+                      # nginx is systemd-enabled and was auto-started at boot
+                      # against the AMI-baked nginx.conf — before this script
+                      # mounted /etc/nginx/shared/ from FSx. A plain `start` is
+                      # a no-op when nginx is already running, so it would keep
+                      # serving without the FSx-mounted vhost includes.
+                      nginx -t && systemctl restart nginx
+                      echo "[configure-nginx] NGINX restarted"
                       BOOTEOF
                       chmod 755 /opt/worxco/configure-nginx.sh
 

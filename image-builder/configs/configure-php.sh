@@ -176,9 +176,16 @@ fi
 systemctl restart postfix
 
 # ============================================================
-# Start services
+# (Re)start services so they pick up the marker block we just wrote
 # ============================================================
-systemctl start "php$PHP_VER-fpm"
-echo "[configure-php] PHP-FPM $PHP_VER started successfully"
-systemctl start nginx
-echo "[configure-php] Health check NGINX started on port 9100"
+# `restart` (not `start`) is critical: both services are systemd-enabled
+# and were auto-started at boot BEFORE this script ran, against the
+# AMI-baked www.conf with no marker block. A plain `start` is a no-op
+# when the unit is already active, so workers would keep serving with
+# the (cleared) environment from boot and getenv('DRUPAL_DB_HOST') etc.
+# would return empty. `restart` forces master to re-read the file and
+# fork fresh workers with the injected env[].
+systemctl restart "php$PHP_VER-fpm"
+echo "[configure-php] PHP-FPM $PHP_VER restarted"
+systemctl restart nginx
+echo "[configure-php] Health check NGINX restarted on port 9100"
