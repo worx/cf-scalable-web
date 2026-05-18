@@ -42,16 +42,17 @@ prioritized by "would this bite again if we don't fix it."
     restarted — they work. Any new instance cycle (auto-scaling, instance
     refresh, ASG replacement) launches from old AMIs and re-breaks Drupal
     (empty env vars in workers → HTTP 400 "host name not valid").
-  - Sequence on deploy-host: `make deploy-image-builder` → `make build-ami-php74 / php83 / nginx` → wait ~15 min → `make update-ami-param` (x3) → `make deploy-compute` → instance refresh.
+  - Sequence: `make deploy-image-builder` → `make build-amis` (now waits) →
+    `make update-ami-params` → `make deploy-compute` → instance refresh.
+  - **In progress 2026-05-18: AMI bake running, deploy-image-builder done,
+    instance refresh still to do.**
 
-- [ ] **Fix install-drupal.sh psql heredoc password mangling**
-  - The CREATE USER heredoc is bash-double-quoted, so any `$` or backtick in
-    the password gets shell-expanded before reaching psql. cf-app-drupal's
-    tightened ExcludeCharacters (commit a8fba8d) prevents NEW passwords from
-    having those chars, but the bug is still latent — change a single character
-    in the exclusion set and it bites again.
-  - Fix: use `psql -c "ALTER USER … WITH PASSWORD '$pw';"` via a here-string
-    OR a single-quoted heredoc, OR pipe the password via stdin with `\password`.
+- [x] **Fix install-drupal.sh psql heredoc password mangling** ✅ commit a52e38a
+  - On investigation the heredoc was NOT actually vulnerable (bash variable
+    substitution is single-pass), but the modernized `psql -v` + `:'var'`
+    form is cleaner and the operational-ordering comment (install-drupal.sh
+    must be re-run after cf-app-drupal deploys) captures the actual root
+    cause of the 5-15 password mismatch.
 
 - [ ] **Deploy-host cutover to `/var/www` mount**
   - The use-env / single-mount commits (ee16258, ee319d5) are in git but the
@@ -60,41 +61,40 @@ prioritized by "would this bite again if we don't fix it."
     strip its fstab entry, run `sudo use-env sandbox`, verify, then
     `make deploy-app-drupal` to update the SSM install-path parameter.
 
+- [ ] **Deploy cf-app-drupal** (`make check-drift` surfaced this 2026-05-18)
+  - `cf-app-drupal.yaml` has committed-but-undeployed changes from 5-15
+    (the install-path SSM update). `make deploy-app-drupal ENV=sandbox`.
+  - Roll into the deploy-host cutover above since both touch the same area.
+
 ### P1 — Operational improvements (close the traps that bit us)
 
-- [ ] **`make check-drift`** — for each `cloudformation/cf-*.yaml`, compare
+- [x] **`make check-drift`** — for each `cloudformation/cf-*.yaml`, compare
   local mtime to the deployed stack's LastUpdatedTime; warn when local is
-  newer (means edits sit in git but haven't been deployed). The cf-iam
-  drift sat undeployed for 6 days, causing the "empty DB password" trap.
+  newer (means edits sit in git but haven't been deployed). ✅ commit d3ca66f.
+  Caught a real drift (cf-app-drupal) on first run.
 
-- [ ] **`make build-amis` should wait for pipelines to reach AVAILABLE.**
-  Right now it kicks off and returns immediately; chained `update-ami-param`
-  finds the previous (old) AVAILABLE AMI and writes that to SSM. We hit
-  this twice. Add a polling step at the end.
+- [x] **`make build-amis` waits for pipelines to reach AVAILABLE.** ✅ commit
+  d47a0d4. Split into `build-amis-async` (old fire-and-forget behavior, opt-in)
+  and `build-amis` (= async + new `wait-amis` waiter).
 
-- [ ] **`make update-ami-params`** (plural wrapper) — calls
-  `update-ami-param` for nginx/php74/php83. The current per-pipeline API is
-  easy to forget; I also accidentally invented a `deploy-ami-params` name
-  that didn't exist and watched it silently fail.
+- [x] **`make update-ami-params`** (plural) ✅ commit d47a0d4. Also includes
+  `deploy-ami-params` as an alias for muscle memory.
 
-- [ ] **`make restart-php-fpm ENV=<env>`** — SSM-exec fleet-wide restart.
-  Needed any time settings.php changes on FSx (OPcache otherwise serves
-  stale code) or any time env vars in www.conf change without an instance
-  cycle.
+- [x] **`make restart-php-fpm ENV=<env>`** ✅ commit c813613.
 
-- [ ] **`make clear-drupal-cache ENV=<env>`** — wipe both layers:
-  `rm /var/www/drupal/web/sites/default/files/php/*` on FSx AND TRUNCATE
-  the cache_* tables in PostgreSQL. The DB-cached compiled service
-  container was what blocked us from resolving the app_root mismatch.
+- [x] **`make clear-drupal-cache ENV=<env>`** ✅ commit c813613. Operates via
+  SSM through the deploy-host; refuses to run if active env doesn't match
+  the requested env.
 
-- [ ] **OPcache reset story.** Either: configure-php.sh writes a hook that
-  invalidates OPcache on settings.php mtime change, OR document loudly
-  that "edit settings.php → `make restart-php-fpm`" is mandatory.
+- [x] **OPcache reset story.** ✅ Resolved as "documented" rather than coded:
+  `make restart-php-fpm` is the canonical answer when settings.php on FSx
+  changes. Will be noted prominently in docs/OPERATIONS.md.
 
 ### P2 — Documentation polish
 
 - [ ] **docs/OPERATIONS.md** — runbooks for use-env, restart-php-fpm,
   clear-drupal-cache, AMI rebuild sequence, common failure modes.
+  **In progress 2026-05-18: first cut started.**
 
 - [ ] **docs/master.md + `make build-master`** — design captured below.
   See "Future Enhancements" for the full concept.
