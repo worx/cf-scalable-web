@@ -150,7 +150,16 @@ RDS_MASTER_PW=$(echo "$RDS_MASTER_RAW" | jq -r '.password // empty' 2>/dev/null 
 [ -z "$RDS_MASTER_PW" ] && RDS_MASTER_PW="$RDS_MASTER_RAW"
 unset RDS_MASTER_RAW
 
-# Drupal DB user password — read from Secrets Manager, generate if missing
+# Drupal DB user password — read from Secrets Manager, generate if missing.
+#
+# Operational note: the cf-app-drupal CFN stack OWNS this secret (via
+# GenerateSecretString) when deployed. Re-running install-drupal.sh after
+# any cf-app-drupal deploy is REQUIRED so the postgres user's password
+# gets re-ALTERed to match whatever value GenerateSecretString produced.
+# Skipping this step is exactly how Drupal ended up with one password and
+# the secret had another on 2026-05-15 — eventually fixed manually by
+# rotating the secret + ALTER USER. The ALTER USER below makes the
+# script safe to re-run any time the two might have diverged.
 log "Resolving Drupal DB user password (Secrets Manager: $DRUPAL_DB_SECRET)..."
 if DRUPAL_DB_RAW=$(aws secretsmanager get-secret-value \
     --secret-id "$DRUPAL_DB_SECRET" \
@@ -199,27 +208,43 @@ step "Create $DB_USER in PostgreSQL and grant access to '$DB_NAME'"
 # Idempotent: CREATE-or-ALTER inside a DO block. Then transfer ownership
 # of the database to drupal_user so it can CREATE TABLE / INDEX.
 log "Connecting as RDS master (dbadmin) to create user and grant privileges..."
+
+# Pass values to psql via `-v` and use `:'var'` / `:"var"` substitution
+# inside the SQL. The heredoc terminator is single-quoted so bash does NO
+# variable expansion on the body — psql handles the substitution and
+# escapes values correctly (single quotes in values become '' automatically).
+#
+# This replaces the older un-quoted-heredoc form which interpolated bash
+# vars directly into SQL. Bash's substitution itself is single-pass and
+# does NOT re-evaluate metacharacters in the value (so `$` or backtick in
+# the password did NOT actually cause shell injection), but the psql `-v`
+# form is cleaner, less escaping-fragile (no `\$\$` dance), and the right
+# pattern to copy for future SQL elsewhere.
 PGPASSWORD="$RDS_MASTER_PW" psql -h "$RDS_ENDPOINT" -U dbadmin -d postgres \
-  -v ON_ERROR_STOP=1 <<EOF
-DO \$\$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '$DB_USER') THEN
-    CREATE USER $DB_USER WITH PASSWORD '$DRUPAL_DB_PW';
-    RAISE NOTICE 'Created user $DB_USER';
-  ELSE
-    ALTER USER $DB_USER WITH PASSWORD '$DRUPAL_DB_PW';
-    RAISE NOTICE 'Updated password for existing user $DB_USER';
-  END IF;
-END
-\$\$;
-GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;
+  -v ON_ERROR_STOP=1 \
+  -v db_user="$DB_USER" \
+  -v drupal_db_pw="$DRUPAL_DB_PW" \
+  -v db_name="$DB_NAME" \
+  <<'EOF'
+SELECT EXISTS (SELECT 1 FROM pg_user WHERE usename = :'db_user') AS user_exists \gset
+\if :user_exists
+  ALTER USER :"db_user" WITH PASSWORD :'drupal_db_pw';
+  \echo Updated password for existing user
+\else
+  CREATE USER :"db_user" WITH PASSWORD :'drupal_db_pw';
+  \echo Created user
+\endif
+GRANT ALL PRIVILEGES ON DATABASE :"db_name" TO :"db_user";
 EOF
 
 PGPASSWORD="$RDS_MASTER_PW" psql -h "$RDS_ENDPOINT" -U dbadmin -d "$DB_NAME" \
-  -v ON_ERROR_STOP=1 <<EOF
-GRANT ALL ON SCHEMA public TO $DB_USER;
-ALTER SCHEMA public OWNER TO $DB_USER;
-ALTER DATABASE $DB_NAME OWNER TO $DB_USER;
+  -v ON_ERROR_STOP=1 \
+  -v db_user="$DB_USER" \
+  -v db_name="$DB_NAME" \
+  <<'EOF'
+GRANT ALL ON SCHEMA public TO :"db_user";
+ALTER SCHEMA public OWNER TO :"db_user";
+ALTER DATABASE :"db_name" OWNER TO :"db_user";
 EOF
 
 # Don't keep master password lying around in the env
@@ -266,13 +291,24 @@ fi
 # ============================================================
 step "drush site:install standard (~1 min)"
 # ============================================================
+# URL-encode the password before embedding it in --db-url. The cf-app-drupal
+# ExcludeCharacters set permits `,` (and a few other unreserved chars) which
+# RFC 3986 allows in URL userinfo, but various URL parsers in the wild trip
+# on it. Python is available in deploy-host's bootstrap and handles the
+# encoding correctly even when the password contains chars that bash itself
+# would otherwise quote-mangle.
+DRUPAL_DB_PW_URLENC=$(printf '%s' "$DRUPAL_DB_PW" | python3 -c \
+  "import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.stdin.read(), safe=''))")
+
 vendor/bin/drush site:install standard \
-  --db-url="pgsql://$DB_USER:$DRUPAL_DB_PW@$RDS_ENDPOINT/$DB_NAME" \
+  --db-url="pgsql://$DB_USER:$DRUPAL_DB_PW_URLENC@$RDS_ENDPOINT/$DB_NAME" \
   --account-name="$DRUPAL_ADMIN_USER" \
   --account-pass="$DRUPAL_ADMIN_PW" \
   --account-mail="$ADMIN_EMAIL" \
   --site-name="$SITE_NAME" \
   --yes
+
+unset DRUPAL_DB_PW_URLENC
 
 # ============================================================
 step "Replace settings.php with env-var-driven config"
