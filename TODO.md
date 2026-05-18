@@ -36,16 +36,15 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P0 — Regressions waiting to happen (do soonest)
 
-- [ ] **Bake-and-roll PHP/nginx AMIs to RecipeVersion 1.0.10** (commit 3c70041)
-  - The `start` → `restart` fix in configure-php.sh / configure-nginx.sh is in
-    git + S3 but NOT in any deployed AMI. Live boxes have been manually
-    restarted — they work. Any new instance cycle (auto-scaling, instance
-    refresh, ASG replacement) launches from old AMIs and re-breaks Drupal
-    (empty env vars in workers → HTTP 400 "host name not valid").
-  - Sequence: `make deploy-image-builder` → `make build-amis` (now waits) →
-    `make update-ami-params` → `make deploy-compute` → instance refresh.
-  - **In progress 2026-05-18: AMI bake running, deploy-image-builder done,
-    instance refresh still to do.**
+- [x] **Bake-and-roll PHP/nginx AMIs to RecipeVersion 1.0.10** ✅ 2026-05-18
+  - The `start` → `restart` fix in configure-php.sh / configure-nginx.sh
+    (commit 3c70041) is now baked into all 3 AMIs and rolled to every
+    nginx + PHP box via instance refresh. Fleet AMIs:
+    - nginx = ami-0cc21131caf1c4dac
+    - php74 = ami-0ff52af1521570516
+    - php83 = ami-0cf37c7c2f6c7d843
+  - Smoke test post-rollout: `curl ALB/` → HTTP 200.
+  - Future auto-scaling events will launch from these fixed AMIs.
 
 - [x] **Fix install-drupal.sh psql heredoc password mangling** ✅ commit a52e38a
   - On investigation the heredoc was NOT actually vulnerable (bash variable
