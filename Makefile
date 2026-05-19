@@ -346,39 +346,50 @@ help:  ## Show this help message
 # Validation & Info Targets
 # -----------------------------------------------------------------------------
 
-validate:  ## Validate all CloudFormation templates
-	@echo "$(BLUE)Validating CloudFormation templates...$(NC)"
-	@for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
+validate:  ## Validate all CloudFormation templates + parameter files
+	@# Compound deploy targets (deploy-all, deploy-allX) pass VALIDATED=1
+	@# after validating once at the top, so sub-targets don't re-validate
+	@# all 11 templates + 7 param files on every invocation (was eating
+	@# 100+ lines of screen during a deploy-allX run).
+	@#
+	@# The entire body is one shell invocation (with continuations) so the
+	@# early-exit `exit 0` actually terminates the recipe, not just the
+	@# first @-line's sub-shell.
+	@if [ "$$VALIDATED" = "1" ]; then \
+		exit 0; \
+	fi; \
+	printf "$(BLUE)Validating CFN templates + param files... $(NC)"; \
+	TMPFAIL=$$(mktemp); TPL_COUNT=0; PARAM_COUNT=0; \
+	for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
-			echo "  Validating $$template..."; \
-			cfn-lint -f parseable "$$template"; \
+			TPL_COUNT=$$((TPL_COUNT + 1)); \
+			OUTPUT=$$(cfn-lint -f parseable "$$template" 2>&1); \
 			LINT_EXIT=$$?; \
 			if [ $$LINT_EXIT -eq 2 ] || [ $$LINT_EXIT -eq 6 ]; then \
-				exit 1; \
+				echo "$(RED)✗ $$template$(NC)" >> $$TMPFAIL; \
+				echo "$$OUTPUT" >> $$TMPFAIL; \
 			fi; \
 		fi; \
-	done
-	@if [ -f $(PARAM_FILE) ]; then \
-		echo "  Validating $(PARAM_FILE)..."; \
-		jq empty $(PARAM_FILE) || exit 1; \
-	else \
-		echo "$(YELLOW)  Warning: Parameter file not found: $(PARAM_FILE)$(NC)"; \
-	fi
-	@if [ -f $(DEPLOY_HOST_PARAMS) ]; then \
-		echo "  Validating $(DEPLOY_HOST_PARAMS)..."; \
-		jq empty $(DEPLOY_HOST_PARAMS) || exit 1; \
-	fi
-	@if [ -f $(IMAGE_BUILDER_PARAMS) ]; then \
-		echo "  Validating $(IMAGE_BUILDER_PARAMS)..."; \
-		jq empty $(IMAGE_BUILDER_PARAMS) || exit 1; \
-	fi
-	@for params in $(COMPUTE_ALB_PARAMS) $(COMPUTE_NLB_PARAMS) $(COMPUTE_NGINX_PARAMS) $(COMPUTE_PHP_PARAMS); do \
+	done; \
+	for params in $(PARAM_FILE) $(DEPLOY_HOST_PARAMS) $(IMAGE_BUILDER_PARAMS) $(COMPUTE_ALB_PARAMS) $(COMPUTE_NLB_PARAMS) $(COMPUTE_NGINX_PARAMS) $(COMPUTE_PHP_PARAMS); do \
 		if [ -f "$$params" ]; then \
-			echo "  Validating $$params..."; \
-			jq empty "$$params" || exit 1; \
+			PARAM_COUNT=$$((PARAM_COUNT + 1)); \
+			JQ_OUT=$$(jq empty "$$params" 2>&1); \
+			JQ_EXIT=$$?; \
+			if [ $$JQ_EXIT -ne 0 ]; then \
+				echo "$(RED)✗ $$params$(NC)" >> $$TMPFAIL; \
+				echo "$$JQ_OUT" >> $$TMPFAIL; \
+			fi; \
 		fi; \
-	done
-	@echo "$(GREEN)✓ All templates valid$(NC)"
+	done; \
+	if [ -s "$$TMPFAIL" ]; then \
+		echo ""; \
+		cat "$$TMPFAIL"; \
+		rm -f "$$TMPFAIL"; \
+		exit 1; \
+	fi; \
+	rm -f "$$TMPFAIL"; \
+	echo "$(GREEN)✓ $$TPL_COUNT templates + $$PARAM_COUNT param files$(NC)"
 
 show-params:  ## Show parameters for current environment
 	@echo "$(BLUE)Parameters for ENV=$(ENV)$(NC)"
@@ -490,18 +501,19 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  Full Deployment: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
+	@$(MAKE) validate ENV=$(ENV)
 	@echo ""
 	@echo "$(CYAN)Phase 1: Foundation$(NC)"
-	@$(MAKE) deploy-vpc ENV=$(ENV)
-	@$(MAKE) deploy-peering ENV=$(ENV) || \
+	@$(MAKE) deploy-vpc ENV=$(ENV) VALIDATED=1
+	@$(MAKE) deploy-peering ENV=$(ENV) VALIDATED=1 || \
 		echo "$(YELLOW)  Note: deploy-peering skipped (deploy-host stack may not exist yet)$(NC)"
-	@$(MAKE) deploy-iam ENV=$(ENV)
-	@$(MAKE) deploy-storage ENV=$(ENV)
+	@$(MAKE) deploy-iam ENV=$(ENV) VALIDATED=1
+	@$(MAKE) deploy-storage ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(CYAN)Phase 2: Image Builder + AMI Builds$(NC)"
-	@$(MAKE) deploy-image-builder ENV=$(ENV)
-	@$(MAKE) upload-build-configs ENV=$(ENV)
-	@$(MAKE) build-amis ENV=$(ENV)
+	@$(MAKE) deploy-image-builder ENV=$(ENV) VALIDATED=1
+	@$(MAKE) upload-build-configs ENV=$(ENV) VALIDATED=1
+	@$(MAKE) build-amis ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(BLUE)Waiting for all AMI builds to complete (this takes 20-30 minutes)...$(NC)"
 	@echo "$(BLUE)All 3 builds run in parallel — polling all simultaneously.$(NC)"
@@ -581,12 +593,12 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	done
 	@echo ""
 	@echo "$(CYAN)Phase 3: Update AMI Parameters$(NC)"
-	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=nginx
-	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74
-	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php83
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=nginx VALIDATED=1
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74 VALIDATED=1
+	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php83 VALIDATED=1
 	@echo ""
 	@echo "$(CYAN)Phase 4: Compute Layer$(NC)"
-	@$(MAKE) deploy-compute ENV=$(ENV)
+	@$(MAKE) deploy-compute ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ Full deployment complete: ENV=$(ENV)$(NC)"
@@ -602,9 +614,10 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~75 
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  Full Deployment + Drupal: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
+	@$(MAKE) validate ENV=$(ENV)
 	@echo ""
 	@echo "$(CYAN)Phase 1: Standard deploy-all (VPC through compute)$(NC)"
-	@$(MAKE) deploy-all ENV=$(ENV)
+	@$(MAKE) deploy-all ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(CYAN)Phase 5: Data layer (RDS + ElastiCache, in parallel)$(NC)"
 	@# Both stacks are independent — kick off in parallel for speed.
@@ -612,9 +625,9 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~75 
 	@# after both finish, so user sees both results regardless of which
 	@# one had problems.
 	@TMPDB=$$(mktemp); TMPCACHE=$$(mktemp); \
-	$(MAKE) deploy-database ENV=$(ENV) > "$$TMPDB" 2>&1 & \
+	$(MAKE) deploy-database ENV=$(ENV) VALIDATED=1 > "$$TMPDB" 2>&1 & \
 	DB_PID=$$!; \
-	$(MAKE) deploy-cache ENV=$(ENV) > "$$TMPCACHE" 2>&1 & \
+	$(MAKE) deploy-cache ENV=$(ENV) VALIDATED=1 > "$$TMPCACHE" 2>&1 & \
 	CACHE_PID=$$!; \
 	echo "$(CYAN)  database deploy started (pid $$DB_PID, log $$TMPDB)$(NC)"; \
 	echo "$(CYAN)  cache deploy started    (pid $$CACHE_PID, log $$TMPCACHE)$(NC)"; \
@@ -630,13 +643,13 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~75 
 	fi
 	@echo ""
 	@echo "$(CYAN)Phase 6: Drupal app stack (Secrets Manager + SSM params)$(NC)"
-	@$(MAKE) deploy-app-drupal ENV=$(ENV)
+	@$(MAKE) deploy-app-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(CYAN)Phase 7: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
-	@$(MAKE) install-drupal-remote ENV=$(ENV)
+	@$(MAKE) install-drupal-remote ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(CYAN)Phase 8: End-to-end smoke test (curl ALB)$(NC)"
-	@$(MAKE) smoke-test-drupal ENV=$(ENV)
+	@$(MAKE) smoke-test-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ Full deployment + Drupal complete: ENV=$(ENV)$(NC)"
