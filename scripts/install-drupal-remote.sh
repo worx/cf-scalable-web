@@ -8,19 +8,25 @@
 # infrastructure all the way to a working Drupal in one command.
 #
 # What this does on the deploy-host (via a single SSM dispatch):
-#   1. Pull the latest committed code (so the deploy-host runs the same
-#      bootstrap/install scripts that match the templates just deployed)
-#   2. Self-heal: if `use-env` doesn't exist yet (pre-cutover deploy-host),
-#      re-run bootstrap.sh to install it
-#   3. Clean up any stale pre-cutover FSx mount at /var/www/<env>
-#   4. refresh-env-config <env>   (re-resolve FSx DNS, RDS endpoint, etc.)
-#   5. use-env <env>              (mount the env's FSx at /var/www)
-#   6. make install-drupal ENV=<env>
+#   1. Wait for /etc/worxco/deploy-host-marker (bootstrap.sh finish marker
+#      written by cf-deploy-host's UserData on first boot)
+#   2. Pull the latest committed code (in case the deploy-host was created
+#      with an older commit than the script we're running here)
+#   3. refresh-env-config <env>   (re-resolve FSx DNS, RDS endpoint, etc.)
+#   4. use-env <env>              (mount the env's FSx at /var/www)
+#   5. make install-drupal ENV=<env>
 #
 # Why a remote dispatch: install-drupal.sh asserts `/etc/worxco/deploy-host-marker`
 # exists. The script can ONLY run on the deploy-host (it needs FSx mounted
 # and the deploy-host's tooling). This wrapper sends the work there and
 # streams output back.
+#
+# Why we wait for the marker instead of self-healing: bootstrap.sh is a
+# 15-30 min apt-update + composer install + extension install. Running it
+# inside our SSM dispatch couples two unrelated lifecycles and blows
+# through SSM's executionTimeout. Bootstrap is the responsibility of
+# cf-deploy-host's UserData (one-time, at instance boot). This wrapper
+# just waits for the marker that UserData writes when done.
 #
 # Usage: scripts/install-drupal-remote.sh <env>
 
@@ -51,39 +57,40 @@ set -euo pipefail
 ENV="$ENV"
 REPO_DIR="/home/ubuntu/projects/cf-scalable-web"
 
-cd "\$REPO_DIR"
+echo "=== 1. Wait for deploy-host bootstrap to complete ==="
+# cf-deploy-host's UserData runs scripts/deploy-host/bootstrap.sh on first
+# boot. It writes /etc/worxco/deploy-host-marker when done. We wait up to
+# 25 min (apt + composer + extensions can be slow on the t-class instance).
+for i in \$(seq 1 50); do
+  if [ -f /etc/worxco/deploy-host-marker ] && command -v use-env >/dev/null 2>&1; then
+    echo "  bootstrap complete (marker present, use-env in PATH)"
+    break
+  fi
+  echo "  still bootstrapping... (\$(date '+%H:%M:%S'), attempt \$i/50)"
+  sleep 30
+done
+if [ ! -f /etc/worxco/deploy-host-marker ]; then
+  echo "ERROR: /etc/worxco/deploy-host-marker not found after 25 min." >&2
+  echo "       Check /var/log/cloud-init-output.log or rerun bootstrap manually." >&2
+  exit 1
+fi
 
-echo "=== 1. Sync deploy-host to latest committed code ==="
+echo "=== 2. Sync to latest committed code ==="
+cd "\$REPO_DIR"
+# safe.directory: SSM commands run as root; repo is owned by ubuntu. Add a
+# system-level allowlist so git tooling invoked from either user works.
+git config --system --add safe.directory "\$REPO_DIR" 2>/dev/null || true
 sudo -u ubuntu git fetch origin
 sudo -u ubuntu git reset --hard origin/main
-echo "  HEAD: \$(git log -1 --format='%h %s')"
+echo "  HEAD: \$(sudo -u ubuntu git log -1 --format='%h %s')"
 
-echo "=== 2. Self-heal: install use-env if missing (pre-cutover host) ==="
-if ! command -v use-env >/dev/null 2>&1; then
-  echo "  use-env not found — re-running bootstrap.sh"
-  sudo bash scripts/deploy-host/bootstrap.sh
-else
-  echo "  use-env present — skipping bootstrap"
-fi
-
-echo "=== 3. Clear any stale pre-cutover mount at /var/www/\$ENV ==="
-if mountpoint -q "/var/www/\$ENV" 2>/dev/null; then
-  echo "  unmounting stale /var/www/\$ENV"
-  sudo umount -lf "/var/www/\$ENV" || true
-fi
-# Strip pre-cutover fstab entry if present
-if grep -q "/var/www/\$ENV " /etc/fstab 2>/dev/null; then
-  echo "  removing pre-cutover fstab entry for /var/www/\$ENV"
-  sudo sed -i "\\|/var/www/\$ENV |d" /etc/fstab
-fi
-
-echo "=== 4. Refresh env config (FSx DNS may have changed) ==="
+echo "=== 3. Refresh env config (resolve FSx DNS, RDS endpoint from SSM) ==="
 sudo refresh-env-config "\$ENV"
 
-echo "=== 5. Mount env's FSx at /var/www ==="
+echo "=== 4. Mount env's FSx at /var/www ==="
 sudo use-env "\$ENV"
 
-echo "=== 6. make install-drupal ENV=\$ENV ==="
+echo "=== 5. make install-drupal ENV=\$ENV ==="
 cd "\$REPO_DIR"
 if [ -f "/var/www/drupal/.installed" ]; then
   echo "  Drupal already installed on this FSx — skipping install (idempotent)."
@@ -98,21 +105,35 @@ EOF_INNER
 
 B64=$(echo "$INNER_SCRIPT" | base64 | tr -d '\n')
 
+# executionTimeout: use SSM's default 3600s (1 hour). Explicitly setting a
+# lower value previously bit us — bootstrap+install can exceed 30 min on a
+# cold deploy-host.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$DEPLOY_ID" \
   --document-name "AWS-RunShellScript" \
-  --parameters "{\"commands\":[\"echo $B64 | base64 -d > /tmp/install-drupal-remote.sh && bash /tmp/install-drupal-remote.sh\"],\"executionTimeout\":[\"1800\"]}" \
+  --parameters "{\"commands\":[\"echo $B64 | base64 -d > /tmp/install-drupal-remote.sh && bash /tmp/install-drupal-remote.sh\"]}" \
   --query 'Command.CommandId' --output text)
 echo "CommandId: $CMD_ID"
 
-echo -n "Waiting for install (up to ~10 min)"
-# Poll every 10s, up to ~10 min. Install typically takes 3-5 min.
-for _ in $(seq 1 60); do
+# Local poll: up to 45 min wall clock (90 * 30s). Long enough to cover the
+# 25-min bootstrap wait + 5-10 min install. If we hit the cap, the SSM
+# command is still running — we don't claim failure, we tell the operator
+# how to check.
+echo "Polling SSM command status (every 30s, up to ~45 min)..."
+FINAL_STATUS=""
+for i in $(seq 1 90); do
   STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" \
     --query "CommandInvocations[0].Status" --output text 2>/dev/null || echo "Pending")
   case "$STATUS" in
-    Pending|InProgress) echo -n "."; sleep 10 ;;
-    *) echo " $STATUS."; break ;;
+    Pending|InProgress)
+      [ $((i % 4)) -eq 0 ] && echo "  [$(date '+%H:%M:%S')] still $STATUS (attempt $i/90)"
+      sleep 30
+      ;;
+    *)
+      FINAL_STATUS="$STATUS"
+      echo "  [$(date '+%H:%M:%S')] terminal status: $STATUS"
+      break
+      ;;
   esac
 done
 
@@ -121,11 +142,16 @@ echo "--- Deploy-host output ---"
 aws ssm list-command-invocations --command-id "$CMD_ID" --details \
   --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
 
-STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" \
-  --query "CommandInvocations[0].Status" --output text 2>/dev/null)
-if [ "$STATUS" != "Success" ]; then
+if [ -z "$FINAL_STATUS" ]; then
   echo ""
-  echo "ERROR: deploy-host command finished with status: $STATUS" >&2
+  echo "WARN: 45-min local poll exhausted but SSM command is still InProgress." >&2
+  echo "      Not claiming failure. Check with:" >&2
+  echo "      aws ssm list-command-invocations --command-id $CMD_ID --details" >&2
+  exit 2
+fi
+if [ "$FINAL_STATUS" != "Success" ]; then
+  echo ""
+  echo "ERROR: deploy-host command finished with status: $FINAL_STATUS" >&2
   exit 1
 fi
 echo ""
