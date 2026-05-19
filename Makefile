@@ -2078,6 +2078,9 @@ check-drift:  ## Warn when local CFN templates are newer than deployed stacks
 restart-php-fpm:  ## SSM-restart php*-fpm on every PHP box (busts OPcache + reloads www.conf env[])
 	@scripts/restart-php-fpm.sh $(ENV)
 
+reload-nginx:  ## SSM-reload nginx on every nginx box (graceful, picks up new vhost configs from FSx)
+	@scripts/reload-nginx.sh $(ENV)
+
 clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
 	@scripts/clear-drupal-cache.sh $(ENV)
 

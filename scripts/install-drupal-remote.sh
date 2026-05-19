@@ -156,3 +156,11 @@ if [ "$FINAL_STATUS" != "Success" ]; then
 fi
 echo ""
 echo "✓ install-drupal-remote: Drupal installed (or already-present) for env=$ENV"
+
+# Reload nginx on every nginx instance so the new Drupal vhost (written
+# by install-drupal.sh to /var/www/nginx/sites-enabled/drupal.conf) gets
+# picked up. nginx hosts see the file immediately via NFS mount, but the
+# running nginx process only re-reads its config on reload/restart.
+echo ""
+echo "--- Reloading nginx fleet to pick up new vhost ---"
+"$(dirname "$0")/reload-nginx.sh" "$ENV"

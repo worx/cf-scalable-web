@@ -396,6 +396,74 @@ chmod 444 "$SETTINGS_FILE"
 chmod 555 "$INSTALL_DIR/web/sites/default"
 
 # ============================================================
+step "Publish Drupal nginx vhost to FSx (read by all nginx instances)"
+# ============================================================
+# nginx hosts mount $FSX:/fsx/nginx at /etc/nginx/shared and include
+# /etc/nginx/shared/sites-enabled/*.conf. From the deploy-host's
+# perspective (FSx mounted at /var/www), that path is
+# /var/www/nginx/sites-enabled/. Writing the vhost here makes it
+# visible to every nginx instance immediately via NFS; a separate
+# `make reload-nginx ENV=<env>` SSM-reloads the running workers.
+NGINX_VHOST_DIR="/var/www/nginx/sites-enabled"
+sudo mkdir -p "$NGINX_VHOST_DIR"
+sudo chmod 755 /var/www/nginx "$NGINX_VHOST_DIR"
+
+sudo tee "$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
+# Drupal vhost — managed by scripts/deploy-host/install-drupal.sh
+# Path on FSx:    /fsx/nginx/sites-enabled/drupal.conf
+# Path on nginx:  /etc/nginx/shared/sites-enabled/drupal.conf
+# Reload after edit: make reload-nginx ENV=$ENV
+
+server {
+  listen 80;
+  server_name $SITE_NAME;
+  root $INSTALL_DIR/web;
+  index index.php;
+
+  access_log /var/log/nginx/drupal_access.log main;
+  error_log  /var/log/nginx/drupal_error.log  warn;
+
+  # Drupal: try static file, fall back to index.php
+  location / {
+    try_files \$uri /index.php?\$query_string;
+  }
+
+  # PHP via FastCGI to PHP 8.3 upstream (defined in /etc/nginx/conf.d/upstream-php.conf)
+  location ~ '\\.php\$|^/update.php' {
+    fastcgi_split_path_info ^(.+?\\.php)(|/.*)\$;
+    try_files \$fastcgi_script_name =404;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    fastcgi_param PATH_INFO       \$fastcgi_path_info;
+    fastcgi_param HTTP_PROXY      "";
+    fastcgi_pass  php83;
+    fastcgi_intercept_errors on;
+    fastcgi_request_buffering off;
+    fastcgi_read_timeout 60s;
+  }
+
+  # Drupal security: block PHP under dotted paths and private files
+  location ~ /\\..*/.*\\.php\$    { return 403; }
+  location ~ ^/sites/.*/private/ { return 403; }
+  location ~ /\\.(?!well-known)  { deny all; }
+
+  # Cache-friendly paths
+  location ~ ^/sites/.*/files/(css|js)/ {
+    expires max;
+    log_not_found off;
+  }
+  location ~ ^/sites/.*/files/styles/ {
+    try_files \$uri @rewrite;
+  }
+  location @rewrite {
+    rewrite ^ /index.php;
+  }
+}
+NGINX_VHOST_EOF
+sudo chmod 644 "$NGINX_VHOST_DIR/drupal.conf"
+log "  wrote $NGINX_VHOST_DIR/drupal.conf"
+
+# ============================================================
 step "Verify install via drush (with env vars set so settings.php works)"
 # ============================================================
 export ENVIRONMENT_NAME="$ENV"
