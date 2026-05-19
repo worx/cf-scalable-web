@@ -238,7 +238,7 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
 	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
-	@echo "  make deploy-allX              Same + database + cache (set it and forget it, ~65 min)"
+	@echo "  make deploy-allX              Same + data layer + Drupal install + smoke (~75 min)"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
 	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
@@ -254,10 +254,12 @@ help:  ## Show this help message
 	@echo "  make destroy-app-drupal ENV=...   Delete the stack (CONFIRMED=yes to skip prompt)"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
-	@echo "  make install-drupal ENV=...   Install Drupal 11 against env's RDS+FSx"
-	@echo "  make verify-drupal ENV=...    Health check (live env-var-driven settings.php)"
-	@echo "  make remove-drupal ENV=...    Drop Drupal tables and wipe FSx files"
-	@echo "  make reinstall-drupal ENV=... Wipe and reinstall against env"
+	@echo "  make install-drupal ENV=...        Install Drupal 11 against env's RDS+FSx (on deploy-host)"
+	@echo "  make install-drupal-remote ENV=... SSM-dispatch install-drupal to deploy-host (from local)"
+	@echo "  make smoke-test-drupal ENV=...     Curl the ALB and assert HTTP 200"
+	@echo "  make verify-drupal ENV=...         Health check (live env-var-driven settings.php)"
+	@echo "  make remove-drupal ENV=...         Drop Drupal tables and wipe FSx files"
+	@echo "  make reinstall-drupal ENV=...      Wipe and reinstall against env"
 	@echo ""
 	@echo "$(YELLOW)Verification:$(NC)"
 	@echo "  make verify-all               Verify all stacks"
@@ -596,9 +598,9 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo ""
 	@echo "  make deploy-allX ENV=$(ENV)        # everything above + database + cache"
 
-deploy-allX:  ## Deploy ALL including database and cache (~65 min) — set it and forget it
+deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~75 min) — set it and forget it
 	@echo "$(BLUE)========================================$(NC)"
-	@echo "$(BLUE)  Full Deployment + Data Layer: ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)  Full Deployment + Drupal: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
 	@echo "$(CYAN)Phase 1: Standard deploy-all (VPC through compute)$(NC)"
@@ -627,15 +629,24 @@ deploy-allX:  ## Deploy ALL including database and cache (~65 min) — set it an
 		exit 1; \
 	fi
 	@echo ""
+	@echo "$(CYAN)Phase 6: Drupal app stack (Secrets Manager + SSM params)$(NC)"
+	@$(MAKE) deploy-app-drupal ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Phase 7: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
+	@$(MAKE) install-drupal-remote ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Phase 8: End-to-end smoke test (curl ALB)$(NC)"
+	@$(MAKE) smoke-test-drupal ENV=$(ENV)
+	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
-	@echo "$(GREEN)  ✓ Full deployment + data layer complete: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)  ✓ Full deployment + Drupal complete: ENV=$(ENV)$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
 	@echo ""
 	@if command -v refresh-env-config >/dev/null 2>&1; then \
 		echo "$(CYAN)Refreshing /etc/worxco/envs/$(ENV) and /etc/hosts FSx entry...$(NC)"; \
 		sudo refresh-env-config $(ENV) || true; \
 	else \
-		echo "$(YELLOW)Note: run on the deploy host: sudo refresh-env-config $(ENV)$(NC)"; \
+		echo "$(YELLOW)Note: local refresh-env-config skipped (only available on deploy-host).$(NC)"; \
 	fi
 
 # -----------------------------------------------------------------------------
@@ -2127,6 +2138,38 @@ restart-php-fpm:  ## SSM-restart php*-fpm on every PHP box (busts OPcache + relo
 
 clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
 	@scripts/clear-drupal-cache.sh $(ENV)
+
+install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the deploy-host
+	@scripts/install-drupal-remote.sh $(ENV)
+
+smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 200
+	@echo "$(BLUE)Smoke-testing Drupal at ENV=$(ENV)$(NC)"
+	@ALB_DNS=$$(aws cloudformation describe-stacks \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$ALB_DNS" ] || [ "$$ALB_DNS" = "None" ]; then \
+		echo "$(RED)ERROR: could not read ALBDnsName from $(COMPUTE_ALB_STACK)$(NC)"; \
+		exit 1; \
+	fi; \
+	SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null \
+		|| echo "drupal-$(ENV).test"); \
+	echo "  ALB:  $$ALB_DNS"; \
+	echo "  Host: $$SITE_NAME"; \
+	BODY=$$(mktemp); \
+	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" -H "Host: $$SITE_NAME" \
+		"http://$$ALB_DNS/" --max-time 20); \
+	if [ "$$HTTP" = "200" ]; then \
+		echo "  $(GREEN)✓ Drupal returned HTTP 200$(NC)"; \
+		head -3 "$$BODY"; \
+		rm -f "$$BODY"; \
+	else \
+		echo "  $(RED)✗ Drupal returned HTTP $$HTTP$(NC)"; \
+		head -10 "$$BODY"; \
+		rm -f "$$BODY"; \
+		exit 1; \
+	fi
 
 # -----------------------------------------------------------------------------
 # Secrets Management
