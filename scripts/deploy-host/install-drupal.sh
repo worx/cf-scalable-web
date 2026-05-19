@@ -26,6 +26,18 @@
 set -euo pipefail
 
 # ============================================================
+# Environment robustness for non-interactive invocation
+# ============================================================
+# When this script is invoked via SSM RunShellScript (e.g., from
+# scripts/install-drupal-remote.sh during make deploy-allX), it runs as
+# root in a minimal shell where HOME is unset and composer refuses to run
+# as root by default. Set both env vars before anything else so composer
+# create-project / require work whether invoked interactively (ubuntu user
+# with HOME=/home/ubuntu) or non-interactively (root, HOME missing).
+export HOME="${HOME:-/root}"
+export COMPOSER_ALLOW_SUPERUSER=1
+
+# ============================================================
 # Args + config
 # ============================================================
 ENV="${1:-}"
@@ -249,6 +261,19 @@ EOF
 
 # Don't keep master password lying around in the env
 unset RDS_MASTER_PW
+
+# ============================================================
+step "Wipe any partial-install state in $INSTALL_DIR (no marker present)"
+# ============================================================
+# If a previous run failed mid-flight (e.g., composer create-project hit
+# an env-var issue), $INSTALL_DIR has files but no .installed marker.
+# composer create-project refuses to create into a non-empty directory,
+# so we wipe it here. $PRIVATE_DIR's salt.txt is preserved intentionally
+# — the later "Generate (or reuse) hash_salt" step is idempotent.
+if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
+  log "$INSTALL_DIR has content but no marker — wiping for clean retry"
+  sudo rm -rf "$INSTALL_DIR"/* "$INSTALL_DIR"/.[!.]* "$INSTALL_DIR"/..?* 2>/dev/null || true
+fi
 
 # ============================================================
 step "Create directories on FSx (drupal/, drupal-private/, drupal-config/)"
