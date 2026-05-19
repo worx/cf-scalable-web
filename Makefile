@@ -2081,6 +2081,9 @@ restart-php-fpm:  ## SSM-restart php*-fpm on every PHP box (busts OPcache + relo
 reload-nginx:  ## SSM-reload nginx on every nginx box (graceful, picks up new vhost configs from FSx)
 	@scripts/reload-nginx.sh $(ENV)
 
+publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf to FSx (no full reinstall)
+	@scripts/publish-drupal-vhost.sh $(ENV)
+
 clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
 	@scripts/clear-drupal-cache.sh $(ENV)
 
