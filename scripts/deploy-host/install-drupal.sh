@@ -366,15 +366,16 @@ $databases['default']['default'] = [
   'prefix'   => '',
 ];
 
-// hash_salt is a per-environment file on FSx (persists across reinstalls
-// to avoid invalidating sessions when the codebase is reinstalled).
-$_salt = '/var/www/' . $_env . '/drupal-private/salt.txt';
+// Paths on FSx — no env prefix (post-cutover commit ee319d5; the env's
+// FSx is mounted at /var/www on every host that needs it, so the env name
+// isn't in the path).
+$_salt = '/var/www/drupal-private/salt.txt';
 $settings['hash_salt'] = is_readable($_salt) ? trim(file_get_contents($_salt)) : '';
 
 // Files
-$settings['file_public_path']    = 'sites/default/files';
-$settings['file_private_path']   = '/var/www/' . $_env . '/drupal-private';
-$settings['config_sync_directory'] = '/var/www/' . $_env . '/drupal-config';
+$settings['file_public_path']      = 'sites/default/files';
+$settings['file_private_path']     = '/var/www/drupal-private';
+$settings['config_sync_directory'] = '/var/www/drupal-config';
 
 // Trusted hosts. ALB DNS pattern is permissive for sandbox/staging;
 // production should tighten this to a specific ALB DNS or domain.
