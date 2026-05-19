@@ -316,24 +316,24 @@ fi
 # ============================================================
 step "drush site:install standard (~1 min)"
 # ============================================================
-# URL-encode the password before embedding it in --db-url. The cf-app-drupal
-# ExcludeCharacters set permits `,` (and a few other unreserved chars) which
-# RFC 3986 allows in URL userinfo, but various URL parsers in the wild trip
-# on it. Python is available in deploy-host's bootstrap and handles the
-# encoding correctly even when the password contains chars that bash itself
-# would otherwise quote-mangle.
-DRUPAL_DB_PW_URLENC=$(printf '%s' "$DRUPAL_DB_PW" | python3 -c \
-  "import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.stdin.read(), safe=''))")
-
+# Pass the password raw in --db-url. cf-app-drupal's GenerateSecretString
+# ExcludeCharacters already excludes every character that would actually
+# need URL encoding in userinfo per RFC 3986: @ : / ? # % [ ] etc. The
+# remaining permitted characters (alphanumeric + ' , . - _) are all valid
+# unreserved or sub-delim characters in URL userinfo and need no encoding.
+#
+# Diagnosed 2026-05-19: earlier "defense in depth" Python url-quote step
+# (commit a52e38a) was actually CAUSING the bug — Python's
+# urllib.parse.quote(safe='') aggressively percent-encodes everything
+# outside [A-Za-z0-9_.-~], and drush 13.7's URL parser doesn't decode all
+# of those back symmetrically. The fix is to not encode at all.
 vendor/bin/drush site:install standard \
-  --db-url="pgsql://$DB_USER:$DRUPAL_DB_PW_URLENC@$RDS_ENDPOINT/$DB_NAME" \
+  --db-url="pgsql://$DB_USER:$DRUPAL_DB_PW@$RDS_ENDPOINT/$DB_NAME" \
   --account-name="$DRUPAL_ADMIN_USER" \
   --account-pass="$DRUPAL_ADMIN_PW" \
   --account-mail="$ADMIN_EMAIL" \
   --site-name="$SITE_NAME" \
   --yes
-
-unset DRUPAL_DB_PW_URLENC
 
 # ============================================================
 step "Replace settings.php with env-var-driven config"
