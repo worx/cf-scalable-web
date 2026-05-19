@@ -258,6 +258,37 @@ ALB (cf-compute-alb.yaml)
          └→ PHP-FPM (cf-compute-php.yaml) ← registers with NLB target groups
 ```
 
+### deploy-allX Phase Ordering — Current Assumptions
+
+The `deploy-allX` Make target sequences the full lifecycle from a fresh
+account to a serving Drupal site. The current ordering bakes in
+**greenfield-build-order assumptions** that have shown fragility under
+recovery / partial-redeploy scenarios:
+
+| Phase | What runs | Assumption it bakes in |
+|---|---|---|
+| 1 | VPC, peering, IAM, storage (FSx) | FSx volume root `/fsx` is empty after creation; consumers create their own subdirs |
+| 2 | Image Builder, AMI builds (~20-30 min) | (no cross-phase assumption) |
+| 3 | SSM AMI params updated | (no cross-phase assumption) |
+| 4 | Compute (ALB, NLB, NGINX ASG, PHP-FPM ASG) | **NGINX mounts `/fsx/nginx` (must exist); PHP boot reads `/sandbox/rds/endpoint` from SSM (must exist)** |
+| 5 | RDS + ElastiCache (parallel) | (this is AFTER Phase 4 — bug) |
+| 6 | cf-app-drupal (secrets + SSM params) | RDS exists; site-name SSM param populated |
+| 7 | install-drupal-remote (deploy-host) | All stacks deployed; `/var/www` mountable; SSM params resolvable |
+| 8 | Smoke test | Phase 7 succeeded; nginx fleet has reloaded its config |
+
+**Known phase-ordering fragility (P0 in TODO.md):**
+- Phase 4 boots NGINX before `/fsx/nginx` exists. `configure-nginx.sh`
+  bails on `set -e` after the mount failure, leaving
+  `upstream-php.conf` un-generated. nginx serves only the `_` catch-all.
+- Phase 4 boots PHP before RDS exists in Phase 5. `configure-php.sh`
+  finds no `/sandbox/rds/endpoint` SSM param and skips the `env[]`
+  block. PHP-FPM workers start with no DRUPAL_* env vars.
+
+Both will be addressed in the upcoming **architectural review** (P0):
+parallelize data layer + FSx-layout init with the AMI build phase
+(which is the long pole), and only run compute once everything its boot
+scripts depend on is in place.
+
 ### Stack Details
 
 | Template | Purpose | Key Resources |
@@ -311,32 +342,67 @@ All compute instances enforce:
 
 ```mermaid
 graph TB
-    subgraph "FSx OpenZFS"
-        Root[Root Volume<br/>ZSTD Compression]
-        Sites["sites - Drupal and WordPress Sites"]
-        Configs["configs - NGINX and PHP Configs"]
-        SSL["ssl - TLS Certs, Phase 3 future"]
+    subgraph "FSx OpenZFS - Volume root /fsx"
+        FSxRoot["/fsx - root volume, ZSTD compression"]
+        DrupalCode["/fsx/drupal - Drupal codebase web/ + vendor/"]
+        DrupalPrivate["/fsx/drupal-private - salt.txt + private files"]
+        DrupalConfig["/fsx/drupal-config - config sync directory"]
+        NginxConfig["/fsx/nginx/sites-enabled - shared nginx vhost configs"]
     end
 
-    subgraph "NGINX Instances"
-        Nginx1[NGINX-1] -->|NFS Mount| Root
-        Nginx2[NGINX-2] -->|NFS Mount| Root
+    subgraph "deploy-host"
+        DH["use-env mounts /fsx at /var/www"]
     end
 
     subgraph "PHP-FPM Instances"
-        PHP1[PHP-1] -->|NFS Mount| Root
-        PHP2[PHP-2] -->|NFS Mount| Root
-        PHP3[PHP-3] -->|NFS Mount| Root
+        PHP["configure-php.sh mounts /fsx at /var/www"]
     end
 
-    Root --> Sites
-    Root --> Configs
-    Root --> SSL
+    subgraph "NGINX Instances"
+        NX1["configure-nginx.sh mounts /fsx at /var/www AND /fsx/nginx at /etc/nginx/shared"]
+    end
 
-    Backup[Daily Snapshots<br/>14-day Retention] -.->|Backup| Root
+    DH -->|/fsx| FSxRoot
+    PHP -->|/fsx| FSxRoot
+    NX1 -->|/fsx + /fsx/nginx| FSxRoot
+
+    FSxRoot --> DrupalCode
+    FSxRoot --> DrupalPrivate
+    FSxRoot --> DrupalConfig
+    FSxRoot --> NginxConfig
+
+    Backup["Daily Snapshots - 14-day retention"] -.->|Backup| FSxRoot
 ```
 
-**Mount Point:** `/var/www` on all instances
+**Mount layout (current, post commit ee319d5 cutover):**
+
+| Host class | Mount source | Mount point | What's there |
+|---|---|---|---|
+| deploy-host | `$FSX:/fsx` | `/var/www` | Full FSx tree (drupal/, drupal-private/, drupal-config/, nginx/) |
+| PHP-FPM | `$FSX:/fsx` | `/var/www` | Same — workers read `/var/www/drupal/web/` as docroot |
+| NGINX | `$FSX:/fsx` | `/var/www` | Same — for serving static files |
+| NGINX (additional) | `$FSX:/fsx/nginx` | `/etc/nginx/shared` | Sub-mount; nginx.conf includes `sites-enabled/*.conf` from here |
+
+**No env prefix in paths.** Drupal lives at `/var/www/drupal/web/`
+regardless of which environment's FSx is mounted. Switching environments
+on the deploy-host (`sudo use-env <env>`) unmounts and remounts a
+different FSx at the same `/var/www`, so the in-process Drupal install
+path is identical across environments.
+
+**Directory layout (created at install time):**
+- `/fsx/drupal/` — full Drupal 11 composer install (web/ is the docroot)
+- `/fsx/drupal-private/` — `salt.txt` (hash_salt, regenerated on reinstall) + private files
+- `/fsx/drupal-config/` — Drupal's config sync directory
+- `/fsx/nginx/sites-enabled/` — nginx vhost configs (currently just `drupal.conf`)
+
+**Who creates each directory:**
+- `/fsx/drupal/`, `/fsx/drupal-private/`, `/fsx/drupal-config/` — created by
+  `scripts/deploy-host/install-drupal.sh` (Phase 7 of `deploy-allX`)
+- `/fsx/nginx/sites-enabled/` — currently ALSO created by install-drupal.sh
+  (via the vhost-writing step). This is a known **build-order fragility**:
+  nginx instances boot in Phase 4 and try to mount `/fsx/nginx` BEFORE
+  install-drupal.sh runs in Phase 7. See P0 in `TODO.md` ("deploy-allX
+  phase ordering").
 
 **Features:**
 - **Shared storage:** Same files on all NGINX and PHP-FPM instances

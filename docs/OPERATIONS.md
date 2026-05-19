@@ -20,7 +20,11 @@ These all take `ENV=<env>` (default `sandbox`):
 | `make update-ami-params` | Write the latest AMI IDs to SSM for all 3 pipelines |
 | `make deploy-compute` | Roll updates into the compute stack (ASG launch templates) |
 | `make restart-php-fpm` | SSM-exec `systemctl restart php-fpm` across every PHP box |
+| `make reload-nginx` | SSM-exec `nginx -s reload` across every nginx box (graceful) |
 | `make clear-drupal-cache` | Wipe the FSx compiled container + TRUNCATE cache_* tables |
+| `make install-drupal-remote` | SSM-dispatch a fresh Drupal install (composer + drush) to the deploy-host |
+| `make publish-drupal-vhost` | SSM-write the Drupal nginx vhost to FSx without re-installing |
+| `make smoke-test-drupal` | Curl the ALB with the Drupal site-name as Host header; assert 200 |
 | `make pause-compute` / `resume-compute` | ASG capacity 0 (cost saver) and back |
 
 On the deploy-host:
@@ -177,6 +181,74 @@ After this, `configure-php.sh` on any FRESH instance launch will read
 the new secret and write it into `www.conf`. Existing workers were
 busted by the `restart-php-fpm` above.
 
+### Install Drupal end-to-end (the cloud install path)
+
+When you've just brought up an environment via `make deploy-allX` and need
+to land Drupal on it (codebase + DB schema + nginx vhost + first request
+returning 200):
+
+```bash
+make install-drupal-remote ENV=sandbox    # ~5 min: composer + drush + vhost write
+make smoke-test-drupal ENV=sandbox        # curl the ALB, assert HTTP 200
+```
+
+`install-drupal-remote` is invoked from your **local Mac** (not the
+deploy-host — the "-remote" suffix means "dispatch this to the remote
+deploy-host via SSM, from wherever you are"). The wrapper:
+
+1. Waits for `/etc/worxco/deploy-host-marker` (deploy-host's bootstrap
+   completion marker) — up to 25 min.
+2. SSM-dispatches a script to the deploy-host that pulls the latest
+   committed code, `refresh-env-config` + `use-env <env>`, then
+   `make install-drupal ENV=<env>`.
+3. `make install-drupal` on the deploy-host runs
+   `scripts/deploy-host/install-drupal.sh`: pulls existing secrets (or
+   generates new ones), creates `drupal_user` in postgres (or ALTERs
+   password to match the secret), composer-installs Drupal 11, runs
+   `drush site:install`, writes settings.php (env-var-driven), and the
+   `/etc/nginx/shared/sites-enabled/drupal.conf` vhost to FSx.
+4. After the install succeeds, the wrapper auto-calls `reload-nginx` so
+   the running nginx fleet picks up the new vhost.
+
+**Idempotent**: if `/var/www/drupal/.installed` already exists, the
+install step is skipped (still re-publishes the nginx vhost only if
+explicitly requested via `make publish-drupal-vhost`).
+
+**On retry after a failed install**: the partial-state wipe step at the
+top of install-drupal.sh handles a half-installed `/var/www/drupal`
+directory (composer create-project would otherwise refuse a non-empty
+target).
+
+### Publish or update the Drupal nginx vhost without reinstalling
+
+When the nginx vhost file on FSx needs to be (re)written but Drupal is
+already installed (.installed marker present), use this surgical target
+instead of a full reinstall:
+
+```bash
+make publish-drupal-vhost ENV=sandbox
+make reload-nginx ENV=sandbox             # make the fleet pick it up
+```
+
+SSM-dispatches a deploy-host script that only writes
+`/var/www/nginx/sites-enabled/drupal.conf` and exits.
+
+### Reload nginx (after FSx vhost changes)
+
+The base nginx config (`/etc/nginx/nginx.conf` from the AMI) includes
+`/etc/nginx/shared/sites-enabled/*.conf` — and `/etc/nginx/shared` is an
+NFS mount of `$FSX:/fsx/nginx`. When you publish a new vhost to FSx, the
+files appear on every nginx instance immediately (NFS visibility), but
+the running nginx process **only loads config at startup**. A reload is
+required:
+
+```bash
+make reload-nginx ENV=sandbox    # nginx -t && nginx -s reload, fleet-wide
+```
+
+`nginx -s reload` is graceful — workers finish in-flight requests before
+re-exec'ing with the new config. No dropped connections.
+
 ### Pause / resume compute (cost saver)
 
 FSx is roughly 60% of the running monthly bill; the rest is mostly
@@ -216,6 +288,29 @@ and in RDS is preserved.
   targets return as soon as the API call is acknowledged, not when AWS
   finishes the work. `make build-amis` (the blocking variant) is the
   exception, not the rule.
+
+- **Don't run `make install-drupal` directly from your Mac** — it has a
+  `[ -f /etc/worxco/deploy-host-marker ]` guard and will refuse. Use
+  `make install-drupal-remote ENV=<env>` instead, which dispatches the
+  call to the deploy-host via SSM. Naming convention in this project:
+  the `-remote` suffix means "from anywhere with AWS CLI configured."
+
+- **Don't expect today's `make deploy-allX` to land Drupal cleanly on a
+  truly fresh AWS account.** Two known phase-ordering bugs (P0 in TODO):
+  (1) nginx instances boot before `/fsx/nginx` exists on FSx →
+  `configure-nginx.sh` bails on `set -e` BEFORE writing
+  `upstream-php.conf`. (2) PHP instances boot before RDS exists →
+  `configure-php.sh` skips the `env[]` block. Both require manual
+  fixups; both will be addressed in the upcoming architectural review.
+  Tracking: P0 in `TODO.md`.
+
+- **Don't assume PHP-FPM workers have OS-level env vars set** even when
+  `env[FOO] = "..."` is in `www.conf`. PHP-FPM with `clear_env = yes`
+  (default + set in our pool) wipes the OS-level worker environ, then
+  the `env[]` directives are accessible to PHP code via `getenv()`,
+  `$_SERVER`, and `$_ENV` but **not** via `/proc/$PID/environ`.
+  Diagnostic note: don't diagnose env injection by looking at
+  `/proc/$PID/environ`; write a tiny PHP probe and curl it instead.
 
 ---
 
