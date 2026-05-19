@@ -36,6 +36,65 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P0 — Regressions waiting to happen (do soonest)
 
+- [ ] **deploy-allX phase ordering — FSx layout init must precede compute.**
+  2026-05-19 destroy-all → deploy-allX hit two recurring chicken-and-egg bugs:
+  (1) nginx instances boot in Phase 4 and try to mount `$FSX:/fsx/nginx`,
+  but `/fsx/nginx` doesn't exist on the freshly-created FSx (no one creates
+  it). The mount fails, `configure-nginx.sh` bails on `set -e` BEFORE
+  writing `/etc/nginx/conf.d/upstream-php.conf`, and nginx serves with
+  the catch-all `server _` only. (2) PHP instances boot in Phase 4 BEFORE
+  RDS exists (Phase 5). `configure-php.sh` reads `/sandbox/rds/endpoint`
+  from SSM, doesn't find it, skips writing the `env[]` block to
+  `www.conf`. PHP-FPM starts with zero DRUPAL_* env vars; Drupal 500s
+  forever after.
+
+  **Manual fixups today (will recur)**:
+    - SSM-mount /fsx/nginx + manually write upstream-php.conf on every nginx box
+    - SSM-re-run /opt/worxco/configure-php.sh on every PHP box after data layer is up
+
+  **Proposed fix** (deferred for architectural review per 2026-05-19 conversation):
+    - Add `init-fsx-layout` Make target (run on deploy-host via SSM) that
+      mkdir's /fsx/nginx/sites-enabled and any other env-level dirs after
+      cf-storage completes.
+    - Reorder deploy-allX: parallelize Phase 2 (AMI builds, 20-30 min) with
+      Phase 5 (data layer) + init-fsx-layout. Phase 4 (compute) only runs
+      once Phase 2 AND data layer AND init-fsx-layout are all done.
+    - Or: keep current ordering but add an explicit "compute-ready" gate
+      after data layer that triggers instance refresh on already-launched
+      compute ASGs.
+
+  **Bigger context** (also captured in TODO under "Architectural review"):
+    these recurring chicken-and-egg bugs are symptoms of an architecture
+    that assumes strict build order without enforcing it. Worth a
+    deliberate think before fixing tactically.
+
+- [ ] **Architectural review — build-order assumptions + multi-site future.**
+  Captured from 2026-05-19 end-of-day conversation. Two concerns to think
+  through deliberately before more code changes:
+
+  (a) **Build-order coupling**: today's bugs surfaced repeatedly that the
+  system assumes a clean greenfield order (VPC → FSx → AMIs → compute →
+  data → app → install). Whenever that order is violated — recovery,
+  partial redeploy, async resource readiness — components bail silently
+  or run with wrong config. Kurt's framing: should worker boxes (PHP,
+  nginx) carry intelligence to check/create their prerequisites, or
+  should the orchestration enforce order? Open question. Claude's
+  position: hard deps stay hard, but worker scripts should fail loudly
+  on missing prerequisites instead of `set -e`-bailing mid-config.
+  Self-discovery is for runtime peers, not boot deps.
+
+  (b) **Multi-site / multi-RDS future**: the current architecture bakes
+  1:1 env↔RDS into many places (settings.php's `$_env`, SSM param
+  namespacing, secret paths). Three months out, when we want "two RDS
+  side-by-side, some sites on each, migration between them" — we're
+  not designed for it. Phase E+ in scope. See `docs/plans/multi-tenancy.md`
+  (exists, needs review).
+
+  **Next step** (no implementation yet): review `docs/ARCHITECTURE.md`
+  + `docs/plans/multi-tenancy.md`, then more conversations on direction.
+
+
+
 - [x] **Bake-and-roll PHP/nginx AMIs to RecipeVersion 1.0.10** ✅ 2026-05-18
   - The `start` → `restart` fix in configure-php.sh / configure-nginx.sh
     (commit 3c70041) is now baked into all 3 AMIs and rolled to every
@@ -89,6 +148,51 @@ prioritized by "would this bite again if we don't fix it."
   `make restart-php-fpm` is the canonical answer when settings.php on FSx
   changes. Will be noted prominently in docs/OPERATIONS.md.
 
+- [ ] **`destroy-deploy-host` / `deploy-deploy-host` should handle the
+  peering dependency automatically with a persistent restore marker.**
+  Bit us 2026-05-19: ran `destroy-deploy-host CONFIRMED=yes`, CFN started
+  the delete (DELETE_IN_PROGRESS) then canceled it 1 second later
+  because `cf-scalable-web-sandbox-deploy-peering` was still importing
+  the `cf-deploy-host-sg-id` export. The stack rolled back to
+  CREATE_COMPLETE and our `aws cloudformation wait stack-delete-complete`
+  spun for 30+ min before we noticed.
+
+  **Design (Kurt 2026-05-19):** stateful symmetric handling.
+
+  **destroy-deploy-host**:
+    1. Query `aws cloudformation list-imports --export-name <our exports>`
+       to find every peering stack currently importing from cf-deploy-host.
+    2. For each (per-env), write SSM marker
+       `/worxco/deploy-host/peering-restore-pending/<env>` = "yes" (or a
+       timestamp for audit).
+    3. Run `make destroy-peering ENV=<env>` for each, in order.
+    4. Then `aws cloudformation delete-stack --stack-name cf-deploy-host`.
+
+  **deploy-deploy-host**:
+    1. After the stack reaches CREATE_COMPLETE, list SSM params under
+       `/worxco/deploy-host/peering-restore-pending/`.
+    2. For each, extract `<env>` from the param name, run
+       `make deploy-peering ENV=<env>`.
+    3. Delete the SSM param on success of each restore.
+
+  **Why per-env, not global**: future multi-env deploys (sandbox +
+  staging both peered) need to remember which envs had peering. Path
+  hierarchy makes it natural to add/remove individually.
+
+  **Edge cases handled by this design**:
+    - Fresh account, only deploy-host → destroy: no importers, no marker
+      written, clean destroy. No-op on re-deploy.
+    - Full env up, destroy deploy-host: auto-destroys peering,
+      marker remembers, re-deploy restores it.
+    - User manually destroyed peering before running destroy-deploy-host:
+      no importers found, no marker written. Symmetric — user has to
+      manually re-deploy peering if they want it.
+    - Partial failure mid-restore: marker stays, next deploy-deploy-host
+      run picks up where it left off.
+
+  Generalizable: the same pattern applies to any stack whose exports are
+  imported elsewhere. cf-vpc has similar exports.
+
 ### P2 — Documentation polish
 
 - [ ] **docs/OPERATIONS.md** — runbooks for use-env, restart-php-fpm,
@@ -98,11 +202,43 @@ prioritized by "would this bite again if we don't fix it."
 - [ ] **docs/master.md + `make build-master`** — design captured below.
   See "Future Enhancements" for the full concept.
 
+- [ ] **Admin SSH key registry for scp-over-SSM-proxy.** Add SSM
+  Parameter `/worxco/admin/ssh-public-keys` (StringList) + Make targets
+  (`admin-ssh-key-add`, `-remove`, `-list`) + cf-deploy-host UserData
+  that installs the keys into the ubuntu user's authorized_keys at boot.
+  Compute templates intentionally exclude this code path — security by
+  exclusion (see `docs/memory/admin-access-policy.md`). Port 22 stays
+  closed in all SGs; keys exist solely to enable scp/sftp/rsync via the
+  `AWS-StartSSHSession` SSM document. Captured 2026-05-19.
+
 ### P3 — Captured for later (no immediate action)
 
 - [ ] Drupal upgrade promotion workflow (already detailed in
   `~/.claude/TODO.md` under `[cf-scalable-drupal] Phase D`).
 - [ ] Multi-tenancy refactor (Phase E+, docs/plans/multi-tenancy.md).
+- [ ] **Decide how to handle post-`destroy-all` residue.** Inventory and
+  design options in `docs/memory/destroy-all-residue.md`. Three options
+  on the table: (A) `clean-account` Make target that sweeps per-service
+  residue, (B) `destroy-all` vs `destroy-allX` split mirroring deploy,
+  (C) burn-and-recreate the AWS account via Organizations. Also
+  includes open SSM "new experience" questions (one-time enablement,
+  cost of Default Host Management Config, which Node Tools to enable).
+  Captured 2026-05-19; not blocking anything.
+
+- [ ] **`build-amis-if-needed`: skip rebuild when recipe hasn't changed.**
+  Today's deploy-allX triggered build #3 of recipe 1.0.10 even though
+  the recipe content is identical to yesterday's build #2. Image Builder
+  pipelines are CFN resources that get recreated on `destroy-all` →
+  `deploy-image-builder`, so they have no concept of "latest" and our
+  `build-amis` target blindly triggers every time. Design: a new
+  `build-amis-if-needed` target that, for each pipeline, reads the
+  current AMI ID from SSM (`/<env>/ami/<pipeline>`), describes the AMI
+  to get its Image Builder tag (recipe ARN + version), and compares
+  against the recipe currently configured in the pipeline. If they
+  match, skip — print "✓ <pipeline> AMI 1.0.10/2 is current". If not,
+  trigger + wait as today. Saves ~15-20 min on incremental deploys.
+  Make `build-amis-if-needed` the default in deploy-all; keep
+  `build-amis` as the force-rebuild variant. Captured 2026-05-19.
 
 
 
