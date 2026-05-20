@@ -470,8 +470,15 @@ server {
   location ~ ^/sites/.*/private/ { return 403; }
   location ~ /\\.(?!well-known)  { deny all; }
 
-  # Cache-friendly paths
+  # CSS/JS aggregates — Drupal 11 lazy-builds these on demand via PHP,
+  # so the URL is generated BEFORE the file exists on disk. The first
+  # request must fall through to /index.php (via @rewrite) so Drupal
+  # can build + cache the aggregate. Subsequent requests are served
+  # as static files (nginx's default for matching URIs). Without
+  # try_files here, nginx 404s every aggregate URL and the page
+  # renders unstyled.
   location ~ ^/sites/.*/files/(css|js)/ {
+    try_files \$uri @rewrite;
     expires max;
     log_not_found off;
   }

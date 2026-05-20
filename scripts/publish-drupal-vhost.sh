@@ -103,7 +103,10 @@ server {
   location ~ ^/sites/.*/private/      { return 403; }
   location ~ /\\\\.(?!well-known)     { deny all; }
 
+  # CSS/JS aggregates — Drupal 11 lazy-builds on demand. First request
+  # must fall through to /index.php so Drupal can build the file.
   location ~ ^/sites/.*/files/(css|js)/ {
+    try_files \\\$uri @rewrite;
     expires max;
     log_not_found off;
   }
