@@ -308,7 +308,14 @@ step "Generate (or reuse) hash_salt — persists across reinstalls"
 if [ ! -f "$SALT_FILE" ]; then
   log "Generating new hash_salt at $SALT_FILE"
   php -r "echo bin2hex(random_bytes(32));" > "$SALT_FILE"
-  chmod 600 "$SALT_FILE"
+  # Mode 0640 with group www-data — settings.php reads this at request
+  # time from PHP-FPM workers, which run as www-data. The earlier
+  # `chmod 600` shut PHP-FPM out (root-only), caused Drupal to log
+  # "Missing $settings['hash_salt']" and return HTTP 500 on every
+  # request. Spec lives in docs/FSX-LAYOUT.md "File ownership and
+  # permissions" — keep this in sync with that doc.
+  chown root:www-data "$SALT_FILE"
+  chmod 0640 "$SALT_FILE"
 else
   log "Reusing existing hash_salt at $SALT_FILE"
 fi
