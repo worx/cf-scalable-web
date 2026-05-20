@@ -15,6 +15,9 @@ Start here, by what you want to do:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — networks, request flow,
   storage layout, deploy-allX phase ordering, CloudFormation stack
   relationships, Mermaid diagrams throughout
+- [docs/FSX-LAYOUT.md](docs/FSX-LAYOUT.md) — authoritative reference
+  for the FSx directory structure, mount points, file ownership, and
+  the per-site config-on-FSx propagation mechanism
 - [docs/memory/architecture-reference.md](docs/memory/architecture-reference.md)
   — quick-reference: stack names, key file paths, SSM parameter
   conventions
