@@ -402,6 +402,55 @@ show-params:  ## Show parameters for current environment
 		exit 1; \
 	fi
 
+endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Valkey, FSx) — copy-paste friendly
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "$(BLUE)  Endpoints for ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Drupal site:$(NC)"
+	@ALB_DNS=$$(aws cloudformation describe-stacks \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || echo "(cf-app-drupal not deployed)"); \
+	if [ -z "$$ALB_DNS" ] || [ "$$ALB_DNS" = "None" ]; then \
+		echo "  $(YELLOW)(cf-compute-alb not deployed)$(NC)"; \
+	else \
+		echo "  $(GREEN)Browser URL:$(NC)  http://$$ALB_DNS/"; \
+		echo "  $(GREEN)Site name:$(NC)    $$SITE_NAME"; \
+		echo "  $(GREEN)curl test:$(NC)    curl -H 'Host: $$SITE_NAME' http://$$ALB_DNS/"; \
+		echo "  $(CYAN)(trusted_host_patterns in settings.php includes *.elb.amazonaws.com,$(NC)"; \
+		echo "  $(CYAN) so browsing the ALB URL directly works without any Host-header tricks.$(NC)"; \
+		echo "  $(CYAN) For the site-name path: add to /etc/hosts or use a Host-header browser ext.)$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)Deploy-host (operator access):$(NC)"
+	@DEPLOY_ID=$$(aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=cf-deploy-host" "Name=instance-state-name,Values=running" \
+		--query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null); \
+	if [ -z "$$DEPLOY_ID" ] || [ "$$DEPLOY_ID" = "None" ]; then \
+		echo "  $(YELLOW)(deploy-host not running)$(NC)"; \
+	else \
+		echo "  $(GREEN)Instance ID:$(NC)  $$DEPLOY_ID"; \
+		echo "  $(GREEN)SSM session:$(NC)  aws ssm start-session --target $$DEPLOY_ID"; \
+		echo "  $(GREEN)SSH (key in registry):$(NC)  ssh $$DEPLOY_ID    (with ProxyCommand ~/.ssh/config)"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)Data layer (resolved from SSM):$(NC)"
+	@RDS=$$(aws ssm get-parameter --name "/$(ENV)/rds/endpoint" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || echo ""); \
+	[ -n "$$RDS" ] && echo "  $(GREEN)RDS:$(NC)     $$RDS:5432" || echo "  $(YELLOW)RDS: (not deployed)$(NC)"
+	@VK=$$(aws ssm get-parameter --name "/$(ENV)/cache/endpoint" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || echo ""); \
+	[ -n "$$VK" ] && echo "  $(GREEN)Valkey:$(NC)  $$VK:6379  (TLS + AUTH)" || echo "  $(YELLOW)Valkey: (not deployed)$(NC)"
+	@FSX=$$(aws ssm get-parameter --name "/$(ENV)/fsx/dns-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || \
+		aws ssm get-parameter --name "/$(ENV)/fsx/endpoint" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || echo ""); \
+	[ -n "$$FSX" ] && echo "  $(GREEN)FSx:$(NC)     $$FSX  (NFS v4.1, port 2049)" || echo "  $(YELLOW)FSx: (not deployed)$(NC)"
+	@echo ""
+
 status:  ## Show status of all stacks for current environment
 	@echo "$(BLUE)Stack Status for ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
