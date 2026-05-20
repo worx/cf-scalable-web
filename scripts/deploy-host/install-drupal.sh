@@ -404,6 +404,33 @@ chmod 444 "$SETTINGS_FILE"
 chmod 555 "$INSTALL_DIR/web/sites/default"
 
 # ============================================================
+step "Make Drupal-writable directories accessible to PHP-FPM (www-data)"
+# ============================================================
+# Drupal writes to several directories at runtime:
+#   - public files (sites/default/files/): CSS/JS aggregates, image styles,
+#     user-uploaded files
+#   - private files ($PRIVATE_DIR): Drupal's "private://" file system
+#   - config sync ($CONFIG_DIR): Drupal's defensive .htaccess writes here
+# These get created as root:root during composer create-project + drush
+# site:install (since this script runs as root via SSM dispatch). Without
+# this final pass, PHP-FPM workers (running as www-data) can't write —
+# CSS aggregation fails (URLs 404), .htaccess writes fail (security
+# warnings in watchdog).
+# Spec is in docs/FSX-LAYOUT.md "File ownership and permissions".
+for d in "$INSTALL_DIR/web/sites/default/files" "$PRIVATE_DIR" "$CONFIG_DIR"; do
+  if [ -d "$d" ]; then
+    sudo chown -R root:www-data "$d"
+    # u=rwX,g=rwX,o= → owner+group r/w + traverse, other locked out.
+    # Capital X applies execute only to dirs (not files), keeping
+    # individual files at 0660 (read/write for owner+group only).
+    sudo chmod -R u=rwX,g=rwX,o= "$d"
+    log "  permissions set on $d (root:www-data, g+rwX)"
+  fi
+done
+# salt.txt stays the tighter 0640 (no group-write) since it's a secret.
+[ -f "$SALT_FILE" ] && sudo chmod 0640 "$SALT_FILE"
+
+# ============================================================
 step "Publish Drupal nginx vhost to FSx (read by all nginx instances)"
 # ============================================================
 # nginx hosts mount $FSX:/fsx/nginx at /etc/nginx/shared and include
