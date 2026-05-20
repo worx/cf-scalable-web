@@ -68,13 +68,19 @@ sudo chmod 755 /var/www/nginx "\$NGINX_VHOST_DIR"
 sudo tee "\$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
 # Drupal vhost — managed by scripts/publish-drupal-vhost.sh
 server {
-  listen 80;
+  listen 80 default_server;
   server_name \$SITE_NAME;
   root \$INSTALL_DIR/web;
   index index.php;
 
   access_log /var/log/nginx/drupal_access.log main;
   error_log  /var/log/nginx/drupal_error.log  warn;
+
+  location = /health {
+    access_log off;
+    return 200 'OK';
+    add_header Content-Type text/plain;
+  }
 
   location / {
     try_files \\\$uri /index.php?\\\$query_string;

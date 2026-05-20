@@ -171,22 +171,20 @@ Resources:
             #!/bin/bash
             set -euo pipefail
 
-            # Write health check config (default server returning 200 on /health)
-            cat > /etc/nginx/conf.d/health-check.conf <<'HEALTHEOF'
-            server {
-                listen 80 default_server;
-                server_name _;
-
-                location /health {
-                    access_log off;
-                    return 200 'OK';
-                    add_header Content-Type text/plain;
-                }
-            }
-            HEALTHEOF
-
-            # Reload NGINX to pick up health check
-            systemctl reload nginx || systemctl start nginx
+            # NOTE: do NOT write /etc/nginx/conf.d/health-check.conf here.
+            # That file used to listen on port 80 with default_server, which
+            # caught any request whose Host header didn't match the Drupal
+            # vhost (e.g., browsing the ALB DNS directly) and returned 404
+            # because it only had a /health location. The ALB target-group
+            # /health probe now hits the Drupal vhost's `location = /health`
+            # block (see scripts/deploy-host/install-drupal.sh +
+            # scripts/publish-drupal-vhost.sh — both write that location into
+            # the drupal.conf vhost on FSx, where this nginx instance reads
+            # it via the /etc/nginx/shared NFS mount).
+            #
+            # If a previous AMI/UserData baked the rogue port-80 health-check.conf,
+            # remove it here so we don't have two competing default_servers:
+            rm -f /etc/nginx/conf.d/health-check.conf
 
             # Run the full configuration script (mounts FSx, configures sites, etc.)
             if [ -f /opt/worxco/configure-nginx.sh ]; then
