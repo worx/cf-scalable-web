@@ -579,10 +579,30 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	echo "$(CYAN)  Database:   pid $$DB_PID    log $$TMPDB   (~10 min)$(NC)"; \
 	echo "$(CYAN)  Cache:      pid $$CACHE_PID log $$TMPCACHE (~2 min)$(NC)"; \
 	echo "$(CYAN)  All three running concurrently. Tail any via: tail -f <log>$(NC)"; \
-	echo "$(CYAN)  Waiting on all three to complete...$(NC)"; \
-	wait $$CACHE_PID; CACHE_RC=$$?; echo "$(CYAN)  ✓ Cache finished (rc=$$CACHE_RC)$(NC)"; \
-	wait $$DB_PID; DB_RC=$$?; echo "$(CYAN)  ✓ Database finished (rc=$$DB_RC)$(NC)"; \
-	wait $$AMI_PID; AMI_RC=$$?; echo "$(CYAN)  ✓ AMI build finished (rc=$$AMI_RC)$(NC)"; \
+	echo "$(CYAN)  Heartbeat every 60s, plus one-shot ✓ messages as each track finishes.$(NC)"; \
+	START_TS=$$(date +%s); \
+	AMI_DONE=0; DB_DONE=0; CACHE_DONE=0; \
+	while [ $$AMI_DONE -eq 0 ] || [ $$DB_DONE -eq 0 ] || [ $$CACHE_DONE -eq 0 ]; do \
+		ELAPSED=$$(( $$(date +%s) - START_TS )); \
+		MIN=$$((ELAPSED / 60)); SEC=$$((ELAPSED % 60)); \
+		AMI_S="running"; DB_S="running"; CACHE_S="running"; \
+		if [ $$AMI_DONE -eq 0 ] && ! kill -0 $$AMI_PID 2>/dev/null; then \
+			wait $$AMI_PID; AMI_RC=$$?; AMI_DONE=1; AMI_S="done(rc=$$AMI_RC)"; \
+			echo "$(CYAN)  [$${MIN}m$$(printf %02d $$SEC)s] ✓ AMI build finished (rc=$$AMI_RC)$(NC)"; \
+		elif [ $$AMI_DONE -eq 1 ]; then AMI_S="done(rc=$$AMI_RC)"; fi; \
+		if [ $$DB_DONE -eq 0 ] && ! kill -0 $$DB_PID 2>/dev/null; then \
+			wait $$DB_PID; DB_RC=$$?; DB_DONE=1; DB_S="done(rc=$$DB_RC)"; \
+			echo "$(CYAN)  [$${MIN}m$$(printf %02d $$SEC)s] ✓ Database finished (rc=$$DB_RC)$(NC)"; \
+		elif [ $$DB_DONE -eq 1 ]; then DB_S="done(rc=$$DB_RC)"; fi; \
+		if [ $$CACHE_DONE -eq 0 ] && ! kill -0 $$CACHE_PID 2>/dev/null; then \
+			wait $$CACHE_PID; CACHE_RC=$$?; CACHE_DONE=1; CACHE_S="done(rc=$$CACHE_RC)"; \
+			echo "$(CYAN)  [$${MIN}m$$(printf %02d $$SEC)s] ✓ Cache finished (rc=$$CACHE_RC)$(NC)"; \
+		elif [ $$CACHE_DONE -eq 1 ]; then CACHE_S="done(rc=$$CACHE_RC)"; fi; \
+		if [ $$AMI_DONE -eq 0 ] || [ $$DB_DONE -eq 0 ] || [ $$CACHE_DONE -eq 0 ]; then \
+			printf "$(CYAN)  [%dm%02ds] AMI=%s  DB=%s  Cache=%s$(NC)\n" $$MIN $$SEC "$$AMI_S" "$$DB_S" "$$CACHE_S"; \
+			sleep 60; \
+		fi; \
+	done; \
 	echo ""; \
 	echo "$(BLUE)=== Cache output ===$(NC)"; cat "$$TMPCACHE"; rm -f "$$TMPCACHE"; \
 	echo "$(BLUE)=== Database output ===$(NC)"; cat "$$TMPDB"; rm -f "$$TMPDB"; \
