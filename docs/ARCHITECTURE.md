@@ -8,60 +8,103 @@ The cf-scalable-web infrastructure is designed for high-availability, security, 
 
 ### VPC Layout
 
-The VPC uses a 4-tier private subnet architecture plus a public subnet tier:
+The VPC uses a 4-tier private subnet architecture plus a public subnet
+tier. **No NAT Gateways.** Compute is intentionally privatized — there
+is no outbound path to the internet from running instances. All AWS
+API access happens via VPC Endpoints; all OS/package state is baked
+into AMIs at Image Builder time.
+
+(Subnet CIDRs below use sandbox's 10.200.0.0/16. Other envs use
+different /16s — staging 10.100.0.0/16, production 10.101.0.0/16 —
+but the tier structure and offsets are identical.)
 
 ```mermaid
 graph TB
     Internet[Internet]
     IGW[Internet Gateway]
-    NAT1[NAT Gateway AZ1]
-    NAT2[NAT Gateway AZ2]
 
-    subgraph "Public Tier (ALB Only)"
-        PublicSubnet1[10.101.1.0/24]
-        PublicSubnet2[10.101.2.0/24]
+    subgraph "Public Tier (ALB only — only tier with public IPs)"
+        PublicSubnet1[10.200.1.0/24 AZ1]
+        PublicSubnet2[10.200.2.0/24 AZ2]
     end
 
-    subgraph "Private Tier 1 (NGINX)"
-        NginxSubnet1[10.101.11.0/24]
-        NginxSubnet2[10.101.12.0/24]
+    subgraph "Private Tier 1 (NGINX reverse proxies)"
+        NginxSubnet1[10.200.11.0/24 AZ1]
+        NginxSubnet2[10.200.12.0/24 AZ2]
     end
 
-    subgraph "Private Tier 2 (NLB)"
-        NLBSubnet1[10.101.21.0/24]
-        NLBSubnet2[10.101.22.0/24]
+    subgraph "Private Tier 2 (NLB — internal port-based routing)"
+        NLBSubnet1[10.200.21.0/24 AZ1]
+        NLBSubnet2[10.200.22.0/24 AZ2]
     end
 
-    subgraph "Private Tier 3 (PHP-FPM)"
-        PHPSubnet1[10.101.31.0/24]
-        PHPSubnet2[10.101.32.0/24]
+    subgraph "Private Tier 3 (PHP-FPM workers)"
+        PHPSubnet1[10.200.31.0/24 AZ1]
+        PHPSubnet2[10.200.32.0/24 AZ2]
     end
 
     subgraph "Private Tier 4 (Data Layer)"
-        DataSubnet1[10.101.41.0/24<br/>RDS, FSx, Cache]
-        DataSubnet2[10.101.42.0/24<br/>RDS, FSx, Cache]
+        DataSubnet1[10.200.41.0/24 — RDS, FSx, Valkey AZ1]
+        DataSubnet2[10.200.42.0/24 — RDS, FSx, Valkey AZ2]
+    end
+
+    subgraph "VPC Endpoints (outbound AWS API only — no internet)"
+        EpSSM[SSM + SSM Messages + EC2 Messages — Interface]
+        EpSM[Secrets Manager — Interface]
+        EpS3[S3 — Gateway]
+        EpSES[SES email-smtp — Interface]
     end
 
     Internet --> IGW
     IGW --> PublicSubnet1
     IGW --> PublicSubnet2
-    PublicSubnet1 --> NAT1
-    PublicSubnet2 --> NAT2
-    NAT1 --> NginxSubnet1
-    NAT2 --> NginxSubnet2
-    NAT1 --> NLBSubnet1
-    NAT2 --> NLBSubnet2
-    NAT1 --> PHPSubnet1
-    NAT2 --> PHPSubnet2
-    NAT1 --> DataSubnet1
-    NAT2 --> DataSubnet2
+
+    NginxSubnet1 -.->|"AWS API only"| EpSSM
+    NginxSubnet2 -.->|"AWS API only"| EpSSM
+    PHPSubnet1 -.->|"AWS API only"| EpSSM
+    PHPSubnet2 -.->|"AWS API only"| EpSSM
+    NginxSubnet1 -.->|"secrets"| EpSM
+    PHPSubnet1 -.->|"secrets"| EpSM
+    NginxSubnet1 -.->|"AMI configs"| EpS3
+    PHPSubnet1 -.->|"AMI configs"| EpS3
+    PHPSubnet1 -.->|"transactional mail"| EpSES
 ```
 
 **Key Points:**
-- Only public IPs on ALB
-- Each tier isolated by security groups
-- NAT Gateways provide outbound internet (for OS updates, package installs, etc.)
-- Multi-AZ deployment across 2 availability zones
+- **Only public IPs on ALB.** Every other tier is fully private —
+  no `0.0.0.0/0` route to IGW from any private subnet's route table.
+- **No NAT Gateways anywhere.** Deliberate. Compute instances cannot
+  reach the internet, ever. There is nothing for them to fetch:
+  - **OS updates / package installs**: happen at AMI build time via
+    EC2 Image Builder (which runs in its own AWS-managed environment
+    with outbound access). Running instances are immutable; they get
+    replaced on the 7-day instance-refresh cycle, not patched in place.
+  - **Drupal codebase / composer install**: happens once on the
+    deploy-host (which lives in the **default VPC**, separate from the
+    project VPC, has full internet access). The codebase is then on
+    FSx, which all compute instances mount via NFS.
+  - **Outbound AWS API calls** (SSM, Secrets Manager, S3 reads): use
+    VPC Endpoints, which terminate in the VPC and route traffic
+    AWS-internally without ever touching the public internet.
+  - **Drupal core/module update checks**: would normally call out to
+    `updates.drupal.org`. These calls fail in this topology — by
+    design. Updates are handled out-of-band (composer + AMI rebuild),
+    not by the live site phoning home.
+- Each tier isolated by security groups (defense in depth — see Security
+  Group Architecture below).
+- Multi-AZ deployment across 2 availability zones.
+- The deploy-host is not in this VPC. It's in the AWS account's
+  default VPC, connected to the project VPC via VPC peering, and is
+  the only operator-controlled box with full internet access (for git
+  clone, composer install, apt updates of operator tooling). See
+  [docs/DEPLOY-HOST.md](DEPLOY-HOST.md).
+
+**Why the template still has an `EnableNATGateway` knob**: legacy from
+the first draft when an in-place patching model was being considered.
+Defaults to `false`; no environment sets it `true`. The conditional
+block could be removed entirely on a future cleanup pass, but leaving
+the option mechanism in place is harmless — and arguably useful for
+some future operator who has a different threat model than ours.
 
 ### Security Group Architecture
 
@@ -94,7 +137,7 @@ graph LR
 
 ### VPC Endpoints
 
-Private instances reach AWS APIs through VPC endpoints, eliminating the need for NAT Gateway traffic for AWS service calls. These are defined in `cf-vpc.yaml`.
+Private instances reach AWS APIs through VPC endpoints — there is no NAT Gateway and no `0.0.0.0/0` route from private subnets. VPC endpoints terminate AWS API calls inside the VPC and route them AWS-internally without ever touching the public internet. Defined in `cf-vpc.yaml`.
 
 | Endpoint | Service | Type | Notes |
 |----------|---------|------|-------|
@@ -632,7 +675,7 @@ graph LR
 | **RDS Primary** | Instance failure | ~60 seconds | Brief connection errors (automatic failover) |
 | **FSx File System** | File system issue | 5-10 minutes | Downtime (AWS restores from snapshot) |
 | **ElastiCache Valkey** | Node failure | Immediate | Cache miss (performance impact, no downtime) |
-| **NAT Gateway** | Gateway failure | Immediate | No outbound internet (inbound traffic unaffected) |
+| **VPC Endpoint** | Endpoint failure (rare; AWS-managed) | Immediate | AWS API calls (SSM, Secrets Manager, etc.) fail until restored; in-flight requests unaffected |
 | **Availability Zone** | Complete AZ failure | 2-5 minutes | No downtime (Multi-AZ resources failover) |
 
 ### Recovery Procedures
