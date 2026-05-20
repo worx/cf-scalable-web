@@ -1485,6 +1485,32 @@ deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION)
 	@echo "$(GREEN)✓ Deploy host deployed$(NC)"
+	@# Post-step: if destroy-deploy-host previously tore down any peering
+	@# stacks to clear its export dependencies, the env names are recorded
+	@# at /worxco/deploy-host/peering-restore-pending/<env>. Redeploy each
+	@# peering and delete the marker on success. Per-env atomicity: a
+	@# failed restore for env-A leaves env-A's marker intact (for a later
+	@# manual or retried run) but does NOT block env-B's restore.
+	@echo "$(CYAN)Checking for peering-restore markers from prior destroy-deploy-host...$(NC)"
+	@MARKERS=$$(aws ssm get-parameters-by-path \
+		--path "/worxco/deploy-host/peering-restore-pending/" \
+		--query 'Parameters[].Name' --output text \
+		--region $(AWS_REGION) 2>/dev/null || echo ""); \
+	if [ -z "$$MARKERS" ]; then \
+		echo "$(CYAN)  No pending peering restores.$(NC)"; \
+	else \
+		for marker in $$MARKERS; do \
+			ENV=$$(echo "$$marker" | sed 's|.*/||'); \
+			echo "$(YELLOW)  Restoring peering for ENV=$$ENV...$(NC)"; \
+			if $(MAKE) deploy-peering ENV=$$ENV; then \
+				aws ssm delete-parameter --name "$$marker" \
+					--region $(AWS_REGION) > /dev/null; \
+				echo "$(GREEN)  ✓ peering restored + marker cleared for $$ENV$(NC)"; \
+			else \
+				echo "$(RED)  ✗ peering restore failed for $$ENV — marker kept for retry$(NC)"; \
+			fi; \
+		done; \
+	fi
 	@$(MAKE) verify-deploy-host
 
 verify-deploy-host:  ## Show deploy host connection info
@@ -1517,6 +1543,38 @@ destroy-deploy-host:  ## Delete deploy host (pass CONFIRMED=yes to skip prompt)
 			exit 0; \
 		fi; \
 	fi
+	@# Pre-step: any peering stack importing cf-deploy-host's exports must
+	@# be destroyed first, or CFN refuses to delete cf-deploy-host
+	@# ("Cannot delete export ... as it is in use by ..."). Record which
+	@# envs we tear down here so deploy-deploy-host can restore them.
+	@# See P1 TODO "destroy-deploy-host / deploy-deploy-host should handle
+	@# the peering dependency automatically".
+	@echo "$(CYAN)Checking for peering stacks importing cf-deploy-host exports...$(NC)"
+	@IMPORTERS=$$(aws cloudformation list-imports \
+		--export-name cf-deploy-host-sg-id \
+		--query 'Imports' --output text \
+		--region $(AWS_REGION) 2>/dev/null || true); \
+	if [ -z "$$IMPORTERS" ] || [ "$$IMPORTERS" = "None" ]; then \
+		echo "$(CYAN)  No peering importers — proceeding to delete-stack$(NC)"; \
+	else \
+		for stack in $$IMPORTERS; do \
+			ENV=$$(echo "$$stack" | sed -n 's|^cf-scalable-web-\(.*\)-deploy-peering$$|\1|p'); \
+			if [ -z "$$ENV" ]; then \
+				echo "$(YELLOW)  WARN: importer $$stack doesn't match expected naming; skipping$(NC)"; \
+				continue; \
+			fi; \
+			echo "$(YELLOW)  $$stack imports our SG. Marking $$ENV for restore + destroying peering.$(NC)"; \
+			aws ssm put-parameter \
+				--name "/worxco/deploy-host/peering-restore-pending/$$ENV" \
+				--value "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+				--type String --overwrite \
+				--region $(AWS_REGION) > /dev/null; \
+			$(MAKE) destroy-peering ENV=$$ENV || { \
+				echo "$(RED)destroy-peering ENV=$$ENV failed — aborting destroy-deploy-host$(NC)"; \
+				exit 1; \
+			}; \
+		done; \
+	fi
 	@echo "$(YELLOW)Deleting deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@time aws cloudformation delete-stack \
 		--stack-name $(DEPLOY_HOST_STACK) \
@@ -1530,6 +1588,14 @@ destroy-deploy-host:  ## Delete deploy host (pass CONFIRMED=yes to skip prompt)
 		&& echo "  $(GREEN)✓ SSM-SessionManagerRunShell deleted$(NC)" \
 		|| echo "  $(CYAN)SSM-SessionManagerRunShell not found (already clean)$(NC)"
 	@echo "$(GREEN)✓ Deploy host deleted$(NC)"
+	@MARKERS=$$(aws ssm get-parameters-by-path \
+		--path "/worxco/deploy-host/peering-restore-pending/" \
+		--query 'Parameters[].Name' --output text \
+		--region $(AWS_REGION) 2>/dev/null || echo ""); \
+	if [ -n "$$MARKERS" ]; then \
+		echo "$(CYAN)Peering restore markers pending for next deploy-deploy-host:$(NC)"; \
+		for m in $$MARKERS; do echo "  $$m"; done; \
+	fi
 
 # -----------------------------------------------------------------------------
 # Deploy Host VPC Peering (per environment)

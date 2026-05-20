@@ -132,8 +132,22 @@ prioritized by "would this bite again if we don't fix it."
   `make restart-php-fpm` is the canonical answer when settings.php on FSx
   changes. Will be noted prominently in docs/OPERATIONS.md.
 
-- [ ] **`destroy-deploy-host` / `deploy-deploy-host` should handle the
-  peering dependency automatically with a persistent restore marker.**
+- [x] **`destroy-deploy-host` / `deploy-deploy-host` handle the
+  peering dependency automatically with a persistent restore marker.** ✅ 2026-05-20
+  Implemented inline in the two Make targets. destroy-deploy-host
+  pre-check uses `aws cloudformation list-imports --export-name
+  cf-deploy-host-sg-id` to find every peering stack importing our
+  exports; for each, writes a marker at
+  `/worxco/deploy-host/peering-restore-pending/<env>` (SSM, timestamp
+  value) and calls `destroy-peering ENV=<env>` before proceeding to
+  the cf-deploy-host delete-stack. deploy-deploy-host post-step reads
+  any pending markers, runs `deploy-peering ENV=<env>` for each, and
+  deletes the marker on success (failures keep the marker for retry,
+  per-env atomic). All four operational behaviors from the original
+  design (fresh account / full env / multi-env multiple peerings /
+  partial-failure retry) are covered.
+
+  Original entry (kept for context):
   Bit us 2026-05-19: ran `destroy-deploy-host CONFIRMED=yes`, CFN started
   the delete (DELETE_IN_PROGRESS) then canceled it 1 second later
   because `cf-scalable-web-sandbox-deploy-peering` was still importing
