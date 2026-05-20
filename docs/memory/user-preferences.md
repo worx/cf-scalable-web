@@ -27,8 +27,21 @@ recoverable anyway. Stated explicitly 2026-05-20.
 
 **How to apply**:
 - After any meaningful change, draft a commit message + commit + push in
-  one motion. Do not write to `.git/COMMIT_MSG_DRAFT` and pause for
-  approval. Do not ask "should I commit?"
+  one motion. Do not pause for approval. Do not ask "should I commit?"
+- Pipe the commit message via stdin instead of writing to
+  `.git/COMMIT_MSG_DRAFT`. The draft-file pattern triggers a tool
+  permission prompt for every commit (writing inside `.git/`); piping
+  via `-F-` avoids it entirely. Pattern:
+  ```bash
+  git commit -F- <<'EOF'
+  subject line
+
+  body...
+
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  EOF
+  ```
+  Then `git push origin main`.
 - Still: stage specific files (`git add path/to/file`), never `git add -A`.
 - Still: include prompt logs when batching housekeeping commits.
 - Still: GPL-2.0-or-later headers on all source files.
