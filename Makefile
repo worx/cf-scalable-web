@@ -425,6 +425,29 @@ endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Va
 		echo "  $(CYAN) For the site-name path: add to /etc/hosts or use a Host-header browser ext.)$(NC)"; \
 	fi
 	@echo ""
+	@echo "$(CYAN)Drupal admin login:$(NC)"
+	@ALB_DNS=$$(aws cloudformation describe-stacks \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	ADMIN_USER=$$(aws ssm get-parameter --name "/$(ENV)/drupal/admin-username" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
+	ADMIN_SECRET="worxco/$(ENV)/drupal/admin-password"; \
+	if [ -z "$$ALB_DNS" ] || [ "$$ALB_DNS" = "None" ]; then \
+		echo "  $(YELLOW)(ALB not deployed)$(NC)"; \
+	elif [ -z "$$ADMIN_USER" ]; then \
+		echo "  $(YELLOW)(cf-app-drupal not deployed — no admin-username SSM param)$(NC)"; \
+	else \
+		echo "  $(GREEN)Login URL:$(NC)   http://$$ALB_DNS/user/login"; \
+		echo "  $(GREEN)Username:$(NC)    $$ADMIN_USER"; \
+		echo "  $(GREEN)Password:$(NC)    (not printed — fetch with the command below)"; \
+		echo "  $(GREEN)Fetch password:$(NC)"; \
+		echo "    aws secretsmanager get-secret-value --secret-id $$ADMIN_SECRET \\"; \
+		echo "      --query SecretString --output text --region $(AWS_REGION)"; \
+		echo "  $(CYAN)(works only if your IAM principal has secretsmanager:GetSecretValue$(NC)"; \
+		echo "  $(CYAN) on that secret ARN. Pipe to pbcopy to send directly to clipboard.)$(NC)"; \
+	fi
+	@echo ""
 	@echo "$(CYAN)Deploy-host (operator access):$(NC)"
 	@DEPLOY_ID=$$(aws ec2 describe-instances \
 		--filters "Name=tag:Name,Values=cf-deploy-host" "Name=instance-state-name,Values=running" \

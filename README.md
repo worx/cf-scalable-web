@@ -22,6 +22,13 @@ Start here, by what you want to do:
   — quick-reference: stack names, key file paths, SSM parameter
   conventions
 
+**I want to customize / change something:**
+- [docs/CUSTOMIZATION-GUIDE.md](docs/CUSTOMIZATION-GUIDE.md) — for
+  every customizable surface (nginx config, PHP config, Drupal
+  themes/modules, AMI contents, network architecture), where the
+  canonical source lives, the apply workflow, and whether the
+  change survives destroy-all
+
 **I want to operate a running system:**
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — runbook for day-to-day Make
   targets (check-drift, build-amis, restart-php-fpm, reload-nginx,

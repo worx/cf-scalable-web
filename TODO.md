@@ -110,6 +110,19 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P1 — Operational improvements (close the traps that bit us)
 
+- [ ] **Move Drupal hash_salt to SSM SecureString** so it survives
+  destroy-all + redeploy. Currently lives only on FSx at
+  `/var/www/drupal-private/salt.txt`; FSx is part of cf-storage which
+  destroy-all tears down. Result: every destroy/redeploy invalidates
+  every active session, password-reset link, CSRF token, "remember me"
+  cookie across the user base. Tolerable for sandbox/staging in
+  active testing; **not** OK for production. Full design + ownership
+  options + multi-tenancy interaction + implementation checklist in
+  [docs/memory/salt-persistence-design.md](docs/memory/salt-persistence-design.md).
+  Captured 2026-05-20.
+
+
+
 - [x] **`make check-drift`** — for each `cloudformation/cf-*.yaml`, compare
   local mtime to the deployed stack's LastUpdatedTime; warn when local is
   newer (means edits sit in git but haven't been deployed). ✅ commit d3ca66f.
