@@ -101,8 +101,15 @@ case "$CMD" in
     [ ! -f "$FILE" ] && { echo "ERROR: no such file: $FILE" >&2; exit 1; }
     KEY=$(head -1 "$FILE" | tr -d '\r\n')
     case "$KEY" in
-      ssh-*|ecdsa-*|sk-*) ;;
-      *) echo "ERROR: $FILE doesn't look like a single-line SSH public key" >&2; exit 1 ;;
+      ssh-dss*)
+        echo "ERROR: DSA keys (ssh-dss) are deprecated and rejected by modern OpenSSH." >&2
+        echo "       Generate a modern key:" >&2
+        echo "         ssh-keygen -t ed25519 -f ~/.ssh/my-new-key -C 'user@host'" >&2
+        echo "       Then: make admin-ssh-key-add NAME=$NAME FILE=~/.ssh/my-new-key.pub" >&2
+        exit 1
+        ;;
+      ssh-ed25519*|ssh-rsa*|ecdsa-sha2-*|sk-ssh-ed25519*|sk-ecdsa-sha2-*) ;;
+      *) echo "ERROR: $FILE doesn't look like a supported SSH public key type" >&2; exit 1 ;;
     esac
     aws ssm put-parameter \
       --name "$SSM_PATH/$NAME" \
@@ -135,12 +142,16 @@ case "$CMD" in
       echo "(no admin keys configured)"
     else
       printf "%-20s  %-15s  %s\n" "OWNER" "TYPE" "FINGERPRINT"
+      # Tolerate any per-row failures (e.g., ssh-keygen refusing to
+      # fingerprint a key type it considers deprecated). pipefail+set -e
+      # would otherwise kill the whole listing for one bad row.
       echo "$PARAMS_JSON" | jq -r '.[] | "\(.Name)\t\(.Value)"' | while IFS=$'\t' read -r N V; do
         OWNER=$(basename "$N")
         TYPE=$(echo "$V" | awk '{print $1}')
-        FP=$(echo "$V" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        FP=$(echo "$V" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}') || FP="(unfingerprintable)"
+        [ -z "$FP" ] && FP="(unfingerprintable)"
         printf "%-20s  %-15s  %s\n" "$OWNER" "$TYPE" "$FP"
-      done
+      done || true
     fi
     ;;
 

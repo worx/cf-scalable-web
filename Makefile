@@ -2176,7 +2176,10 @@ wait-deploy-host-ready:  ## Block until deploy-host's cloud-init finishes + boot
 	@scripts/wait-deploy-host-ready.sh
 
 admin-ssh-key-add:  ## Add an admin SSH public key (NAME=<owner> FILE=<path-to-pubkey>); auto-syncs to deploy-host
-	@scripts/admin-ssh-key.sh add "$(NAME)" "$(FILE)"
+	@# Expand ~ in FILE so `FILE=~/.ssh/foo.pub` works without
+	@# requiring operators to type the full absolute path.
+	@RESOLVED_FILE="$$(eval echo $(FILE))"; \
+	scripts/admin-ssh-key.sh add "$(NAME)" "$$RESOLVED_FILE"
 
 admin-ssh-key-remove:  ## Remove an admin SSH key (NAME=<owner>); auto-syncs to deploy-host
 	@scripts/admin-ssh-key.sh remove "$(NAME)"

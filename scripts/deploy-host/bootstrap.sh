@@ -469,8 +469,16 @@ MOTDEOF
 # Both gated by MOTD_SHOWN; the env var carries across the bash→zsh exec
 # so we don't double-print in the rare both-fire case.
 cat > /etc/profile.d/00-worxco-motd.sh <<'PROFEOF'
-# Print /etc/motd on interactive bash login. Idempotent within session.
-if [ -f /etc/motd ] && [ -z "${MOTD_SHOWN:-}" ] && [ -t 1 ]; then
+# Print /etc/motd on interactive bash login.
+#
+# Skip when running inside zsh's sh-emulation. Ubuntu's default
+# /etc/zsh/zprofile does `emulate sh -c 'source /etc/profile'`, which
+# re-runs /etc/profile (and therefore us) inside zsh AFTER the
+# bash→zsh exec. If we printed here, zsh's own zshrc.d/00-motd.zsh
+# would print again moments later (the MOTD_SHOWN export doesn't
+# escape the emulation scope). ZSH_VERSION is set whenever the
+# shell is zsh, even in sh-emulated context — use it as the gate.
+if [ -z "${ZSH_VERSION:-}" ] && [ -f /etc/motd ] && [ -z "${MOTD_SHOWN:-}" ] && [ -t 1 ]; then
   cat /etc/motd
   export MOTD_SHOWN=1
 fi
