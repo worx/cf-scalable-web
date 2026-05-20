@@ -446,6 +446,12 @@ endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Va
 		echo "      --query SecretString --output text --region $(AWS_REGION)"; \
 		echo "  $(CYAN)(works only if your IAM principal has secretsmanager:GetSecretValue$(NC)"; \
 		echo "  $(CYAN) on that secret ARN. Pipe to pbcopy to send directly to clipboard.)$(NC)"; \
+		echo ""; \
+		echo "  $(GREEN)Or (Drupal-native, no password needed):$(NC)"; \
+		echo "    make admin-login-url ENV=$(ENV)"; \
+		echo "  $(CYAN)(runs 'drush user:login' on the deploy-host via SSM; prints a$(NC)"; \
+		echo "  $(CYAN) single-use 24h URL that drops you straight onto the admin page.$(NC)"; \
+		echo "  $(CYAN) Standard Drupal lockout-recovery flow — no AWS knowledge needed.)$(NC)"; \
 	fi
 	@echo ""
 	@echo "$(CYAN)Deploy-host (operator access):$(NC)"
@@ -2290,6 +2296,9 @@ clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tab
 
 install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the deploy-host
 	@scripts/install-drupal-remote.sh $(ENV)
+
+admin-login-url:  ## Generate a one-time drush user:login URL for admin (Drupal-native, no password lookup)
+	@scripts/admin-login-url.sh $(ENV)
 
 smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 200
 	@echo "$(BLUE)Smoke-testing Drupal at ENV=$(ENV)$(NC)"
