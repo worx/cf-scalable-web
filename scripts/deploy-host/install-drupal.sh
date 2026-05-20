@@ -431,6 +431,29 @@ done
 [ -f "$SALT_FILE" ] && sudo chmod 0640 "$SALT_FILE"
 
 # ============================================================
+step "Uninstall the Update Manager module (architecturally unreachable)"
+# ============================================================
+# `drush site:install standard` enables Drupal's Update Manager module
+# by default. In our architecture, that module is permanently broken:
+# - It tries to contact updates.drupal.org from PHP-FPM workers to
+#   check for new releases. Our compute fleet has NO outbound internet
+#   (privatized topology, no NAT — see docs/ARCHITECTURE.md). Every
+#   page view that triggers an update check fails with cURL timeout
+#   and spams watchdog with "Couldn't connect to updates.drupal.org".
+# - It surfaces "Updates available — click to apply" UI to admins.
+#   We deliberately have no in-place update mechanism. Drupal code
+#   changes happen through the composer → AMI-bake → instance-refresh
+#   cycle, controlled by operators on the deploy-host.
+# So the module tells admins about something they cannot act on, and
+# spams the log doing it. Uninstall.
+#
+# See docs/memory/drupal-update-management.md for the full design
+# decision + how operators DO check for available updates (from the
+# deploy-host, manually, then via composer + AMI rebuild).
+log "Uninstalling Update Manager module (telemetry to updates.drupal.org is unreachable from compute fleet)"
+sudo -E HOME=/root vendor/bin/drush pm:uninstall update -y 2>&1 | tail -3
+
+# ============================================================
 step "Publish Drupal nginx vhost to FSx (read by all nginx instances)"
 # ============================================================
 # nginx hosts mount $FSX:/fsx/nginx at /etc/nginx/shared and include

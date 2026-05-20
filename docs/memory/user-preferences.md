@@ -77,6 +77,35 @@ conflict with general defaults).
 - Times the runs for baseline reference (~50 min deploy-all, ~10 min database, ~12 min cache)
 - Checks health via CLI target health queries, not just UI
 
+## When Kurt makes a deliberate-looking choice, trust the deliberation
+
+**Default to "he meant it" rather than "let me explain why that's wrong."**
+
+**Why**: 2026-05-20 — Kurt ran `drush pmu update` to uninstall the
+Update Manager module. Claude responded with a "well actually, `pmu` is
+pm:uninstall and what you probably wanted is drush cron" lecture. Kurt
+had to push back: he KNEW pmu was uninstall, he WANTED it uninstalled,
+and the reasoning ("the architecture forbids self-update from compute,
+so the module's warnings are noise about something Drupal can't act
+on") was sound and consistent with the project's design. The lecture
+was preachy and slowed the work down.
+
+**How to apply**:
+- When Kurt does something that looks unusual (deliberate uninstall,
+  defies a "standard" pattern, chooses a less-common option), assume
+  there's an architectural reason. ASK what he was solving for before
+  proposing an alternative.
+- If you're about to write "did you mean X?" or "you might want Y
+  instead" — first ask yourself: "could there be a reason Kurt picked
+  this specific path that I haven't considered?" Often yes, given the
+  architecture's quirks (no NAT, immutable AMIs, separate access models
+  for compute vs deploy-host, etc.).
+- It's fine to propose alternatives — DO that — but frame as "here's
+  another option, with these tradeoffs" rather than "you probably
+  intended something else."
+- After Kurt confirms his choice was deliberate, MEMORIALIZE the
+  decision (project memory file) so future-you doesn't relitigate it.
+
 ## Naming
 - "Bastion" renamed to "deploy-host" — the old name caused confusion about purpose
 - Redis → Valkey/cache — infrastructure references should be engine-neutral where possible

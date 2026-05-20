@@ -31,6 +31,7 @@ set -euo pipefail
 
 CURRENT_ENV_FILE="/etc/worxco/current-env"
 MOUNT_POINT="/var/www"
+NGINX_MOUNT_POINT="/etc/nginx/shared"
 FSTAB_TAG="# worxco-use-env"
 
 # ----- no-arg: print current state and exit -----
@@ -75,6 +76,15 @@ if [ -e "/proc/$PPID/cwd" ]; then
 fi
 
 # ----- common cleanup: unmount + clear fstab -----
+# Unmount nginx submount first (it's a sub-NFS-export of the same FSx;
+# unmount in reverse order — submount before parent — to avoid EBUSY).
+if mountpoint -q "$NGINX_MOUNT_POINT" 2>/dev/null; then
+  echo "Unmounting current $NGINX_MOUNT_POINT..."
+  if ! umount "$NGINX_MOUNT_POINT"; then
+    echo "ERROR: umount failed — something is still using $NGINX_MOUNT_POINT" >&2
+    exit 1
+  fi
+fi
 if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
   echo "Unmounting current $MOUNT_POINT..."
   if ! umount "$MOUNT_POINT"; then
@@ -83,9 +93,13 @@ if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
     exit 1
   fi
 fi
-# Remove any prior worxco fstab block (marker line + the entry that follows)
+# Remove any prior worxco fstab block (marker line + the entries that
+# follow). The block can be 1 or 2 lines depending on whether older
+# use-env wrote just the /var/www mount or the newer /var/www +
+# /etc/nginx/shared pair — sed-delete the marker and everything up
+# until a blank line (the block's natural terminator).
 if grep -q "^${FSTAB_TAG}\$" /etc/fstab 2>/dev/null; then
-  sed -i.bak "/^${FSTAB_TAG}\$/,+1d" /etc/fstab
+  sed -i.bak "/^${FSTAB_TAG}\$/,/^\$/d" /etc/fstab
   rm -f /etc/fstab.bak
 fi
 
@@ -120,16 +134,27 @@ else
   echo "WARN: refresh-env-config not on PATH — /etc/hosts FSx block may be stale"
 fi
 
-# ----- mount target env's FSx at /var/www -----
-mkdir -p "$MOUNT_POINT"
+# ----- mount target env's FSx — two mounts to match nginx layout -----
+# /var/www gets the volume root. /etc/nginx/shared gets the /fsx/nginx
+# submount, so operators on the deploy-host see vhost configs at the
+# SAME path nginx instances see them. Two-mount design (rather than
+# operators having to remember "/var/www/nginx/sites-enabled = what's
+# at /etc/nginx/shared/sites-enabled on the runtime fleet"). Bonus:
+# enables `sudo apt install nginx` + a local nginx serve for sandbox
+# testing without round-tripping through AMI rebuilds.
+mkdir -p "$MOUNT_POINT" "$NGINX_MOUNT_POINT"
 echo "Mounting $FSX_DNS:/fsx -> $MOUNT_POINT (env=$ENV)"
 mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
+echo "Mounting $FSX_DNS:/fsx/nginx -> $NGINX_MOUNT_POINT"
+mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/nginx" "$NGINX_MOUNT_POINT"
 
 # ----- persist in fstab for stop/start cycles -----
 {
   echo ""
   echo "$FSTAB_TAG"
   echo "$FSX_DNS:/fsx $MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
+  echo "$FSX_DNS:/fsx/nginx $NGINX_MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
+  echo ""
 } >> /etc/fstab
 
 # ----- record active env (read by zsh RPROMPT every prompt cycle) -----
@@ -138,7 +163,8 @@ echo "$ENV" > "$CURRENT_ENV_FILE"
 
 echo ""
 echo "Active environment: $ENV"
-echo "  /var/www -> $FSX_DNS:/fsx"
+echo "  /var/www           -> $FSX_DNS:/fsx"
+echo "  /etc/nginx/shared  -> $FSX_DNS:/fsx/nginx"
 echo "  /etc/worxco/current-env updated (zsh prompt will refresh next render)"
 echo ""
 echo "To pull env vars (DB host, secrets, etc.) into your current shell:"

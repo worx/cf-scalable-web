@@ -255,6 +255,27 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P3 — Captured for later (no immediate action)
 
+- [ ] **Drush site-aliases for multi-tenancy** — when the multi-tenant
+  refactor lands (Phase E per `docs/plans/multi-tenancy.md`), need a
+  per-site alias file pattern AND a "single place to see all sites"
+  view. Reference doc: https://www.drush.org/13.7.3/site-aliases/.
+  Four design options weighed in
+  [docs/memory/drush-aliases-multi-tenancy.md](docs/memory/drush-aliases-multi-tenancy.md);
+  leaning toward symlinks into `/etc/drush/sites/` from per-project
+  canonical files in `drupal/drush/sites/`. Decision deferred until
+  the multi-tenant refactor is active and the per-site repo design
+  from multi-tenancy.md is finalized. Captured 2026-05-20.
+
+- [ ] **`make check-updates ENV=<env>`** — SSM-dispatch `composer
+  outdated` on the deploy-host and print available Drupal core /
+  contrib module updates. The Update Manager Drupal module is
+  uninstalled by `install-drupal.sh` for architectural reasons (see
+  `docs/memory/drupal-update-management.md`); this Make target is the
+  replacement "is there anything to update?" check operators run from
+  their Mac. Captured 2026-05-20.
+
+
+
 - [ ] Drupal upgrade promotion workflow (already detailed in
   `~/.claude/TODO.md` under `[cf-scalable-drupal] Phase D`).
 - [ ] Multi-tenancy refactor (Phase E+, docs/plans/multi-tenancy.md).

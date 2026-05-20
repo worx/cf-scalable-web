@@ -27,20 +27,41 @@ what lives at `/fsx/...` on the volume itself.
 
 ## Mount points
 
-Each FSx volume has **two logical mount points**, consumed in different
-combinations by different host classes:
+The FSx volume exposes **two distinct mount sources** in the project:
 
-| Mount source | Host class | Mount path | Purpose |
-|---|---|---|---|
-| `$FSX:/fsx` | deploy-host | `/var/www` | Full volume access; deploy-host is the only host that writes to FSx |
-| `$FSX:/fsx` | PHP-FPM instances | `/var/www` | Read code + write user-uploaded files (under per-site `files/` directories) |
-| `$FSX:/fsx` | NGINX instances | `/var/www` | Read static assets for `try_files`-style serving |
-| `$FSX:/fsx/nginx` | NGINX instances | `/etc/nginx/shared` | Per-site vhost configs; loaded via `include /etc/nginx/shared/sites-enabled/*.conf` in the base nginx.conf |
+| Mount source | Mount path | What it surfaces |
+|---|---|---|
+| `$FSX:/fsx` | `/var/www` | Volume root — full FSx tree visible to anyone who needs to read code, write site files, or manage the layout |
+| `$FSX:/fsx/nginx` | `/etc/nginx/shared` | The nginx subtree, mounted at the path nginx's base config (`include /etc/nginx/shared/sites-enabled/*.conf`) expects to find vhost files |
 
-That's it. No additional FSx mount points are needed. The
-`/fsx/nginx` mount is a sub-mount of the same volume — it just exposes
-that subtree to nginx at the path where its base config expects to
-find shared site configs.
+**Both mounts are present on deploy-host and on nginx instances.**
+PHP-FPM instances mount only `/var/www`.
+
+| Host class | `df` entries | Why |
+|---|---|---|
+| **deploy-host** | 2 — `/var/www` AND `/etc/nginx/shared` | Operators see vhost configs at the SAME path nginx instances see them. Zero translation between "where I edit" and "where the runtime fleet reads." Also enables future local-nginx serve for sandbox testing without needing an AMI rebuild round-trip. |
+| **PHP-FPM** | 1 — `/var/www` | Reads code, writes user-uploaded files. Doesn't read or care about the nginx config subtree. Second mount would be inert weight. |
+| **NGINX** | 2 — `/var/www` AND `/etc/nginx/shared` | Same as deploy-host. `/var/www` for static-asset `try_files` serving; `/etc/nginx/shared` because that's the path the AMI-baked `nginx.conf` includes vhost configs from. |
+
+The sub-mount (`$FSX:/fsx/nginx` at `/etc/nginx/shared`) and the root
+mount (`$FSX:/fsx` at `/var/www`) are different access paths into the
+same underlying FSx volume — not separate volumes. Operators can read
+`/etc/nginx/shared/sites-enabled/drupal.conf` and
+`/var/www/nginx/sites-enabled/drupal.conf` and see the same file
+content; they're aliases via NFS export of overlapping subtrees.
+
+**Why deploy-host gets both mounts (revised 2026-05-20):** earlier
+design gave the deploy-host only `/var/www` since it COULD read the
+nginx subtree as `/var/www/nginx/...`. Per-host-class mount-count
+asymmetry caused operator confusion (debugging an nginx config issue
+required mentally translating "where I'm editing on deploy-host" to
+"where nginx reads on the runtime fleet"). The two-mount design
+eliminates that translation step. Cost is one extra NFS mount and
+fstab entry per env switch — trivially small.
+
+No additional FSx mount points are needed anywhere. If a future
+requirement looks like it needs a third mount source, the layout is
+probably wrong — restructure subfolders first.
 
 ## Top-level directory structure
 
