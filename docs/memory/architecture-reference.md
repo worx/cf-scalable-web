@@ -2,7 +2,7 @@
 name: Architecture Quick Reference
 description: Key file paths, stack names, resource relationships, and deployment sequence for fast orientation
 type: project
-originSessionId: f483de33-7dee-4185-b1a3-72a0ada5c58e
+created: 2026-04-25
 ---
 # Architecture Quick Reference
 

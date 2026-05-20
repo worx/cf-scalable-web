@@ -2,6 +2,59 @@
 
 Scalable AWS infrastructure for Drupal and WordPress hosting using CloudFormation.
 
+> **Browsing the documentation?** This project ships with an Obsidian
+> vault config so you can read all the docs in a comfortable reader
+> without a code editor. See [docs/OBSIDIAN.md](docs/OBSIDIAN.md) for
+> one-time setup and the `open -a obsidian .` command-line shortcut.
+
+## Documentation map
+
+Start here, by what you want to do:
+
+**I want to understand the system at a high level:**
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — networks, request flow,
+  storage layout, deploy-allX phase ordering, CloudFormation stack
+  relationships, Mermaid diagrams throughout
+- [docs/memory/architecture-reference.md](docs/memory/architecture-reference.md)
+  — quick-reference: stack names, key file paths, SSM parameter
+  conventions
+
+**I want to operate a running system:**
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — runbook for day-to-day Make
+  targets (check-drift, build-amis, restart-php-fpm, reload-nginx,
+  install-drupal-remote, etc.) plus anti-patterns to avoid
+- [docs/DEPLOY-HOST.md](docs/DEPLOY-HOST.md) — the operator-only EC2
+  instance: setup, SSM Session Manager access, env-switching with
+  `use-env`
+- [docs/SECRETS.md](docs/SECRETS.md) — where credentials live, how
+  rotation works, the Secrets Manager + SSM Parameter Store split
+
+**I want to set up a fresh environment:**
+- [docs/SANDBOX-TESTING.md](docs/SANDBOX-TESTING.md) — building a
+  sandbox from zero, lessons learned, common failure modes
+- [docs/GITHUB-SETUP.md](docs/GITHUB-SETUP.md) — wiring up the GitHub
+  deploy key for the deploy-host's repo clone
+- [docs/SERVICE-LINKED-ROLES.md](docs/SERVICE-LINKED-ROLES.md) —
+  one-time AWS service-linked roles required (ElastiCache, etc.)
+
+**I want to understand past decisions and gotchas:**
+- [docs/memory/gotchas.md](docs/memory/gotchas.md) — the long list of
+  hard-won lessons, indexed by area (CloudFormation, VPC, SSM, Drupal
+  install). Read this before debugging anything that smells familiar.
+- [docs/memory/admin-access-policy.md](docs/memory/admin-access-policy.md)
+  — why SSM is the only inbound path; how scp/sftp works over an SSM
+  proxy without ever opening port 22
+- [docs/memory/destroy-all-residue.md](docs/memory/destroy-all-residue.md)
+  — what survives `make destroy-all` and the design options for
+  cleaning up
+- [docs/memory/ssm-new-experience-decision.md](docs/memory/ssm-new-experience-decision.md)
+  — record of the deliberate choice to disable AWS SSM Quick Setup /
+  DHMC; how to roll it back if accidentally re-enabled
+
+**I want to know what's planned / pending:**
+- [TODO.md](TODO.md) — prioritized backlog: regressions to address, ops
+  improvements, doc polish, captured future-work items
+
 ## Overview
 
 This project provides a complete, production-ready infrastructure for hosting multiple Drupal and WordPress sites with high availability, auto-scaling, and defense-in-depth security.
@@ -132,15 +185,28 @@ cf-scalable-web/
 │   └── recipes/                # Image recipes
 ├── scripts/                     # Management scripts
 │   └── manage-secrets.sh       # Secrets Manager operations
-├── docs/                        # Documentation
-│   ├── ARCHITECTURE.md         # Architecture details with diagrams
+├── docs/                        # Documentation (see Documentation map above)
+│   ├── ARCHITECTURE.md         # Network, request flow, storage layout, phase ordering
+│   ├── OPERATIONS.md           # Day-to-day Make targets and runbooks
+│   ├── OBSIDIAN.md             # How to browse these docs with Obsidian
 │   ├── DEPLOY-HOST.md          # Deploy host setup and usage
 │   ├── SANDBOX-TESTING.md      # Sandbox testing guide
-│   └── SECRETS.md              # Secrets management architecture
+│   ├── SECRETS.md              # Secrets management architecture
+│   ├── GITHUB-SETUP.md         # GitHub deploy key wiring
+│   ├── SERVICE-LINKED-ROLES.md # One-time AWS service-linked roles
+│   └── memory/                 # Long-lived project knowledge
+│       ├── architecture-reference.md  # Quick reference (paths, stacks, params)
+│       ├── gotchas.md                 # Hard-won lessons from debugging
+│       ├── admin-access-policy.md     # SSM-only ingress + scp-via-SSM
+│       ├── destroy-all-residue.md     # What survives destroy-all
+│       ├── ssm-new-experience-decision.md  # Why DHMC/QuickSetup is off
+│       └── user-preferences.md        # Operator preferences (informal)
+├── .obsidian/                   # Obsidian vault config (filters out infra dirs)
 ├── tests/                       # Test suite
 │   └── test-templates.sh       # CloudFormation template tests
 ├── Makefile                     # Deployment automation
-└── README.md                   # This file
+├── README.md                    # This file
+└── TODO.md                      # Prioritized backlog
 ```
 
 ## Common Operations

@@ -2,6 +2,7 @@
 name: Admin access policy — SSM-only ingress, ever
 description: The non-negotiable rule that SSM is the only inbound path to any instance, and the SSH-via-SSM-proxy pattern that supports scp/sftp without opening port 22
 type: project
+created: 2026-05-19
 ---
 # Admin access policy
 

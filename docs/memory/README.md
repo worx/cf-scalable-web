@@ -12,26 +12,40 @@ reads all files in this folder automatically.
 
 ## File Format
 
-Each file uses optional YAML frontmatter:
+Each file uses YAML frontmatter:
 
 ```markdown
 ---
 name: Short descriptive name
 description: One-line summary
-type: architecture | gotchas | preferences | project | reference
-updated: YYYY-MM-DD
+type: project | feedback | reference | user
+created: YYYY-MM-DD
 ---
 
 Content here...
 ```
 
+Field notes:
+- **type** matches the auto-memory taxonomy: `project` (ongoing state),
+  `feedback` (user preferences), `reference` (external system pointers),
+  `user` (user identity).
+- **created** is the date the memory was first written. Optional, but
+  useful — pair with the timestamps in `PROMPT_LOGS/` to find the
+  originating conversation if you ever need to.
+- (Older files may have a deprecated `originSessionId` field — that was
+  Claude's session ID. Being phased out per 2026-05-20 conversation;
+  if you see one, it's safe to remove.)
+
 ## Current Files
 
 | File | Type | Purpose |
 |------|------|---------|
-| `architecture-reference.md` | architecture | Stack names, deploy sequence, SSM params, boot flow |
-| `gotchas.md` | gotchas | Hard-won debugging lessons — things that broke and why |
-| `user-preferences.md` | preferences | Kurt's working style, git workflow, naming conventions |
+| `architecture-reference.md` | project | Stack names, deploy sequence, SSM params, boot flow |
+| `gotchas.md` | project | Hard-won debugging lessons — things that broke and why |
+| `admin-access-policy.md` | project | SSM-only ingress rule + scp-via-SSM-proxy pattern |
+| `destroy-all-residue.md` | project | What survives `make destroy-all`; cleanup design options |
+| `ssm-new-experience-decision.md` | project | Why we disabled AWS SSM Quick Setup / DHMC; rollback playbook |
+| `user-preferences.md` | feedback | Kurt's working style, git workflow, naming conventions |
 
 ## When to Add Memory
 

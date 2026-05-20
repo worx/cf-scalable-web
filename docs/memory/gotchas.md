@@ -2,7 +2,7 @@
 name: Infrastructure Gotchas
 description: Hard-won lessons from deployment debugging — things that broke and why, to avoid repeating
 type: project
-originSessionId: f483de33-7dee-4185-b1a3-72a0ada5c58e
+created: 2026-04-25
 ---
 # Infrastructure Gotchas (Lessons Learned)
 

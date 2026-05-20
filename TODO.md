@@ -195,6 +195,31 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P2 — Documentation polish
 
+- [ ] **Standardize YAML frontmatter on every doc.** Currently only
+  `docs/memory/*.md` have it (name, description, type). Extend to all
+  `docs/*.md` and root-level docs: add `name`, `description`, and
+  `audience` (operator | contributor | all) to each. Pays off three
+  ways: (a) Obsidian shows it as clickable Properties for filtering,
+  (b) future `make build-doc-index` can introspect for categorized
+  TOC, (c) future `master.pdf` builder uses it to group / order
+  chapters. Captured 2026-05-20.
+
+- [ ] **Enable Obsidian graph view + tag pane** in
+  `.obsidian/core-plugins.json` once the doc set crosses ~30 files
+  with healthy cross-linking. Currently graph would be sparse and
+  tag pane has nothing to show (no `#tags` in any doc yet). Worth
+  revisiting after a few more docs land + frontmatter adds tags.
+  Captured 2026-05-20.
+
+- [ ] **`docs/READING-GUIDE.md` for new contributors.** "If you've
+  never seen this codebase, read these in this order" — separate from
+  README's task-oriented "Documentation map" (which sorts by user
+  goal, not by reading sequence). Probably 3-4 ordered chapters: (1)
+  high-level architecture, (2) operations runbook, (3) memory/gotchas
+  for the rough edges, (4) plans/ for future work. Defer until the
+  doc set is more stable so we're not chasing a moving target.
+  Captured 2026-05-20.
+
 - [ ] **docs/OPERATIONS.md** — runbooks for use-env, restart-php-fpm,
   clear-drupal-cache, AMI rebuild sequence, common failure modes.
   **In progress 2026-05-18: first cut started.**

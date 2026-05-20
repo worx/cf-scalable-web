@@ -2,6 +2,7 @@
 name: Post destroy-all residue inventory
 description: What AWS resources survive `make destroy-all` and the open decisions about how to clean them up
 type: project
+created: 2026-05-19
 ---
 # Post-`destroy-all` residue inventory
 

@@ -2,6 +2,7 @@
 name: SSM new experience decision — deliberately disabled
 description: We turned off the AWS Systems Manager "new experience" (DHMC + Quick Setup) on 2026-05-19; if AWS prompts again, decline. Rationale + rollback playbook
 type: project
+created: 2026-05-19
 ---
 # SSM new experience — deliberately disabled
 
