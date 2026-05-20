@@ -455,18 +455,36 @@ Drupal management (after env is active and Drupal is deployed):
 
 MOTDEOF
 
-# Show motd on interactive bash sessions (idempotent)
-if ! grep -q "MOTD_SHOWN" /home/ubuntu/.bashrc 2>/dev/null; then
-  cat >> /home/ubuntu/.bashrc << 'RCEOF'
-
-# Show motd on interactive login
-if [ -f /etc/motd ] && [ -z "$MOTD_SHOWN" ]; then
+# Print /etc/motd on interactive login. Earlier versions of this script
+# appended the print logic to ~/.bashrc, but ~/.bashrc is NOT read by
+# `bash -l` (which is what SSM Session Manager invokes) — login bash
+# reads /etc/profile + ~/.bash_profile, then exec's into zsh via our
+# auto-exec in /etc/bash.bashrc. So the .bashrc-based print never fired.
+#
+# Two system-wide files now handle the print (covers both code paths):
+#   - /etc/profile.d/00-worxco-motd.sh:    bash login shells (the
+#     NO_AUTO_ZSH=1 escape hatch case — operator manually opted out of zsh)
+#   - /etc/zsh/zshrc.d/00-motd.zsh:        zsh interactive shells (the
+#     normal SSM flow, since /etc/bash.bashrc auto-execs bash → zsh)
+# Both gated by MOTD_SHOWN; the env var carries across the bash→zsh exec
+# so we don't double-print in the rare both-fire case.
+cat > /etc/profile.d/00-worxco-motd.sh <<'PROFEOF'
+# Print /etc/motd on interactive bash login. Idempotent within session.
+if [ -f /etc/motd ] && [ -z "${MOTD_SHOWN:-}" ] && [ -t 1 ]; then
   cat /etc/motd
   export MOTD_SHOWN=1
 fi
-RCEOF
+PROFEOF
+chmod 644 /etc/profile.d/00-worxco-motd.sh
+
+cat > /etc/zsh/zshrc.d/00-motd.zsh <<'ZMOTDEOF'
+# Print /etc/motd on interactive zsh start. Idempotent within session.
+if [[ -f /etc/motd ]] && [[ -z "${MOTD_SHOWN:-}" ]] && [[ -t 1 ]]; then
+  cat /etc/motd
+  export MOTD_SHOWN=1
 fi
-chown ubuntu:ubuntu /home/ubuntu/.bashrc
+ZMOTDEOF
+chmod 644 /etc/zsh/zshrc.d/00-motd.zsh
 
 # ============================================================
 step "Bootstrap complete"
