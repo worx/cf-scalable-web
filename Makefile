@@ -1484,7 +1484,11 @@ deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
 		--parameter-overrides file://$(DEPLOY_HOST_PARAMS) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION)
-	@echo "$(GREEN)✓ Deploy host deployed$(NC)"
+	@echo "$(CYAN)✓ CloudFormation stack created. Instance is launching; bootstrap.sh still running.$(NC)"
+	@echo ""
+	@$(MAKE) wait-deploy-host-ready
+	@echo ""
+	@echo "$(GREEN)✓ Deploy host fully bootstrapped and READY$(NC)"
 	@# Post-step: if destroy-deploy-host previously tore down any peering
 	@# stacks to clear its export dependencies, the env names are recorded
 	@# at /worxco/deploy-host/peering-restore-pending/<env>. Redeploy each
@@ -2167,6 +2171,9 @@ reload-nginx:  ## SSM-reload nginx on every nginx box (graceful, picks up new vh
 
 init-fsx-layout:  ## Pre-create /fsx/nginx + /fsx/sites on FSx (run before compute on fresh FSx)
 	@scripts/init-fsx-layout.sh $(ENV)
+
+wait-deploy-host-ready:  ## Block until deploy-host's cloud-init finishes + bootstrap marker exists (~10-15 min)
+	@scripts/wait-deploy-host-ready.sh
 
 publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf to FSx (no full reinstall)
 	@scripts/publish-drupal-vhost.sh $(ENV)
