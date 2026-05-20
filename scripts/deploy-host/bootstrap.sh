@@ -135,6 +135,23 @@ _worxco_env() {
 PROMPT='%n@%m:%~%# '
 RPROMPT='%F{yellow}$(_worxco_env)%f'
 
+# Auto-source the active env's variables on shell startup. Without this,
+# every new SSH/SSM-session login lands in an empty shell — operators
+# would have to run `use-env <env>` (which re-sources for the CURRENT
+# shell) before drush, psql, etc. would see DRUPAL_DB_HOST and friends.
+# Reading /etc/worxco/current-env lets us know which env file to source
+# without prompting. File reads are cheap; no network calls happen here
+# (the env file is a flat list of `export` lines populated by
+# refresh-env-config when use-env switches envs).
+if [[ -r /etc/worxco/current-env ]]; then
+  _cur_env=$(< /etc/worxco/current-env)
+  if [[ -n "$_cur_env" && "$_cur_env" != "NONE" && -r "/etc/worxco/envs/$_cur_env" ]]; then
+    # shellcheck disable=SC1090
+    source "/etc/worxco/envs/$_cur_env"
+  fi
+  unset _cur_env
+fi
+
 HISTFILE=~/.zsh_history
 HISTSIZE=100000
 SAVEHIST=100000
