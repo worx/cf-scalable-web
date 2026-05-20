@@ -13,5 +13,7 @@
     "PROMPT_LOGS/",
     "scripts/",
     "tests/"
-  ]
+  ],
+  "promptDelete": false,
+  "readableLineLength": false
 }
