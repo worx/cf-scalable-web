@@ -254,6 +254,19 @@ prioritized by "would this bite again if we don't fix it."
   cost of Default Host Management Config, which Node Tools to enable).
   Captured 2026-05-19; not blocking anything.
 
+- [ ] **Ubuntu 26.04 LTS "Resolute" spike — revisit after 26.04.1 ships
+  (~August 2026).** All hosts (deploy-host, nginx fleet, PHP fleet)
+  currently on 24.04 LTS arm64. 26.04 is published on AWS (AMI
+  `ami-053da03328707680f`, dated 2026-05-03) but only ~2 weeks old at
+  current date — known new-LTS bugs. Convention: wait for the `.1`
+  point release. Full reasoning + touchpoint inventory + known risks
+  (nginx-stable repo lag for new codenames, php7.4 availability in
+  newer universe, etc.) captured in
+  [docs/memory/ubuntu-version-decision.md](docs/memory/ubuntu-version-decision.md).
+  Approach: stand up an experimental `sandbox26` env (separate from
+  sandbox/staging/production) and run deploy-allX through it; don't
+  migrate the working envs until the spike validates. Captured 2026-05-20.
+
 - [ ] **`build-amis-if-needed`: skip rebuild when recipe hasn't changed.**
   Today's deploy-allX triggered build #3 of recipe 1.0.10 even though
   the recipe content is identical to yesterday's build #2. Image Builder
