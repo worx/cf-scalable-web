@@ -471,14 +471,15 @@ MOTDEOF
 cat > /etc/profile.d/00-worxco-motd.sh <<'PROFEOF'
 # Print /etc/motd on interactive bash login.
 #
-# Skip when running inside zsh's sh-emulation. Ubuntu's default
-# /etc/zsh/zprofile does `emulate sh -c 'source /etc/profile'`, which
-# re-runs /etc/profile (and therefore us) inside zsh AFTER the
-# bash→zsh exec. If we printed here, zsh's own zshrc.d/00-motd.zsh
-# would print again moments later (the MOTD_SHOWN export doesn't
-# escape the emulation scope). ZSH_VERSION is set whenever the
-# shell is zsh, even in sh-emulated context — use it as the gate.
-if [ -z "${ZSH_VERSION:-}" ] && [ -f /etc/motd ] && [ -z "${MOTD_SHOWN:-}" ] && [ -t 1 ]; then
+# Skip if SSH already printed it via pam_motd. Ubuntu's default
+# /etc/pam.d/sshd includes pam_motd, which auto-prints /etc/motd on
+# every SSH login BEFORE the user's shell starts. SSH_CONNECTION is
+# set by sshd in that case. We don't want to double-print on SSH
+# sessions, but we still want our MOTD to appear for SSM Session
+# Manager sessions (which spawn the shell directly, no PAM, no
+# SSH_CONNECTION). Same logic applied symmetrically in
+# /etc/zsh/zshrc.d/00-motd.zsh.
+if [ -z "${SSH_CONNECTION:-}" ] && [ -f /etc/motd ] && [ -z "${MOTD_SHOWN:-}" ] && [ -t 1 ]; then
   cat /etc/motd
   export MOTD_SHOWN=1
 fi
@@ -486,8 +487,10 @@ PROFEOF
 chmod 644 /etc/profile.d/00-worxco-motd.sh
 
 cat > /etc/zsh/zshrc.d/00-motd.zsh <<'ZMOTDEOF'
-# Print /etc/motd on interactive zsh start. Idempotent within session.
-if [[ -f /etc/motd ]] && [[ -z "${MOTD_SHOWN:-}" ]] && [[ -t 1 ]]; then
+# Print /etc/motd on interactive zsh start. Skip if SSH already
+# triggered pam_motd (SSH_CONNECTION set by sshd). See the matching
+# /etc/profile.d/00-worxco-motd.sh for the full reasoning.
+if [[ -z "${SSH_CONNECTION:-}" ]] && [[ -f /etc/motd ]] && [[ -z "${MOTD_SHOWN:-}" ]] && [[ -t 1 ]]; then
   cat /etc/motd
   export MOTD_SHOWN=1
 fi
