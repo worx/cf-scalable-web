@@ -178,6 +178,31 @@ fi
 SHRCEOF
 fi
 
+# Drop a per-user ~/.zshrc stub for ubuntu. zsh-newuser-install fires its
+# q/0/1/2 wizard whenever zsh starts AND none of ~/.zshrc, ~/.zlogin,
+# ~/.zprofile, or ~/.zshenv exist. Picking "q" only dismisses the current
+# run — the wizard fires again next login because the file is never
+# created. Existence of any one of those dotfiles silences the wizard
+# permanently. We put project-required zsh setup in the SYSTEM-wide
+# /etc/zsh/zshrc.d/ above, so the per-user file can just be a stub.
+if [ ! -f /home/ubuntu/.zshrc ]; then
+  cat > /home/ubuntu/.zshrc <<'ZSHRCEOF'
+# Per-user .zshrc — managed by deploy-host bootstrap.sh.
+#
+# This file exists primarily to silence zsh-newuser-install (which fires
+# whenever zsh starts and no ~/.zshrc / ~/.zlogin / ~/.zprofile / ~/.zshenv
+# exists). All project-required zsh configuration lives in the system-wide
+# drop-in directory /etc/zsh/zshrc.d/, sourced from /etc/zsh/zshrc.
+#
+# Feel free to add personal preferences here. Examples:
+#   alias ll='ls -la'
+#   bindkey -e          # emacs-style bindings (default)
+#   bindkey -v          # vi-style bindings
+ZSHRCEOF
+  chown ubuntu:ubuntu /home/ubuntu/.zshrc
+  chmod 644 /home/ubuntu/.zshrc
+fi
+
 # Auto-exec zsh from bash on interactive logins (Option A: keep bash as the
 # SSM entry shell, swap to zsh for the user). Append idempotently to the
 # system-wide bashrc so it applies even on a freshly-created user account.
