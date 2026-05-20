@@ -238,7 +238,7 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
 	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
-	@echo "  make deploy-allX              Same + data layer + Drupal install + smoke (~75 min)"
+	@echo "  make deploy-allX              Same + data layer + Drupal install + smoke (~30 min, parallel Phase 2)"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
 	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
@@ -509,6 +509,8 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 		echo "$(YELLOW)  Note: deploy-peering skipped (deploy-host stack may not exist yet)$(NC)"
 	@$(MAKE) deploy-iam ENV=$(ENV) VALIDATED=1
 	@$(MAKE) deploy-storage ENV=$(ENV) VALIDATED=1
+	@$(MAKE) init-fsx-layout ENV=$(ENV) || \
+		echo "$(YELLOW)  Note: init-fsx-layout skipped (deploy-host required); nginx mount of /fsx/nginx will fail at boot. Run 'make init-fsx-layout ENV=$(ENV)' after deploy-host is up, then instance-refresh nginx ASG.$(NC)"
 	@echo ""
 	@echo "$(CYAN)Phase 2: Image Builder + AMI Builds$(NC)"
 	@$(MAKE) deploy-image-builder ENV=$(ENV) VALIDATED=1
@@ -539,57 +541,73 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo ""
 	@echo "  make deploy-allX ENV=$(ENV)        # everything above + database + cache"
 
-deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~75 min) — set it and forget it
+deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 min) — set it and forget it
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  Full Deployment + Drupal: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
+	@# Phase ordering rationale (P0 fix 2026-05-20):
+	@#   - Compute (nginx + PHP-FPM ASGs) MUST launch AFTER both /fsx/nginx
+	@#     exists on FSx AND /<env>/rds/endpoint exists in SSM.
+	@#   - Otherwise: configure-nginx.sh's mount of /fsx/nginx fails on `set -e`
+	@#     (skipping upstream-php.conf), and configure-php.sh skips its env[]
+	@#     block (PHP-FPM workers start with no DRUPAL_* env vars).
+	@# So Phase 1 includes init-fsx-layout (foundation prereq for nginx mount),
+	@# Phase 2 runs AMI builds AND data layer in parallel (independent
+	@# long-poles), and Phase 3 (compute) only launches once Phase 2 is
+	@# fully done. Saves ~25 min wall clock vs. the old sequential ordering.
 	@$(MAKE) validate ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Phase 1: Standard deploy-all (VPC through compute)$(NC)"
-	@$(MAKE) deploy-all ENV=$(ENV) VALIDATED=1
+	@echo "$(CYAN)Phase 1: Foundation (VPC + IAM + storage + FSx layout)$(NC)"
+	@$(MAKE) deploy-vpc ENV=$(ENV) VALIDATED=1
+	@$(MAKE) deploy-peering ENV=$(ENV) VALIDATED=1 || \
+		echo "$(YELLOW)  Note: deploy-peering skipped (deploy-host stack may not exist yet)$(NC)"
+	@$(MAKE) deploy-iam ENV=$(ENV) VALIDATED=1
+	@$(MAKE) deploy-storage ENV=$(ENV) VALIDATED=1
+	@$(MAKE) init-fsx-layout ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Phase 5: Data layer (RDS + ElastiCache, in parallel)$(NC)"
-	@# Both stacks are independent — kick off in parallel for speed.
-	@# Capture stdout/err to files; show output and propagate failures
-	@# after both finish, so user sees both results regardless of which
-	@# one had problems.
-	@TMPDB=$$(mktemp); TMPCACHE=$$(mktemp); \
-	$(MAKE) deploy-database ENV=$(ENV) VALIDATED=1 > "$$TMPDB" 2>&1 & \
-	DB_PID=$$!; \
-	$(MAKE) deploy-cache ENV=$(ENV) VALIDATED=1 > "$$TMPCACHE" 2>&1 & \
-	CACHE_PID=$$!; \
-	echo "$(CYAN)  database deploy started (pid $$DB_PID, log $$TMPDB)$(NC)"; \
-	echo "$(CYAN)  cache deploy started    (pid $$CACHE_PID, log $$TMPCACHE)$(NC)"; \
-	echo "$(CYAN)  waiting for both to complete (typically ~15 min)...$(NC)"; \
-	wait $$DB_PID; DB_RC=$$?; \
-	wait $$CACHE_PID; CACHE_RC=$$?; \
+	@echo "$(CYAN)Phase 2: PARALLEL — Image Builder + AMI builds  AND  data layer (RDS + Valkey)$(NC)"
+	@$(MAKE) deploy-image-builder ENV=$(ENV) VALIDATED=1
+	@$(MAKE) upload-build-configs ENV=$(ENV) VALIDATED=1
+	@# Three parallel tracks: AMI build (long pole ~25 min), database (~10 min),
+	@# cache (~2 min). Each captured to its own tempfile so output is shown
+	@# coherently after all three complete (rather than interleaved live).
+	@TMPAMI=$$(mktemp); TMPDB=$$(mktemp); TMPCACHE=$$(mktemp); \
+	$(MAKE) build-amis ENV=$(ENV) VALIDATED=1 > "$$TMPAMI" 2>&1 & AMI_PID=$$!; \
+	$(MAKE) deploy-database ENV=$(ENV) VALIDATED=1 > "$$TMPDB" 2>&1 & DB_PID=$$!; \
+	$(MAKE) deploy-cache ENV=$(ENV) VALIDATED=1 > "$$TMPCACHE" 2>&1 & CACHE_PID=$$!; \
+	echo "$(CYAN)  AMI build:  pid $$AMI_PID   log $$TMPAMI  (~25 min, long pole)$(NC)"; \
+	echo "$(CYAN)  Database:   pid $$DB_PID    log $$TMPDB   (~10 min)$(NC)"; \
+	echo "$(CYAN)  Cache:      pid $$CACHE_PID log $$TMPCACHE (~2 min)$(NC)"; \
+	echo "$(CYAN)  All three running concurrently. Tail any via: tail -f <log>$(NC)"; \
+	echo "$(CYAN)  Waiting on all three to complete...$(NC)"; \
+	wait $$CACHE_PID; CACHE_RC=$$?; echo "$(CYAN)  ✓ Cache finished (rc=$$CACHE_RC)$(NC)"; \
+	wait $$DB_PID; DB_RC=$$?; echo "$(CYAN)  ✓ Database finished (rc=$$DB_RC)$(NC)"; \
+	wait $$AMI_PID; AMI_RC=$$?; echo "$(CYAN)  ✓ AMI build finished (rc=$$AMI_RC)$(NC)"; \
 	echo ""; \
-	echo "$(BLUE)=== database output ===$(NC)"; cat "$$TMPDB"; rm -f "$$TMPDB"; \
-	echo "$(BLUE)=== cache output ===$(NC)"; cat "$$TMPCACHE"; rm -f "$$TMPCACHE"; \
-	if [ $$DB_RC -ne 0 ] || [ $$CACHE_RC -ne 0 ]; then \
-		echo "$(RED)One or both data-layer deploys failed (db=$$DB_RC cache=$$CACHE_RC)$(NC)"; \
+	echo "$(BLUE)=== Cache output ===$(NC)"; cat "$$TMPCACHE"; rm -f "$$TMPCACHE"; \
+	echo "$(BLUE)=== Database output ===$(NC)"; cat "$$TMPDB"; rm -f "$$TMPDB"; \
+	echo "$(BLUE)=== AMI build output ===$(NC)"; cat "$$TMPAMI"; rm -f "$$TMPAMI"; \
+	if [ $$AMI_RC -ne 0 ] || [ $$DB_RC -ne 0 ] || [ $$CACHE_RC -ne 0 ]; then \
+		echo "$(RED)Phase 2 failed: ami=$$AMI_RC db=$$DB_RC cache=$$CACHE_RC$(NC)"; \
 		exit 1; \
 	fi
 	@echo ""
-	@echo "$(CYAN)Phase 6: Drupal app stack (Secrets Manager + SSM params)$(NC)"
+	@echo "$(CYAN)Phase 3: Compute (AMI params → launch templates → ASGs)$(NC)"
+	@$(MAKE) update-ami-params ENV=$(ENV) VALIDATED=1
+	@$(MAKE) deploy-compute ENV=$(ENV) VALIDATED=1
+	@echo ""
+	@echo "$(CYAN)Phase 4: Drupal app stack (Secrets Manager + SSM params)$(NC)"
 	@$(MAKE) deploy-app-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
-	@echo "$(CYAN)Phase 7: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
+	@echo "$(CYAN)Phase 5: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
 	@$(MAKE) install-drupal-remote ENV=$(ENV) VALIDATED=1
 	@echo ""
-	@echo "$(CYAN)Phase 8: End-to-end smoke test (curl ALB)$(NC)"
+	@echo "$(CYAN)Phase 6: End-to-end smoke test (curl ALB)$(NC)"
 	@$(MAKE) smoke-test-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ Full deployment + Drupal complete: ENV=$(ENV)$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
-	@echo ""
-	@if command -v refresh-env-config >/dev/null 2>&1; then \
-		echo "$(CYAN)Refreshing /etc/worxco/envs/$(ENV) and /etc/hosts FSx entry...$(NC)"; \
-		sudo refresh-env-config $(ENV) || true; \
-	else \
-		echo "$(YELLOW)Note: local refresh-env-config skipped (only available on deploy-host).$(NC)"; \
-	fi
 
 # -----------------------------------------------------------------------------
 # Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
@@ -2080,6 +2098,9 @@ restart-php-fpm:  ## SSM-restart php*-fpm on every PHP box (busts OPcache + relo
 
 reload-nginx:  ## SSM-reload nginx on every nginx box (graceful, picks up new vhost configs from FSx)
 	@scripts/reload-nginx.sh $(ENV)
+
+init-fsx-layout:  ## Pre-create /fsx/nginx + /fsx/sites on FSx (run before compute on fresh FSx)
+	@scripts/init-fsx-layout.sh $(ENV)
 
 publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf to FSx (no full reinstall)
 	@scripts/publish-drupal-vhost.sh $(ENV)

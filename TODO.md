@@ -36,37 +36,21 @@ prioritized by "would this bite again if we don't fix it."
 
 ### P0 — Regressions waiting to happen (do soonest)
 
-- [ ] **deploy-allX phase ordering — FSx layout init must precede compute.**
-  2026-05-19 destroy-all → deploy-allX hit two recurring chicken-and-egg bugs:
-  (1) nginx instances boot in Phase 4 and try to mount `$FSX:/fsx/nginx`,
-  but `/fsx/nginx` doesn't exist on the freshly-created FSx (no one creates
-  it). The mount fails, `configure-nginx.sh` bails on `set -e` BEFORE
-  writing `/etc/nginx/conf.d/upstream-php.conf`, and nginx serves with
-  the catch-all `server _` only. (2) PHP instances boot in Phase 4 BEFORE
-  RDS exists (Phase 5). `configure-php.sh` reads `/sandbox/rds/endpoint`
-  from SSM, doesn't find it, skips writing the `env[]` block to
-  `www.conf`. PHP-FPM starts with zero DRUPAL_* env vars; Drupal 500s
-  forever after.
-
-  **Manual fixups today (will recur)**:
-    - SSM-mount /fsx/nginx + manually write upstream-php.conf on every nginx box
-    - SSM-re-run /opt/worxco/configure-php.sh on every PHP box after data layer is up
-
-  **Proposed fix** (deferred for architectural review per 2026-05-19 conversation):
-    - Add `init-fsx-layout` Make target (run on deploy-host via SSM) that
-      mkdir's /fsx/nginx/sites-enabled and any other env-level dirs after
-      cf-storage completes.
-    - Reorder deploy-allX: parallelize Phase 2 (AMI builds, 20-30 min) with
-      Phase 5 (data layer) + init-fsx-layout. Phase 4 (compute) only runs
-      once Phase 2 AND data layer AND init-fsx-layout are all done.
-    - Or: keep current ordering but add an explicit "compute-ready" gate
-      after data layer that triggers instance refresh on already-launched
-      compute ASGs.
-
-  **Bigger context** (also captured in TODO under "Architectural review"):
-    these recurring chicken-and-egg bugs are symptoms of an architecture
-    that assumes strict build order without enforcing it. Worth a
-    deliberate think before fixing tactically.
+- [x] **deploy-allX phase ordering — FSx layout init must precede compute.** ✅ 2026-05-20
+  Both chicken-and-egg bugs resolved by orchestration reorder, not by
+  worker-script changes:
+    - New `make init-fsx-layout` target (and `scripts/init-fsx-layout.sh`)
+      SSM-dispatches to deploy-host to pre-create `/fsx/nginx/sites-enabled`
+      and `/fsx/sites` before nginx instances boot. Added to deploy-all
+      Phase 1 (after deploy-storage) and deploy-allX Phase 1.
+    - deploy-allX restructured: Phase 2 now parallelizes the AMI build
+      (long pole, ~25 min) with the data layer (database + cache,
+      ~10 min). Phase 3 (compute) only runs after all of Phase 2
+      completes. By then `/fsx/nginx` exists and `/<env>/rds/endpoint`
+      is in SSM — both prereqs nginx + PHP boot scripts depended on.
+    - Wall clock savings: ~75 min → ~30 min for a greenfield deploy-allX.
+  See `docs/ARCHITECTURE.md` "deploy-allX Phase Ordering" for the full
+  before/after table.
 
 - [ ] **Architectural review — build-order assumptions + multi-site future.**
   Captured from 2026-05-19 end-of-day conversation. Two concerns to think

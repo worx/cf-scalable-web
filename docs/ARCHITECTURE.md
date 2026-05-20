@@ -301,36 +301,38 @@ ALB (cf-compute-alb.yaml)
          └→ PHP-FPM (cf-compute-php.yaml) ← registers with NLB target groups
 ```
 
-### deploy-allX Phase Ordering — Current Assumptions
+### deploy-allX Phase Ordering
 
 The `deploy-allX` Make target sequences the full lifecycle from a fresh
-account to a serving Drupal site. The current ordering bakes in
-**greenfield-build-order assumptions** that have shown fragility under
-recovery / partial-redeploy scenarios:
+account to a serving Drupal site. **Revised 2026-05-20** to address two
+phase-ordering bugs that hit on the 2026-05-19 destroy-deploy cycle. New
+ordering:
 
-| Phase | What runs | Assumption it bakes in |
-|---|---|---|
-| 1 | VPC, peering, IAM, storage (FSx) | FSx volume root `/fsx` is empty after creation; consumers create their own subdirs |
-| 2 | Image Builder, AMI builds (~20-30 min) | (no cross-phase assumption) |
-| 3 | SSM AMI params updated | (no cross-phase assumption) |
-| 4 | Compute (ALB, NLB, NGINX ASG, PHP-FPM ASG) | **NGINX mounts `/fsx/nginx` (must exist); PHP boot reads `/sandbox/rds/endpoint` from SSM (must exist)** |
-| 5 | RDS + ElastiCache (parallel) | (this is AFTER Phase 4 — bug) |
-| 6 | cf-app-drupal (secrets + SSM params) | RDS exists; site-name SSM param populated |
-| 7 | install-drupal-remote (deploy-host) | All stacks deployed; `/var/www` mountable; SSM params resolvable |
-| 8 | Smoke test | Phase 7 succeeded; nginx fleet has reloaded its config |
+| Phase | What runs | Wall clock | Why this order |
+|---|---|---|---|
+| 1 | VPC, peering, IAM, storage (FSx), **init-fsx-layout** | ~5 min | init-fsx-layout pre-creates `/fsx/nginx/sites-enabled` and `/fsx/sites` on FSx so nginx's boot-time NFS submount succeeds in Phase 3 |
+| 2 | **PARALLEL**: (a) Image Builder + AMI builds (~25 min, long pole); (b) database (~10 min); (c) cache (~2 min) | ~25 min (AMI is long pole) | All three are independent. Running them in parallel reclaims ~12 min of wall clock that the old serial ordering wasted. Compute can't start until all three are done. |
+| 3 | update-ami-params + deploy-compute | ~5 min | By here, RDS endpoint + AMI IDs are in SSM and `/fsx/nginx` exists — so nginx and PHP-FPM boot scripts have everything they need |
+| 4 | cf-app-drupal (secrets + SSM params) | ~1 min | Secrets/SSM ready for install-drupal to consume |
+| 5 | install-drupal-remote (deploy-host) | ~5 min | composer + drush site:install + write nginx vhost to FSx + reload-nginx |
+| 6 | Smoke test (curl ALB) | seconds | HTTP 200 check |
 
-**Known phase-ordering fragility (P0 in TODO.md):**
-- Phase 4 boots NGINX before `/fsx/nginx` exists. `configure-nginx.sh`
-  bails on `set -e` after the mount failure, leaving
-  `upstream-php.conf` un-generated. nginx serves only the `_` catch-all.
-- Phase 4 boots PHP before RDS exists in Phase 5. `configure-php.sh`
-  finds no `/sandbox/rds/endpoint` SSM param and skips the `env[]`
-  block. PHP-FPM workers start with no DRUPAL_* env vars.
+Total wall clock: ~30 min from zero, vs. ~75 min under the previous
+serial ordering. The savings come from parallelizing the AMI bake with
+the data layer.
 
-Both will be addressed in the upcoming **architectural review** (P0):
-parallelize data layer + FSx-layout init with the AMI build phase
-(which is the long pole), and only run compute once everything its boot
-scripts depend on is in place.
+**What changed and why** (resolved P0 from 2026-05-19 debug arc):
+
+| Old behavior | New behavior |
+|---|---|
+| Phase 4 (compute) launched nginx before `/fsx/nginx` existed → `configure-nginx.sh` silently bailed on `set -e` → no `upstream-php.conf` written | Phase 1's new `init-fsx-layout` step mkdirs `/fsx/nginx/sites-enabled` on FSx (via deploy-host SSM) BEFORE Phase 3 compute launches |
+| Phase 5 (data layer) ran AFTER Phase 4 (compute) → PHP-FPM booted with `/<env>/rds/endpoint` SSM param missing → `configure-php.sh` skipped the `env[]` block → workers started with no DRUPAL_* env vars | Phase 2 runs data layer IN PARALLEL with AMI builds; by Phase 3 (compute) the SSM params exist and `configure-php.sh` writes the env[] block normally |
+
+Both bugs are now resolved at the orchestration level rather than by
+making the worker scripts more resilient. The worker scripts (`configure-nginx.sh`,
+`configure-php.sh`) intentionally remain `set -e`-strict — they fail
+fast and visibly if prerequisites are missing, which is the right
+behavior for surfacing future regressions in the ordering.
 
 ### Stack Details
 
