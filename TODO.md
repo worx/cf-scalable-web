@@ -225,14 +225,20 @@ prioritized by "would this bite again if we don't fix it."
 - [ ] **docs/master.md + `make build-master`** — design captured below.
   See "Future Enhancements" for the full concept.
 
-- [ ] **Admin SSH key registry for scp-over-SSM-proxy.** Add SSM
-  Parameter `/worxco/admin/ssh-public-keys` (StringList) + Make targets
-  (`admin-ssh-key-add`, `-remove`, `-list`) + cf-deploy-host UserData
-  that installs the keys into the ubuntu user's authorized_keys at boot.
-  Compute templates intentionally exclude this code path — security by
-  exclusion (see `docs/memory/admin-access-policy.md`). Port 22 stays
-  closed in all SGs; keys exist solely to enable scp/sftp/rsync via the
-  `AWS-StartSSHSession` SSM document. Captured 2026-05-19.
+- [x] **Admin SSH key registry for scp-over-SSM-proxy.** ✅ 2026-05-20
+  - Storage: one SSM param per owner under `/worxco/admin/ssh-public-keys/<name>`
+    (changed from StringList to per-name params for cleaner add/remove).
+  - Local tooling: `scripts/admin-ssh-key.sh` with `add`/`remove`/`list`/`sync`
+    subcommands; `add` and `remove` auto-sync to the running deploy-host.
+  - Deploy-host side: `scripts/deploy-host/sync-admin-ssh-keys.sh` pulls
+    SSM → writes `/home/ubuntu/.ssh/authorized_keys` (0600 ubuntu:ubuntu).
+  - bootstrap.sh integration: runs sync at end of boot so freshly-deployed
+    hosts come up with all currently-registered admin keys pre-installed.
+  - Make targets: `admin-ssh-key-{add,remove,list,sync}`.
+  - Port 22 still closed in all SGs (unchanged); keys exist solely for
+    scp/sftp/rsync via the `AWS-StartSSHSession` SSM proxy as designed.
+  - Compute templates intentionally don't get this code path —
+    security-by-exclusion as documented in `docs/memory/admin-access-policy.md`.
 
 ### P3 — Captured for later (no immediate action)
 

@@ -487,6 +487,26 @@ ZMOTDEOF
 chmod 644 /etc/zsh/zshrc.d/00-motd.zsh
 
 # ============================================================
+step "Admin SSH keys — sync from SSM registry"
+# ============================================================
+# Pulls any keys at /worxco/admin/ssh-public-keys/* from SSM and writes
+# them to ubuntu's authorized_keys. Enables scp/sftp/rsync over the SSM
+# Session Manager proxy without ever opening port 22. See
+# docs/memory/admin-access-policy.md for the access model.
+#
+# Idempotent — if no keys are registered, writes a header-only authorized_keys
+# that's safely empty of key material. Operators add keys later via
+# `make admin-ssh-key-add NAME=<owner> FILE=<path>` on their local machine;
+# that command auto-syncs to this host without needing a reboot.
+REPO_DIR="/home/ubuntu/projects/cf-scalable-web"
+if [ -x "$REPO_DIR/scripts/deploy-host/sync-admin-ssh-keys.sh" ]; then
+  bash "$REPO_DIR/scripts/deploy-host/sync-admin-ssh-keys.sh" \
+    || echo "WARN: admin SSH key sync failed (non-fatal — operator can run 'make admin-ssh-key-sync' later)"
+else
+  echo "WARN: sync-admin-ssh-keys.sh not found in repo at $REPO_DIR — skipping"
+fi
+
+# ============================================================
 step "Bootstrap complete"
 # ============================================================
 LAST_STEP="(complete)"

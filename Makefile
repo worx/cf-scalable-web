@@ -2175,6 +2175,18 @@ init-fsx-layout:  ## Pre-create /fsx/nginx + /fsx/sites on FSx (run before compu
 wait-deploy-host-ready:  ## Block until deploy-host's cloud-init finishes + bootstrap marker exists (~10-15 min)
 	@scripts/wait-deploy-host-ready.sh
 
+admin-ssh-key-add:  ## Add an admin SSH public key (NAME=<owner> FILE=<path-to-pubkey>); auto-syncs to deploy-host
+	@scripts/admin-ssh-key.sh add "$(NAME)" "$(FILE)"
+
+admin-ssh-key-remove:  ## Remove an admin SSH key (NAME=<owner>); auto-syncs to deploy-host
+	@scripts/admin-ssh-key.sh remove "$(NAME)"
+
+admin-ssh-key-list:  ## List configured admin SSH keys (name + fingerprint)
+	@scripts/admin-ssh-key.sh list
+
+admin-ssh-key-sync:  ## Push current SSM admin-key registry to the running deploy-host
+	@scripts/admin-ssh-key.sh sync
+
 publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf to FSx (no full reinstall)
 	@scripts/publish-drupal-vhost.sh $(ENV)
 
