@@ -404,6 +404,22 @@ chmod 444 "$SETTINGS_FILE"
 chmod 555 "$INSTALL_DIR/web/sites/default"
 
 # ============================================================
+step "Export env vars settings.php reads (for the rest of this script)"
+# ============================================================
+# settings.php is now env-var-driven, so every drush invocation from here
+# on (pm:uninstall, status, etc.) needs these in its environment to
+# bootstrap the DB. Earlier drush calls (site:install) bypassed this by
+# taking --db-url= on the command line. The verify step further down
+# used to re-export the same vars; that's now redundant and removed.
+export ENVIRONMENT_NAME="$ENV"
+export DRUPAL_DB_HOST="$RDS_ENDPOINT"
+export DRUPAL_DB_PORT="5432"
+export DRUPAL_DB_NAME="$DB_NAME"
+export DRUPAL_DB_USER="$DB_USER"
+export DRUPAL_DB_PASS="$DRUPAL_DB_PW"
+export DRUPAL_SITE_NAME="$SITE_NAME"
+
+# ============================================================
 step "Make Drupal-writable directories accessible to PHP-FPM (www-data)"
 # ============================================================
 # Drupal writes to several directories at runtime:
@@ -457,7 +473,7 @@ log "Uninstalling Update Manager module (telemetry to updates.drupal.org is unre
 # that as "already in the desired state" rather than a failure. Earlier
 # Drupal versions (or non-standard profiles) that DO enable update
 # still get cleanly uninstalled by this same step.
-PMU_OUT=$(sudo -E HOME=/root vendor/bin/drush pm:uninstall update -y 2>&1) && PMU_RC=0 || PMU_RC=$?
+PMU_OUT=$(vendor/bin/drush pm:uninstall update -y 2>&1) && PMU_RC=0 || PMU_RC=$?
 if [ $PMU_RC -eq 0 ]; then
   echo "$PMU_OUT" | tail -3
 elif echo "$PMU_OUT" | grep -q "are not installed"; then
@@ -559,15 +575,10 @@ sudo chmod 644 "$NGINX_VHOST_DIR/drupal.conf"
 log "  wrote $NGINX_VHOST_DIR/drupal.conf"
 
 # ============================================================
-step "Verify install via drush (with env vars set so settings.php works)"
+step "Verify install via drush"
 # ============================================================
-export ENVIRONMENT_NAME="$ENV"
-export DRUPAL_DB_HOST="$RDS_ENDPOINT"
-export DRUPAL_DB_PORT="5432"
-export DRUPAL_DB_NAME="$DB_NAME"
-export DRUPAL_DB_USER="$DB_USER"
-export DRUPAL_DB_PASS="$DRUPAL_DB_PW"
-export DRUPAL_SITE_NAME="$SITE_NAME"
+# Env vars settings.php depends on were exported earlier in this script
+# (right after the settings.php swap), so drush bootstraps cleanly here.
 
 vendor/bin/drush status \
   --fields=drupal-version,db-driver,db-status,bootstrap,uri,php-version
