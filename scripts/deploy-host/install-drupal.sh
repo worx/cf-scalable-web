@@ -451,7 +451,22 @@ step "Uninstall the Update Manager module (architecturally unreachable)"
 # decision + how operators DO check for available updates (from the
 # deploy-host, manually, then via composer + AMI rebuild).
 log "Uninstalling Update Manager module (telemetry to updates.drupal.org is unreachable from compute fleet)"
-sudo -E HOME=/root vendor/bin/drush pm:uninstall update -y 2>&1 | tail -3
+# Idempotent: Drupal 11.3.10+'s standard install profile no longer
+# enables the update module by default, so the uninstall command exits
+# 1 with "are not installed" on fresh installs of those versions. Treat
+# that as "already in the desired state" rather than a failure. Earlier
+# Drupal versions (or non-standard profiles) that DO enable update
+# still get cleanly uninstalled by this same step.
+PMU_OUT=$(sudo -E HOME=/root vendor/bin/drush pm:uninstall update -y 2>&1) && PMU_RC=0 || PMU_RC=$?
+if [ $PMU_RC -eq 0 ]; then
+  echo "$PMU_OUT" | tail -3
+elif echo "$PMU_OUT" | grep -q "are not installed"; then
+  log "  update module already not enabled — skipping (idempotent no-op)"
+else
+  echo "ERROR: drush pm:uninstall update failed (exit $PMU_RC):" >&2
+  echo "$PMU_OUT" >&2
+  exit $PMU_RC
+fi
 
 # ============================================================
 step "Publish Drupal nginx vhost to FSx (read by all nginx instances)"
