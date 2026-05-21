@@ -145,6 +145,21 @@ fi
 mkdir -p "$MOUNT_POINT" "$NGINX_MOUNT_POINT"
 echo "Mounting $FSX_DNS:/fsx -> $MOUNT_POINT (env=$ENV)"
 mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
+
+# On a freshly-created FSx volume, /fsx/nginx doesn't exist yet — the
+# second mount below would fail with "No such file or directory" from
+# the NFS server. Create the dir via the just-mounted /var/www access
+# path so the FSx server has the expected layout before we ask it to
+# export the subtree. Idempotent (mkdir -p), so re-runs are safe.
+# init-fsx-layout (deploy-allX Phase 1) does additional layout work
+# beyond this, but use-env owning its own "make my mounts succeed"
+# preconditions is the right place to start.
+if [ ! -d "$MOUNT_POINT/nginx" ]; then
+  echo "  /fsx/nginx not yet on FSx — creating via $MOUNT_POINT/nginx"
+  mkdir -p "$MOUNT_POINT/nginx/sites-enabled"
+  chmod 755 "$MOUNT_POINT/nginx" "$MOUNT_POINT/nginx/sites-enabled"
+fi
+
 echo "Mounting $FSX_DNS:/fsx/nginx -> $NGINX_MOUNT_POINT"
 mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/nginx" "$NGINX_MOUNT_POINT"
 
