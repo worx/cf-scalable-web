@@ -3,7 +3,7 @@
     "EnvironmentName": "sandbox",
     "DrupalDatabaseName": "drupal",
     "DrupalDatabaseUser": "drupal_user",
-    "DrupalSiteName": "drupal-sandbox.test",
+    "DrupalSiteName": "sandbox.envs.zoning-info.com",
     "DrupalAdminUsername": "admin",
     "DrupalAdminEmail": "",
     "AdminPasswordLength": "24",
