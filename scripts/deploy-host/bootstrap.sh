@@ -98,6 +98,54 @@ ENVEOF
 su - ubuntu -c 'git config --global core.editor vim' || true
 
 # ============================================================
+step "tmux system-wide config (vi copy-mode, larger scrollback, env in status bar)"
+# ============================================================
+# Operators run long-lived sessions (e.g., `make serve-drupal-local`) inside
+# tmux on this host. Default tmux is set up for emacs-keys in copy-mode and a
+# 2000-line scrollback — both unhelpful when paging through make output on a
+# Mac without dedicated PgUp/PgDn keys. This config:
+#   - vi key bindings in copy-mode (Ctrl-u/d, /, ?, n, N, g, G all work)
+#   - mouse on so trackpad scroll just works
+#   - 50k-line scrollback to keep entire `make deploy-allX` runs in buffer
+#   - current Worxco env shown on the right of the status bar (mirrors zsh RPROMPT)
+cat > /etc/tmux.conf <<'TMUXEOF'
+# /etc/tmux.conf — system-wide tmux config for deploy-host operators.
+# Managed by deploy-host bootstrap.sh — edits here will be overwritten
+# on the next AMI rebuild.
+
+# Scroll & input ergonomics
+set -g mouse on
+set -g history-limit 50000
+
+# vi key bindings in copy-mode (Ctrl-b [ to enter):
+#   Ctrl-u / Ctrl-d  half-page scroll
+#   Ctrl-b / Ctrl-f  full-page scroll
+#   /  ?             forward / reverse search
+#   n  N             next / prev match
+#   g  G             top / bottom
+#   q                exit copy-mode
+set -g mode-keys vi
+
+# Don't swallow ESC — vim/nvim feel snappier
+set -sg escape-time 10
+
+# 1-indexed windows; window-0 on the far left is awkward to reach
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Show current Worxco env in the status bar, refreshed every 5s.
+# Mirrors the zsh RPROMPT so the env is visible inside long-running panes
+# (drush runserver, log tails, etc.) where the shell prompt isn't on screen.
+set -g status-interval 5
+set -g status-right-length 60
+set -g status-right '#[fg=yellow][env:#(cat /etc/worxco/current-env 2>/dev/null || echo NONE)]#[default] %H:%M'
+
+# Quick conf reload from inside a session
+bind r source-file /etc/tmux.conf \; display-message "tmux.conf reloaded"
+TMUXEOF
+chmod 0644 /etc/tmux.conf
+
+# ============================================================
 step "zsh + right-prompt env indicator"
 # ============================================================
 # SSM Session Manager forces `exec bash -l`, bypassing ubuntu's login shell
