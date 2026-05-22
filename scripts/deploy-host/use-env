@@ -41,8 +41,9 @@ if [ "$#" -eq 0 ]; then
   else
     echo "Current environment: NONE (file $CURRENT_ENV_FILE missing)"
   fi
-  if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-    echo "Mount:               $(mount | awk -v mp="$MOUNT_POINT" '$3==mp{print $1,"->",$3,"("$5")"}')"
+  # Read /proc/mounts directly (no stat() — wouldn't hang on stale NFS).
+  if awk -v mp="$MOUNT_POINT" '$2==mp {found=1; exit} END{exit !found}' /proc/mounts; then
+    echo "Mount:               $(awk -v mp="$MOUNT_POINT" '$2==mp{print $1,"->",$2,"("$3")"}' /proc/mounts)"
   else
     echo "Mount:               $MOUNT_POINT is not mounted"
   fi
@@ -78,20 +79,37 @@ fi
 # ----- common cleanup: unmount + clear fstab -----
 # Unmount nginx submount first (it's a sub-NFS-export of the same FSx;
 # unmount in reverse order — submount before parent — to avoid EBUSY).
-if mountpoint -q "$NGINX_MOUNT_POINT" 2>/dev/null; then
-  echo "Unmounting current $NGINX_MOUNT_POINT..."
-  if ! umount "$NGINX_MOUNT_POINT"; then
-    echo "ERROR: umount failed — something is still using $NGINX_MOUNT_POINT" >&2
-    exit 1
-  fi
+#
+# Detection uses /proc/mounts directly rather than `mountpoint -q`, because
+# `mountpoint` calls stat() on the target path — and a stale NFS mount
+# (server destroyed, kernel still attached) makes stat() block forever in
+# D-state. Reading /proc/mounts is a pure in-kernel structure lookup and
+# never blocks on the dead network filesystem.
+#
+# Unmount uses `umount -f -l` (force + lazy) rather than plain umount:
+# - lazy (-l) detaches the mount from the namespace immediately, so the
+#   path is free for re-mounting even if there are in-flight kernel
+#   references to the now-gone NFS server
+# - force (-f) is a hint to the NFS client to give up on retransmissions
+#
+# This combo handles the "destroy-all destroyed yesterday's FSx, today's
+# deploy-host still has the kernel mount" case cleanly. Plain umount
+# would hang waiting for an ACK from a server that no longer exists.
+# Past incident: 2026-05-22 init-fsx-layout hung for 45+ min because
+# `mountpoint -q` stat'd a stale mount.
+is_mounted() {
+  awk -v mp="$1" '$2==mp {found=1; exit} END{exit !found}' /proc/mounts
+}
+
+if is_mounted "$NGINX_MOUNT_POINT"; then
+  echo "Unmounting current $NGINX_MOUNT_POINT (force + lazy)..."
+  umount -f -l "$NGINX_MOUNT_POINT" || \
+    echo "WARN: umount -f -l returned non-zero for $NGINX_MOUNT_POINT — proceeding anyway" >&2
 fi
-if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-  echo "Unmounting current $MOUNT_POINT..."
-  if ! umount "$MOUNT_POINT"; then
-    echo "ERROR: umount failed — something is still using $MOUNT_POINT" >&2
-    echo "  lsof +D $MOUNT_POINT  # to see what" >&2
-    exit 1
-  fi
+if is_mounted "$MOUNT_POINT"; then
+  echo "Unmounting current $MOUNT_POINT (force + lazy)..."
+  umount -f -l "$MOUNT_POINT" || \
+    echo "WARN: umount -f -l returned non-zero for $MOUNT_POINT — proceeding anyway" >&2
 fi
 # Remove any prior worxco fstab block (marker line + the entries that
 # follow). The block can be 1 or 2 lines depending on whether older
