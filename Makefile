@@ -1278,6 +1278,12 @@ destroy-all:  ## Delete all stacks (reverse order; pass CONFIRMED=yes to skip pr
 	@$(MAKE) destroy-image-builder ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-cache ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-database ENV=$(ENV) CONFIRMED=yes || true
+	@# Unmount FSx from the (still-running) deploy-host BEFORE destroying
+	@# the storage stack. Otherwise destroy-storage tears down FSx while
+	@# the deploy-host has kernel NFS mounts attached, leaving stale mounts
+	@# that hang init-fsx-layout on the next deploy-allX. See past incident
+	@# 2026-05-22 (45-min init-fsx-layout hang).
+	@$(MAKE) unmount-deploy-host-fsx || true
 	@$(MAKE) destroy-storage ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-iam ENV=$(ENV) CONFIRMED=yes || true
 	@$(MAKE) destroy-peering ENV=$(ENV) || true
@@ -2369,6 +2375,10 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 
 		rm -f "$$BODY"; \
 		exit 1; \
 	fi
+
+unmount-deploy-host-fsx:  ## SSM-dispatch `use-env none` to deploy-host (umount FSx before destroy-storage)
+	@chmod +x ./scripts/unmount-deploy-host-fsx.sh
+	@./scripts/unmount-deploy-host-fsx.sh
 
 publish-dns:  ## UPSERT Route 53 ALIAS record from /$(ENV)/drupal/site-name to the env's ALB
 	@chmod +x ./scripts/publish-dns.sh
