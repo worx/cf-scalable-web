@@ -256,6 +256,8 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
 	@echo "  make install-drupal ENV=...        Install Drupal 11 against env's RDS+FSx (on deploy-host)"
 	@echo "  make install-drupal-remote ENV=... SSM-dispatch install-drupal to deploy-host (from local)"
+	@echo "  make publish-dns ENV=...           UPSERT Route 53 alias <site-name> → ALB"
+	@echo "  make unpublish-dns ENV=...         DELETE Route 53 alias (use before destroy-all)"
 	@echo "  make smoke-test-drupal ENV=...     Curl the ALB and assert HTTP 200 (forged Host header)"
 	@echo "  make smoke-test-public ENV=...     End-to-end via the real public DNS name"
 	@echo "  make verify-drupal ENV=...         Health check (live env-var-driven settings.php)"
@@ -2367,6 +2369,14 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 
 		rm -f "$$BODY"; \
 		exit 1; \
 	fi
+
+publish-dns:  ## UPSERT Route 53 ALIAS record from /$(ENV)/drupal/site-name to the env's ALB
+	@chmod +x ./scripts/publish-dns.sh
+	@./scripts/publish-dns.sh $(ENV)
+
+unpublish-dns:  ## DELETE the Route 53 ALIAS record for /$(ENV)/drupal/site-name (use before destroy-all)
+	@chmod +x ./scripts/unpublish-dns.sh
+	@./scripts/unpublish-dns.sh $(ENV)
 
 smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB → nginx → PHP-FPM → Drupal)
 	@# Unlike smoke-test-drupal (which curls the ALB directly and forges the
