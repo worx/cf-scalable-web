@@ -37,6 +37,56 @@ snippet in DNS publishing runbook used `${V^^}` and Kurt got
 | `mapfile`, `readarray` | Use `while read` loop |
 | Associative arrays w/ `declare -A` | Both shells support, but syntax for iteration differs |
 
+## Word-splitting (the silent footgun)
+
+The biggest difference between bash and zsh isn't a missing feature — it's
+that **zsh does not word-split unquoted variable expansions by default**.
+This bites hardest with AWS CLI snippets that capture multi-value `--output
+text` results into a variable and then pass them as separate args.
+
+**Failing pattern (works in bash, fails in zsh):**
+```bash
+IDS=$(aws ... --output text)   # IDS = "i-aaa    i-bbb" (tab-separated)
+aws ssm send-command --instance-ids $IDS ...
+# bash:  passes ["i-aaa", "i-bbb"] (auto-splits on $IFS)
+# zsh:   passes ["i-aaa    i-bbb"] (one big string) → ValidationException
+```
+
+The zsh failure mode is **not** "bad substitution" — the snippet runs but
+the downstream API call rejects it with a misleading validation error.
+Symptom from 2026-05-22: `1 validation error detected: Value
+'[i-aaa    i-bbb]' at 'instanceIds' failed to satisfy constraint`.
+
+**Fixes (any of these is correct):**
+
+1. **Array form (recommended for paste-in-terminal snippets):**
+   ```bash
+   IDS=( $(aws ... --output text) )
+   aws ssm send-command --instance-ids "${IDS[@]}" ...
+   ```
+   Works in bash and zsh identically. `"${IDS[@]}"` always expands each
+   element as a separate argument.
+
+2. **zsh-specific force-split:** `${=IDS}` enables word-splitting on that
+   expansion. zsh-only; doesn't break bash, but obscure for bash readers.
+
+3. **Inline the substitution:** `aws ssm send-command --instance-ids
+   $(aws ... --output text) ...` — relies on word-splitting at command
+   substitution; this DOES word-split in both shells, but only the
+   command-substitution result, not a previously-assigned variable.
+
+**Default to (1)** — it's the readable, portable form. Bonus: makes the
+script's intent obvious ("this is a list of things").
+
+## Scripts vs paste-snippets — different rules
+
+- **Scripts** with `#!/bin/bash` shebang run under bash regardless of
+  Kurt's login shell. Bash-isms are fine in those. The two SSM-dispatch
+  scripts (`reload-nginx.sh`, `restart-php-fpm.sh`) use `--instance-ids
+  $IDS` unquoted and it works because their shebang pins bash.
+- **Paste-in-terminal snippets** I send Kurt run under zsh. Apply the
+  portable forms above — array-style is the safe default.
+
 ## How to apply
 
 1. **Default to "portable" forms** when the snippet is for paste-into-terminal.
