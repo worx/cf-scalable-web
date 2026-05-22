@@ -22,14 +22,22 @@ if [ -z "$ENV" ]; then
   exit 2
 fi
 
-IDS=$(aws ec2 describe-instances \
-  --filters \
-    "Name=tag:aws:autoscaling:groupName,Values=${ENV}-nginx-asg" \
-    "Name=instance-state-name,Values=running" \
-  --query 'Reservations[*].Instances[*].InstanceId' --output text)
+# Enumerate targets via the ASG's own view (InService + Healthy), NOT via
+# tag-filtered EC2 describe-instances. The tag-filter approach has bitten
+# us during instance refresh: EC2's tag index briefly returns terminated
+# instance IDs alongside live ones, and SSM rejects the whole batch with
+# `InvalidInstanceId — Instances not in a valid state for account`. The
+# ASG's Instances[] list is authoritative for "what's actually serving
+# traffic right now" and updates as instances are added/removed.
+IDS=$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "${ENV}-nginx-asg" \
+  --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService` && HealthStatus==`Healthy`].InstanceId' \
+  --output text 2>/dev/null || true)
 
 if [ -z "$IDS" ]; then
-  echo "WARN: no running nginx instances in env=$ENV (ASG ${ENV}-nginx-asg)"
+  echo "WARN: no InService+Healthy nginx instances in env=$ENV (ASG ${ENV}-nginx-asg)"
+  echo "      The ASG may be mid-refresh or scaled to 0. Try again in a few minutes,"
+  echo "      or check: aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${ENV}-nginx-asg"
   exit 0
 fi
 
