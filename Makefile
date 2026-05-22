@@ -29,7 +29,7 @@ export
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
         find-default-subnet upload-build-configs \
-        build-ami-nginx build-ami-php74 build-ami-php83 build-amis \
+        build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
         init-secrets list-secrets test clean consolidate-logs \
         ssm-report ssm-remediate ssm-audit-params
@@ -256,7 +256,8 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
 	@echo "  make install-drupal ENV=...        Install Drupal 11 against env's RDS+FSx (on deploy-host)"
 	@echo "  make install-drupal-remote ENV=... SSM-dispatch install-drupal to deploy-host (from local)"
-	@echo "  make smoke-test-drupal ENV=...     Curl the ALB and assert HTTP 200"
+	@echo "  make smoke-test-drupal ENV=...     Curl the ALB and assert HTTP 200 (forged Host header)"
+	@echo "  make smoke-test-public ENV=...     End-to-end via the real public DNS name"
 	@echo "  make verify-drupal ENV=...         Health check (live env-var-driven settings.php)"
 	@echo "  make remove-drupal ENV=...         Drop Drupal tables and wipe FSx files"
 	@echo "  make reinstall-drupal ENV=...      Wipe and reinstall against env"
@@ -650,7 +651,7 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	@# cache (~2 min). Each captured to its own tempfile so output is shown
 	@# coherently after all three complete (rather than interleaved live).
 	@TMPAMI=$$(mktemp); TMPDB=$$(mktemp); TMPCACHE=$$(mktemp); \
-	$(MAKE) build-amis ENV=$(ENV) VALIDATED=1 > "$$TMPAMI" 2>&1 & AMI_PID=$$!; \
+	$(MAKE) build-amis-if-needed ENV=$(ENV) VALIDATED=1 > "$$TMPAMI" 2>&1 & AMI_PID=$$!; \
 	$(MAKE) deploy-database ENV=$(ENV) VALIDATED=1 > "$$TMPDB" 2>&1 & DB_PID=$$!; \
 	$(MAKE) deploy-cache ENV=$(ENV) VALIDATED=1 > "$$TMPCACHE" 2>&1 & CACHE_PID=$$!; \
 	echo "$(CYAN)  AMI build:  pid $$AMI_PID   log $$TMPAMI  (~25 min, long pole)$(NC)"; \
@@ -2154,7 +2155,18 @@ build-ami-php83:  ## Trigger PHP 8.3 pipeline execution
 	echo "$(GREEN)✓ PHP 8.3 build started$(NC)"; \
 	echo "$(YELLOW)Monitor in AWS Console > EC2 Image Builder > Image pipelines$(NC)"
 
-build-amis: build-amis-async wait-amis  ## Trigger all 3 pipeline executions and WAIT for AVAILABLE
+build-amis: build-amis-async wait-amis  ## Force-rebuild all 3 pipelines and WAIT for AVAILABLE (~25 min)
+
+build-amis-if-needed:  ## Build AMIs only if the currently-deployed ones aren't at the configured RecipeVersion
+	@if scripts/check-ami-currency.sh $(ENV); then \
+		echo ""; \
+		echo "$(GREEN)Skipping AMI rebuild — all 3 pipelines are at the configured recipe version.$(NC)"; \
+		echo "$(CYAN)(Force a rebuild with: make build-amis ENV=$(ENV))$(NC)"; \
+	else \
+		echo ""; \
+		echo "$(YELLOW)Rebuilding AMIs to match configured recipe version...$(NC)"; \
+		$(MAKE) build-amis ENV=$(ENV) VALIDATED=1; \
+	fi
 
 build-amis-async:  ## Trigger all 3 pipeline executions (fire-and-forget; no wait)
 	@echo "$(BLUE)Triggering all AMI builds...$(NC)"
@@ -2324,6 +2336,54 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 
 		rm -f "$$BODY"; \
 	else \
 		echo "  $(RED)✗ Drupal returned HTTP $$HTTP$(NC)"; \
+		head -10 "$$BODY"; \
+		rm -f "$$BODY"; \
+		exit 1; \
+	fi
+
+smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB → nginx → PHP-FPM → Drupal)
+	@# Unlike smoke-test-drupal (which curls the ALB directly and forges the
+	@# Host header), this hits the public DNS name. A pass here means the
+	@# Route 53 alias resolves, the ALB accepts the hostname, and Drupal's
+	@# trusted_host_patterns include it. A fail here surfaces real-world
+	@# failures the forged-Host smoke test can't see (alias missing/stale,
+	@# DRUPAL_SITE_NAME not propagated to PHP-FPM workers, etc.).
+	@echo "$(BLUE)End-to-end smoke test for ENV=$(ENV)$(NC)"
+	@SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$SITE_NAME" ] || [ "$$SITE_NAME" = "None" ]; then \
+		echo "$(RED)ERROR: /$(ENV)/drupal/site-name not in SSM — deploy app-drupal first$(NC)"; \
+		exit 1; \
+	fi; \
+	case "$$SITE_NAME" in *.test) \
+		echo "$(YELLOW)WARN: site-name is '$$SITE_NAME' (a .test TLD won't resolve publicly).$(NC)"; \
+		echo "$(YELLOW)      Update cloudformation/parameters/app-drupal-$(ENV).json to a real DNS name,$(NC)"; \
+		echo "$(YELLOW)      then 'make deploy-app-drupal ENV=$(ENV)' to refresh SSM.$(NC)"; \
+		exit 1;; \
+	esac; \
+	echo "  URL:  http://$$SITE_NAME/"; \
+	RESOLVED=$$(dig +short "$$SITE_NAME" | head -2 | tr '\n' ' '); \
+	if [ -z "$$RESOLVED" ]; then \
+		echo "$(RED)✗ DNS lookup for $$SITE_NAME returned no records$(NC)"; \
+		echo "  Has the Route 53 alias been published? See docs/DNS-SETUP.md."; \
+		exit 1; \
+	fi; \
+	echo "  DNS:  $$RESOLVED"; \
+	BODY=$$(mktemp); \
+	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" "http://$$SITE_NAME/" --max-time 20); \
+	if [ "$$HTTP" = "200" ]; then \
+		echo "  $(GREEN)✓ Drupal returned HTTP 200 over the public DNS path$(NC)"; \
+		head -3 "$$BODY"; \
+		rm -f "$$BODY"; \
+	elif [ "$$HTTP" = "400" ]; then \
+		echo "  $(RED)✗ HTTP 400 — Drupal rejected the Host header.$(NC)"; \
+		echo "  Likely cause: DRUPAL_SITE_NAME hasn't reached the running PHP-FPM workers."; \
+		echo "  Fix: trigger an ASG instance refresh on the PHP-FPM ASGs (see docs/DNS-SETUP.md)."; \
+		head -10 "$$BODY"; \
+		rm -f "$$BODY"; \
+		exit 1; \
+	else \
+		echo "  $(RED)✗ HTTP $$HTTP$(NC)"; \
 		head -10 "$$BODY"; \
 		rm -f "$$BODY"; \
 		exit 1; \
