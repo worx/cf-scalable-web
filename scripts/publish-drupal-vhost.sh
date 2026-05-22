@@ -67,20 +67,20 @@ sudo chmod 755 /var/www/nginx "\$NGINX_VHOST_DIR"
 
 sudo tee "\$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
 # Drupal vhost — managed by scripts/publish-drupal-vhost.sh
+#
+# Routes by server_name (NOT default_server). The default_server lives in
+# the baseline /etc/nginx/nginx.conf and is what handles ALB /health
+# probes — that decouples nginx fleet health from Drupal install state.
+# Two default_server declarations on the same listen port would be an
+# nginx config error, so this vhost MUST NOT carry that flag.
 server {
-  listen 80 default_server;
+  listen 80;
   server_name \$SITE_NAME;
   root \$INSTALL_DIR/web;
   index index.php;
 
   access_log /var/log/nginx/drupal_access.log main;
   error_log  /var/log/nginx/drupal_error.log  warn;
-
-  location = /health {
-    access_log off;
-    return 200 'OK';
-    add_header Content-Type text/plain;
-  }
 
   location / {
     try_files \\\$uri /index.php?\\\$query_string;

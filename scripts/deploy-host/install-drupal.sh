@@ -504,28 +504,19 @@ sudo tee "$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
 # Reload after edit: make reload-nginx ENV=$ENV
 
 server {
-  # default_server: this vhost handles requests for $SITE_NAME AND any
-  # unknown Host header (e.g., the ALB DNS, EC2 internal hostnames).
-  # Without default_server, an unknown Host would fall through to
-  # /etc/nginx/conf.d/health-check.conf or nginx's implicit default
-  # and return 404. See docs/memory/gotchas.md.
-  listen 80 default_server;
+  # Routes by server_name. NOT default_server — the baseline
+  # /etc/nginx/nginx.conf owns default_server on port 80 and handles ALB
+  # /health probes there. That decouples nginx fleet health from Drupal
+  # install state (an instance with no drupal.conf still passes /health).
+  # Two default_server blocks on the same listen port would be an nginx
+  # config error, so this vhost matches by Host header only.
+  listen 80;
   server_name $SITE_NAME;
   root $INSTALL_DIR/web;
   index index.php;
 
   access_log /var/log/nginx/drupal_access.log main;
   error_log  /var/log/nginx/drupal_error.log  warn;
-
-  # ALB target-group health check probes here. Returning 200 lets the
-  # ALB consider this nginx target healthy. Kept on port 80 (rather
-  # than a separate /etc/nginx/conf.d/health-check.conf with its own
-  # default_server) so it doesn't fight for default_server status.
-  location = /health {
-    access_log off;
-    return 200 'OK';
-    add_header Content-Type text/plain;
-  }
 
   # Drupal: try static file, fall back to index.php
   location / {

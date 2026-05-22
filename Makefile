@@ -698,14 +698,41 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	@echo "$(CYAN)Phase 4: Drupal app stack (Secrets Manager + SSM params)$(NC)"
 	@$(MAKE) deploy-app-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
-	@echo "$(CYAN)Phase 5: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
-	@$(MAKE) install-drupal-remote ENV=$(ENV) VALIDATED=1
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)  ✓ Infrastructure deploy complete: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
+	@# Phases 5 and 6 (install-drupal + smoke-test) are an OPTIONAL
+	@# convenience appendix — Drupal is an application, not infrastructure.
+	@# They run best-effort: if they fail, the deployment is still
+	@# considered successful (compute fleet is healthy on its own merits
+	@# via the baseline /health endpoint in nginx.conf), and the operator
+	@# gets a clear "Drupal needs attention" message with a re-run hint.
 	@echo ""
-	@echo "$(CYAN)Phase 6: End-to-end smoke test (curl ALB)$(NC)"
-	@$(MAKE) smoke-test-drupal ENV=$(ENV) VALIDATED=1
+	@echo "$(CYAN)Phase 5: Install Drupal on deploy-host (best-effort, ~5 min)$(NC)"
+	@if $(MAKE) install-drupal-remote ENV=$(ENV) VALIDATED=1; then \
+		INSTALL_OK=1; \
+	else \
+		INSTALL_OK=0; \
+		echo ""; \
+		echo "$(YELLOW)⚠ Phase 5 failed — infrastructure is still healthy.$(NC)"; \
+		echo "$(YELLOW)  Re-run with: make install-drupal-remote ENV=$(ENV)$(NC)"; \
+	fi; \
+	echo ""; \
+	if [ "$$INSTALL_OK" = "1" ]; then \
+		echo "$(CYAN)Phase 6: End-to-end smoke test (best-effort)$(NC)"; \
+		if ! $(MAKE) smoke-test-drupal ENV=$(ENV) VALIDATED=1; then \
+			echo ""; \
+			echo "$(YELLOW)⚠ Phase 6 failed — Drupal installed but smoke test did not pass.$(NC)"; \
+			echo "$(YELLOW)  Investigate with: make smoke-test-drupal ENV=$(ENV)$(NC)"; \
+		fi; \
+	else \
+		echo "$(YELLOW)Skipping Phase 6 (smoke test) — Drupal install did not succeed.$(NC)"; \
+	fi
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
-	@echo "$(GREEN)  ✓ Full deployment + Drupal complete: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)  ✓ deploy-allX done: ENV=$(ENV)$(NC)"
+	@echo "$(GREEN)    Infrastructure: healthy.$(NC)"
+	@echo "$(GREEN)    Drupal app:     see Phase 5/6 output above.$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
 
 # -----------------------------------------------------------------------------
