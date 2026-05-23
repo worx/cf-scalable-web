@@ -2420,7 +2420,7 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS â†’ ALB â†
 		echo "$(YELLOW)      then 'make deploy-app-drupal ENV=$(ENV)' to refresh SSM.$(NC)"; \
 		exit 1;; \
 	esac; \
-	echo "  URL:  http://$$SITE_NAME/"; \
+	echo "  URL:  https://$$SITE_NAME/"; \
 	echo -n "  DNS:  resolving"; \
 	RESOLVED=""; \
 	for _ in $$(seq 1 12); do \
@@ -2438,7 +2438,7 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS â†’ ALB â†
 	fi; \
 	echo "  DNS:  $$RESOLVED"; \
 	BODY=$$(mktemp); \
-	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" "http://$$SITE_NAME/" --max-time 20); \
+	HTTP=$$(curl -sL -o "$$BODY" -w "%{http_code}" "https://$$SITE_NAME/" --max-time 20); \
 	if [ "$$HTTP" = "200" ]; then \
 		echo "  $(GREEN)âœ“ Drupal returned HTTP 200 over the public DNS path$(NC)"; \
 		head -3 "$$BODY"; \

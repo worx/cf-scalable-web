@@ -10,8 +10,15 @@
 #
 # Architecture:
 #   - Internet-facing ALB in public subnets
-#   - HTTP listener redirects to HTTPS (301)
-#   - HTTPS listener forwards to NGINX target group (conditional on ACM cert)
+#   - When DomainName + EnvsSubZoneId are set:
+#       - Stack creates an ACM cert for DomainName (DNS-validated via the
+#         envs sub-zone). AWS auto-writes the validation CNAME and
+#         auto-renews the cert forever.
+#       - HTTP listener (port 80) returns a 301 redirect to HTTPS.
+#       - HTTPS listener (port 443) terminates TLS and forwards to NGINX.
+#   - When DomainName is empty (e.g., uninitialized staging env):
+#       - HTTP listener (port 80) forwards directly to NGINX. No cert,
+#         no HTTPS. Useful for initial deploys before DNS is set up.
 #   - SSM Parameter /environment/name for boot script environment discovery
 #
 # Dependencies: cf-vpc.yaml (subnets, security groups, VPC ID)
@@ -35,7 +42,11 @@ Metadata:
           - ALBIdleTimeout
           - HealthCheckPath
           - HealthCheckInterval
-          - ACMCertificateArn
+      - Label:
+          default: "HTTPS Configuration (optional — leave DomainName empty for HTTP-only)"
+        Parameters:
+          - DomainName
+          - EnvsSubZoneId
 
 Parameters:
   EnvironmentName:
@@ -64,13 +75,27 @@ Parameters:
     MaxValue: 300
     Default: 30
 
-  ACMCertificateArn:
+  DomainName:
     Type: String
-    Description: ACM certificate ARN for HTTPS listener (empty = HTTP-only for sandbox)
+    Description: >
+      Public FQDN this env serves on (e.g., sandbox.envs.zoning-info.com).
+      When non-empty, the stack creates an ACM cert for this name and
+      enables HTTPS. When empty, the ALB serves HTTP-only — useful for
+      initial bring-up before DNS is delegated. See docs/SSL-MANAGEMENT.md.
+    Default: ''
+
+  EnvsSubZoneId:
+    Type: String
+    Description: >
+      Route 53 hosted zone ID of the sub-zone where ACM will write the
+      validation CNAME for the cert (e.g., Z03149452QE09GQX23F48 for
+      envs.zoning-info.com). Required when DomainName is set; ignored
+      otherwise. See docs/DNS-SETUP.md for how to obtain this ID after
+      the one-time parent-zone delegation.
     Default: ''
 
 Conditions:
-  HasACMCertificate: !Not [!Equals [!Ref ACMCertificateArn, '']]
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
 
 Resources:
   # ========================================
@@ -153,10 +178,44 @@ Resources:
           Value: !Ref EnvironmentName
 
   # ========================================
+  # ACM Certificate (only when DomainName is set)
+  # ========================================
+  #
+  # AWS Certificate Manager issues a publicly-trusted cert from Amazon
+  # Trust Services (rooted in every major browser's trust store). DNS
+  # validation: ACM writes a CNAME under DomainName into the specified
+  # hosted zone; ACM watches the zone for resolution; cert issues to
+  # ISSUED status (typically 3-5 min). After that ACM auto-renews
+  # silently every ~11 months for as long as the cert is referenced.
+  #
+  # Cert lives in this stack so destroy-all takes the cert with it.
+  # No orphaned certs in ACM after a tear-down cycle.
+  #
+  # See docs/memory/tls-cert-strategy-by-scale.md for the cost/scale
+  # rationale (why ACM-on-ALB through several thousand tenants is the
+  # right choice for this architecture).
+
+  AlbCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: HasDomain
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref EnvsSubZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-alb-cert'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ========================================
   # Listeners
   # ========================================
 
-  # HTTP listener always redirects to HTTPS
+  # Port 80: redirect to 443 when HTTPS is available, else forward
+  # directly to nginx (HTTP-only fallback for uninitialized envs).
   HTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -165,7 +224,7 @@ Resources:
       Protocol: HTTP
       DefaultActions:
         - !If
-          - HasACMCertificate
+          - HasDomain
           - Type: redirect
             RedirectConfig:
               Protocol: HTTPS
@@ -174,17 +233,19 @@ Resources:
           - Type: forward
             TargetGroupArn: !Ref NginxTargetGroup
 
-  # HTTPS listener (only when ACM certificate is provided)
+  # Port 443: created only when we have a domain + cert. TLS 1.3 baseline
+  # (ELBSecurityPolicy-TLS13-1-2-2021-06 = TLS 1.3 preferred, TLS 1.2
+  # acceptable, no older protocols). Forwards to the nginx target group.
   HTTPSListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasACMCertificate
+    Condition: HasDomain
     Properties:
       LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 443
       Protocol: HTTPS
       SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
       Certificates:
-        - CertificateArn: !Ref ACMCertificateArn
+        - CertificateArn: !Ref AlbCertificate
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref NginxTargetGroup
@@ -213,6 +274,13 @@ Outputs:
     Value: !Ref NginxTargetGroup
     Export:
       Name: !Sub '${EnvironmentName}-nginx-target-group-arn'
+
+  AlbCertificateArn:
+    Condition: HasDomain
+    Description: ARN of the ACM cert attached to the HTTPS listener
+    Value: !Ref AlbCertificate
+    Export:
+      Name: !Sub '${EnvironmentName}-alb-certificate-arn'
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company

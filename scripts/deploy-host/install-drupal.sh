@@ -423,6 +423,23 @@ if ($_name = getenv('DRUPAL_SITE_NAME')) {
   $settings['trusted_host_patterns'][] = '^' . preg_quote($_name) . '$';
 }
 
+// Reverse-proxy (ALB) trust. The ALB terminates TLS and forwards HTTP
+// to nginx → PHP-FPM with X-Forwarded-Proto: https (and
+// X-Forwarded-For, X-Forwarded-Host). Without this block Drupal would
+// generate http:// URLs and break mixed-content under HTTPS access.
+//
+// Trusted addresses = the entire VPC private range. ALB-to-nginx traffic
+// is always intra-VPC; nginx-to-PHP-FPM traffic is also intra-VPC. We
+// don't have a stable ALB IP to enumerate (the ALB rotates IPs within
+// its subnets), and there's no externally-reachable path to PHP-FPM
+// anyway — the security boundary is the VPC, so trusting the VPC range
+// is appropriate. Drupal/Symfony accepts CIDR notation here.
+//
+// 10.0.0.0/8 covers any AWS VPC CIDR we'd realistically use. Tighten
+// to the actual VPC CIDR for production if desired.
+$settings['reverse_proxy'] = TRUE;
+$settings['reverse_proxy_addresses'] = ['10.0.0.0/8'];
+
 // Optional: include a per-env override file if one exists alongside this.
 // $local = __DIR__ . '/settings.local.php';
 // if (file_exists($local)) { include $local; }

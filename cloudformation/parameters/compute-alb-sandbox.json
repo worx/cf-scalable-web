@@ -4,6 +4,7 @@
     "ALBIdleTimeout": "60",
     "HealthCheckPath": "/health",
     "HealthCheckInterval": "30",
-    "ACMCertificateArn": ""
+    "DomainName": "sandbox.envs.zoning-info.com",
+    "EnvsSubZoneId": "Z03149452QE09GQX23F48"
   }
 }

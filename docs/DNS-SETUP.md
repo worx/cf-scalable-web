@@ -123,6 +123,23 @@ aws --profile zikvanderw route53 list-resource-record-sets \
   --query "ResourceRecordSets[?Name=='envs.zoning-info.com.']"
 ```
 
+### Step 4 — Record the sub-zone ID for HTTPS cert provisioning
+
+`cf-compute-alb` needs the sub-zone ID to validate ACM certs via DNS-01.
+Look it up once and stash it in each env's parameter file:
+
+```bash
+aws --profile ZI-Sandbox route53 list-hosted-zones \
+  --query "HostedZones[?Name=='envs.zoning-info.com.'].Id | [0]" \
+  --output text | sed 's|/hostedzone/||'
+```
+
+Copy the output (e.g., `Z03149452QE09GQX23F48`) into
+`cloudformation/parameters/compute-alb-<env>.json` as the `EnvsSubZoneId`
+value, alongside `DomainName: "<env>.envs.zoning-info.com"`. Without
+these, the ALB stack deploys HTTP-only — see
+[docs/SSL-MANAGEMENT.md](SSL-MANAGEMENT.md) for the full HTTPS lifecycle.
+
 **Done.** From here, all per-env operations stay inside ZI-Sandbox.
 
 ---
