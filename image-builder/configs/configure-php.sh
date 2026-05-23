@@ -21,7 +21,8 @@
 #   - Secrets Manager /<env>/ses/smtp-credentials     -> SES relay creds
 #
 # Side effects:
-#   - Mounts FSx at /var/www
+#   - Mounts the FSx subtree /fsx/www at /var/www (NOT the FSx volume root;
+#     PHP-FPM must not see /fsx/nginx — see docs/FSX-LAYOUT.md)
 #   - Rewrites a managed BEGIN/END block inside /etc/php/$PHP_VER/fpm/pool.d/www.conf
 #     containing env[...] (Drupal config) + php_value[...] (Valkey session) lines.
 #     File ends up 640 root:www-data because it embeds the DB password and AUTH token.
@@ -49,10 +50,14 @@ ENV=$(aws ssm get-parameter --name "/environment/name" --region "$REGION" \
 echo "[configure-php] Starting PHP $PHP_VER configuration for $ENV"
 
 # ============================================================
-# Mount FSx webroot at /var/www. This path is identical on every host
-# (PHP fleet, nginx fleet, deploy-host) — env-awareness lives in WHICH
-# FSx is mounted, not WHERE. Drupal at /var/www/drupal/web regardless
-# of environment.
+# Mount the FSx /fsx/www subtree at /var/www. This MOUNT PATH (/var/www)
+# is identical on every host (PHP fleet, nginx fleet, deploy-host) —
+# env-awareness lives in WHICH FSx volume is mounted, not WHERE.
+# Drupal sits at /var/www/drupal/web regardless of environment.
+#
+# Mount SOURCE is /fsx/www specifically — a sibling subtree of /fsx/nginx,
+# not the FSx volume root. PHP-FPM workers must not have /fsx/nginx
+# anywhere in their filesystem namespace. See docs/FSX-LAYOUT.md.
 # ============================================================
 FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
   --query 'Parameter.Value' --output text 2>/dev/null || echo "")
@@ -60,11 +65,6 @@ if [ -z "$FSX_DNS" ] || [ "$FSX_DNS" = "None" ]; then
   echo "[configure-php] FATAL: /$ENV/fsx/dns-name not set in SSM" >&2
   exit 1
 fi
-# Mount the /fsx/www subtree (NOT the FSx root). PHP-FPM has no legitimate
-# need to see nginx vhost configs at /fsx/nginx, and mounting only the
-# /www subtree means PHP workers literally cannot reach /fsx/nginx via
-# any filesystem path — defense in depth against information disclosure
-# through a PHP file-read primitive. See docs/FSX-LAYOUT.md.
 echo "[configure-php] Mounting $FSX_DNS:/fsx/www at /var/www"
 if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/www" /var/www; then
   echo "[configure-php] FATAL: mount of $FSX_DNS:/fsx/www at /var/www failed" >&2

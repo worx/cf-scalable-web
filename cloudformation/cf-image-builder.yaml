@@ -524,8 +524,8 @@ Resources:
                       # Copyright (C) 2026 The Worx Company
                       #
                       # Purpose: Configure NGINX at boot time
-                      # - Mount /var/www from FSx (webroot)
-                      # - Mount /etc/nginx/shared from FSx (shared NGINX config)
+                      # - Mount /var/www from FSx subtree /fsx/www (Drupal source)
+                      # - Mount /etc/nginx/shared from FSx subtree /fsx/nginx (vhost configs)
                       # - Generate upstream PHP config from SSM parameters
                       # - Start NGINX
                       #
@@ -537,21 +537,24 @@ Resources:
 
                       echo "[configure-nginx] Starting configuration for $ENV"
 
-                      # Mount FSx webroot at /var/www. Same path on every host —
-                      # env-awareness lives in WHICH FSx is mounted, not WHERE.
+                      # The mount PATH (/var/www) is identical on every host —
+                      # env-awareness lives in WHICH FSx volume is mounted, not
+                      # WHERE. The mount SOURCE is /fsx/www specifically (see
+                      # the sibling-subtree comment below).
                       FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
                         --query 'Parameter.Value' --output text 2>/dev/null || echo "")
                       if [ -z "$FSX_DNS" ] || [ "$FSX_DNS" = "None" ]; then
                         echo "[configure-nginx] FATAL: /$ENV/fsx/dns-name not set in SSM" >&2
                         exit 1
                       fi
-                      # FSx mounted as two SIBLING leaf-subtree mounts (NOT
-                      # the FSx root). /fsx/www serves Drupal static files;
-                      # /fsx/nginx holds vhost configs. Sibling design ensures
-                      # PHP-FPM fleet (which mounts only /fsx/www) cannot reach
-                      # /fsx/nginx via filesystem traversal — defense in depth
-                      # against PHP file-read primitives leaking nginx config.
-                      # See docs/FSX-LAYOUT.md.
+                      # FSx mounted as two SIBLING leaf-subtree mounts. /fsx/www
+                      # serves Drupal static files; /fsx/nginx holds per-env vhost
+                      # configs. Mounting them as siblings (not the FSx volume
+                      # root /fsx at /var/www with nginx/ as a subdirectory of
+                      # that) ensures the PHP-FPM fleet (which mounts only
+                      # /fsx/www) cannot reach /fsx/nginx via filesystem
+                      # traversal — defense in depth against PHP file-read
+                      # primitives leaking nginx config. See docs/FSX-LAYOUT.md.
                       echo "[configure-nginx] Mounting $FSX_DNS:/fsx/www at /var/www"
                       if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/www" /var/www; then
                         echo "[configure-nginx] FATAL: mount of $FSX_DNS:/fsx/www at /var/www failed" >&2
@@ -601,7 +604,7 @@ Resources:
                       echo "=== Add fstab Templates ==="
                       cat >> /etc/fstab <<'FSTABEOF'
                       # FSx NFS mounts (activated at boot by configure-nginx.sh)
-                      # {fsx_dns}:/fsx        /var/www          nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
+                      # {fsx_dns}:/fsx/www    /var/www          nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
                       # {fsx_dns}:/fsx/nginx  /etc/nginx/shared nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
                       FSTABEOF
 
@@ -873,7 +876,7 @@ Resources:
                       echo "=== Add fstab Template ==="
                       cat >> /etc/fstab <<'FSTABEOF'
                       # FSx NFS mount (activated at boot by configure-php.sh)
-                      # {fsx_dns}:/fsx /var/www nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
+                      # {fsx_dns}:/fsx/www /var/www nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
                       FSTABEOF
 
           - name: test
@@ -1170,7 +1173,7 @@ Resources:
                       echo "=== Add fstab Template ==="
                       cat >> /etc/fstab <<'FSTABEOF'
                       # FSx NFS mount (activated at boot by configure-php.sh)
-                      # {fsx_dns}:/fsx /var/www nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
+                      # {fsx_dns}:/fsx/www /var/www nfs4 vers=4.1,port=2049,_netdev,nofail 0 0
                       FSTABEOF
 
           - name: test

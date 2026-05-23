@@ -159,7 +159,8 @@ fi
 #                                    mounts this AND /fsx/www (for static
 #                                    file serving).
 #
-# Why siblings (not /fsx-root → /var/www with nginx as a subdir):
+# Why siblings (not the FSx volume root /fsx mounted at /var/www with
+# nginx/ as a subdirectory of that):
 # Defense in depth. Mounting only the /fsx/www subtree on PHP-FPM means
 # PHP workers literally cannot see /fsx/nginx via filesystem traversal —
 # there's no `..` path from /var/www that reaches the nginx config tree.
