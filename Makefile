@@ -255,6 +255,7 @@ help:  ## Show this help message
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (cloud — RDS + FSx, requires ENV=sandbox|staging|production):$(NC)"
 	@echo "  make install-drupal ENV=...        Install Drupal 11 against env's RDS+FSx (on deploy-host)"
+	@echo "  make install-drupal-full ENV=...   Full setup: install + publish-dns + smoke tests (~5-7 min)"
 	@echo "  make install-drupal-remote ENV=... SSM-dispatch install-drupal to deploy-host (from local)"
 	@echo "  make publish-dns ENV=...           UPSERT Route 53 alias <site-name> → ALB"
 	@echo "  make unpublish-dns ENV=...         DELETE Route 53 alias (use before destroy-all)"
@@ -701,41 +702,16 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	@$(MAKE) deploy-app-drupal ENV=$(ENV) VALIDATED=1
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
-	@echo "$(GREEN)  ✓ Infrastructure deploy complete: ENV=$(ENV)$(NC)"
-	@echo "$(GREEN)========================================$(NC)"
-	@# Phases 5 and 6 (install-drupal + smoke-test) are an OPTIONAL
-	@# convenience appendix — Drupal is an application, not infrastructure.
-	@# They run best-effort: if they fail, the deployment is still
-	@# considered successful (compute fleet is healthy on its own merits
-	@# via the baseline /health endpoint in nginx.conf), and the operator
-	@# gets a clear "Drupal needs attention" message with a re-run hint.
-	@echo ""
-	@echo "$(CYAN)Phase 5: Install Drupal on deploy-host (best-effort, ~5 min)$(NC)"
-	@if $(MAKE) install-drupal-remote ENV=$(ENV) VALIDATED=1; then \
-		INSTALL_OK=1; \
-	else \
-		INSTALL_OK=0; \
-		echo ""; \
-		echo "$(YELLOW)⚠ Phase 5 failed — infrastructure is still healthy.$(NC)"; \
-		echo "$(YELLOW)  Re-run with: make install-drupal-remote ENV=$(ENV)$(NC)"; \
-	fi; \
-	echo ""; \
-	if [ "$$INSTALL_OK" = "1" ]; then \
-		echo "$(CYAN)Phase 6: End-to-end smoke test (best-effort)$(NC)"; \
-		if ! $(MAKE) smoke-test-drupal ENV=$(ENV) VALIDATED=1; then \
-			echo ""; \
-			echo "$(YELLOW)⚠ Phase 6 failed — Drupal installed but smoke test did not pass.$(NC)"; \
-			echo "$(YELLOW)  Investigate with: make smoke-test-drupal ENV=$(ENV)$(NC)"; \
-		fi; \
-	else \
-		echo "$(YELLOW)Skipping Phase 6 (smoke test) — Drupal install did not succeed.$(NC)"; \
-	fi
-	@echo ""
-	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ deploy-allX done: ENV=$(ENV)$(NC)"
-	@echo "$(GREEN)    Infrastructure: healthy.$(NC)"
-	@echo "$(GREEN)    Drupal app:     see Phase 5/6 output above.$(NC)"
+	@echo "$(GREEN)    Infrastructure deployed and healthy.$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Next step (optional — only if you want to set up the$(NC)"
+	@echo "$(CYAN)sandbox Drupal test site on this infrastructure):$(NC)"
+	@echo "$(CYAN)  make install-drupal-full ENV=$(ENV)$(NC)"
+	@echo ""
+	@echo "$(CYAN)That target installs Drupal, publishes the Route 53 alias,$(NC)"
+	@echo "$(CYAN)and runs both smoke tests. ~5-7 min.$(NC)"
 
 # -----------------------------------------------------------------------------
 # Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
@@ -2340,6 +2316,42 @@ publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf 
 
 clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
 	@scripts/clear-drupal-cache.sh $(ENV)
+
+install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
+	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
+	@# environment and turns it into a working, publicly-reachable, smoke-
+	@# tested Drupal site. Each step is strict (fail = abort) because this
+	@# target's contract is "set up the test Drupal end-to-end" — the
+	@# operator wants to know which layer broke if anything does.
+	@#
+	@# Order chosen to validate progressively narrower scopes:
+	@#   1. install-drupal-remote — installs Drupal on FSx via the deploy-host
+	@#   2. smoke-test-drupal     — ALB+nginx+PHP-FPM+Drupal serve (forged Host)
+	@#   3. publish-dns           — UPSERT Route 53 alias to env's ALB
+	@#   4. smoke-test-public     — end-to-end via real public DNS
+	@# A failure at step N tells you the issue is at layer N (or later).
+	@echo "$(BLUE)========================================$(NC)"
+	@echo "$(BLUE)  install-drupal-full: ENV=$(ENV)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Step 1/4: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
+	@$(MAKE) install-drupal-remote ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Step 2/4: Smoke-test Drupal (forged Host header)$(NC)"
+	@$(MAKE) smoke-test-drupal ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Step 3/4: Publish Route 53 alias for the env's site name$(NC)"
+	@$(MAKE) publish-dns ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Step 4/4: End-to-end smoke test via real public DNS$(NC)"
+	@$(MAKE) smoke-test-public ENV=$(ENV)
+	@echo ""
+	@echo "$(GREEN)========================================$(NC)"
+	@echo "$(GREEN)  ✓ install-drupal-full done: ENV=$(ENV)$(NC)"
+	@SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
+	echo "$(GREEN)  Sandbox Drupal live at http://$$SITE_NAME/$(NC)"
+	@echo "$(GREEN)========================================$(NC)"
 
 install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the deploy-host
 	@scripts/install-drupal-remote.sh $(ENV)

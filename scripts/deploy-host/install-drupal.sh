@@ -133,10 +133,38 @@ for tool in composer php psql openssl aws; do
     fail "$tool not found in PATH. Run scripts/deploy-host/bootstrap.sh first."
 done
 
-# Verify required PHP extensions
+# Verify required PHP extensions.
+#
+# Earlier form was `php -m | grep -qi "^${ext}$" || fail ...` per-extension.
+# Two problems with that:
+#   1. Six php processes spawned (one per loop iteration) — adds startup time.
+#   2. Fragile under `set -o pipefail`: `grep -q` exits on first match, which
+#      can SIGPIPE the upstream `php` and trip pipefail. Past incident
+#      2026-05-22: this check falsely reported pdo_pgsql missing during a
+#      deploy-allX run; re-running the same script minutes later worked.
+#      No package state had changed — the failure was process-level
+#      transience, but the error message blamed bootstrap.sh's apt installs.
+#
+# Better: capture `php -m` (with stderr merged) ONCE, then grep the captured
+# string. No pipefail exposure, single php invocation, and on failure we
+# dump real diagnostics so the next intermittent failure tells us which
+# theory (PHP startup, missing extension, PATH) is actually happening.
+PHP_M=$(php -m 2>&1) || \
+  fail "php -m failed (exit $?). PATH=$PATH | php -v: $(php -v 2>&1 | head -1) | output: $PHP_M"
+
 for ext in pdo_pgsql mbstring gd curl xml dom; do
-  php -m | grep -qi "^${ext}$" || \
-    fail "PHP extension '$ext' not loaded. Check apt installs in bootstrap.sh."
+  if ! echo "$PHP_M" | grep -qi "^${ext}$"; then
+    {
+      echo "Diagnostics for extension check failure:"
+      echo "  PATH=$PATH"
+      echo "  which php: $(command -v php)"
+      echo "  php -v:"
+      php -v 2>&1 | sed 's/^/    /'
+      echo "  php -m output:"
+      echo "$PHP_M" | sed 's/^/    /'
+    } >&2
+    fail "PHP extension '$ext' not loaded. Diagnostics above; check bootstrap.sh apt installs."
+  fi
 done
 
 # Verify network connectivity to RDS (peering working?)
