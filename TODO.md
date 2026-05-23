@@ -1,5 +1,10 @@
 # cf-scalable-web TODO
 
+**Current milestone:** `v0.1.0-base-infra` tagged 2026-05-23 — destroy-all
+→ deploy-allX → install-drupal-full → public URL serves Drupal, validated
+by two consecutive stop-rebuild cycles. Next natural milestone is
+`v0.2.0-https` (Phase 3 below).
+
 ## Phase 1: Core Infrastructure ✅ COMPLETE
 
 - [x] Create project structure (.claude/, cloudformation/, scripts/, docs/, tests/)
@@ -33,6 +38,52 @@
 A multi-day debug arc surfaced many real issues that have been fixed in
 flight (and committed) but left operational gaps worth closing. Items are
 prioritized by "would this bite again if we don't fix it."
+
+### ✅ Resolved 2026-05-22 → 2026-05-23 (v0.1.0-base-infra milestone)
+
+A second debug arc culminating in the tag. Items addressed:
+
+- ✅ **nginx /health decoupled from Drupal install** (commit 77e9eca).
+  Baseline `nginx.conf` now carries a `default_server` block that returns
+  200 on `/health` with no PHP / FSx / Drupal dependency. Drupal vhost
+  matches by `server_name` only. Compute fleet is healthy from second
+  one of boot regardless of Drupal install state. Fixed ELB-replacement
+  ASG churn during the install window.
+- ✅ **deploy-allX is infrastructure-only.** Drupal install + smoke tests
+  moved to new `install-drupal-full` target (commit c076078) which
+  chains install-drupal-remote → smoke-test-drupal → publish-dns →
+  smoke-test-public, strict-mode. deploy-allX prints "next step" hint
+  on success.
+- ✅ **destroy-all unmounts FSx from deploy-host before destroy-storage**
+  (commit e638d58). New `unmount-deploy-host-fsx` target SSM-dispatches
+  `use-env none` while FSx is still alive, scrubs the worxco fstab block,
+  prevents stale-mount carry-over to next deploy.
+- ✅ **use-env hardened against stale NFS mounts** (commit b79cdeb).
+  Reads `/proc/mounts` instead of `mountpoint -q` (no stat() block);
+  uses `umount -f -l` (force + lazy) instead of plain umount.
+- ✅ **SSM-dispatch targets the ASG view, not EC2 tag index** (commit
+  5f98485). `reload-nginx.sh` and `restart-php-fpm.sh` enumerate via
+  `describe-auto-scaling-groups --query Instances[?LifecycleState=='InService' && HealthStatus=='Healthy']`.
+  Fixes `InvalidInstanceId` errors during instance refresh.
+- ✅ **Route 53 sub-zone delegation pattern + automation** (commits
+  bfcfebe, d942b9a). `docs/DNS-SETUP.md` runbook for one-time delegation;
+  `make publish-dns` / `make unpublish-dns` for per-env record management;
+  `make smoke-test-public` for end-to-end DNS-path validation. publish-dns
+  waits for Route 53 INSYNC + verifies via 8.8.8.8 before returning.
+- ✅ **build-amis-if-needed** (commit 3dfbf44). Skips ~25-min AMI bake
+  when RecipeVersion already matches what's deployed. (Was P3 below;
+  the item there is now redundant.)
+- ✅ **install-drupal.sh PHP-extension check instrumented** (commit
+  d942b9a). Single `php -m` invocation (no pipefail+SIGPIPE exposure);
+  dumps PATH / `php -v` / full `php -m` output on failure.
+- ✅ **install-drupal-remote.sh shows stdout and stderr with neutral
+  labels** (commit d942b9a). Fixed misleading `----------ERROR-------`
+  artifact in SSM's combined-output field.
+- ✅ **System-wide /etc/tmux.conf on deploy-host** (commit 933570e).
+  vi copy-mode, 50k-line scrollback, mouse on, env-aware status bar.
+- ✅ **Shell-portability memory** (commits e8beafb, 592a15e). Captures
+  zsh vs. bash gotchas (uppercase expansion, word-splitting). Two real
+  incidents from this arc documented.
 
 ### P0 — Regressions waiting to happen (do soonest)
 
@@ -96,17 +147,14 @@ prioritized by "would this bite again if we don't fix it."
     must be re-run after cf-app-drupal deploys) captures the actual root
     cause of the 5-15 password mismatch.
 
-- [ ] **Deploy-host cutover to `/var/www` mount**
-  - The use-env / single-mount commits (ee16258, ee319d5) are in git but the
-    running deploy-host still has FSx mounted at `/var/www/sandbox`. Steps in
-    that commit's message: pull, re-run bootstrap.sh, unmount `/var/www/sandbox`,
-    strip its fstab entry, run `sudo use-env sandbox`, verify, then
-    `make deploy-app-drupal` to update the SSM install-path parameter.
+- [x] **Deploy-host cutover to `/var/www` mount** ✅ 2026-05-22
+  - Confirmed live via the destroy-all → deploy-allX → install-drupal-full
+    cycles. `use-env` mounts FSx directly at `/var/www` (and `/fsx/nginx`
+    at `/etc/nginx/shared`); no per-env subdir under `/var/www`.
 
-- [ ] **Deploy cf-app-drupal** (`make check-drift` surfaced this 2026-05-18)
-  - `cf-app-drupal.yaml` has committed-but-undeployed changes from 5-15
-    (the install-path SSM update). `make deploy-app-drupal ENV=sandbox`.
-  - Roll into the deploy-host cutover above since both touch the same area.
+- [x] **Deploy cf-app-drupal** ✅ 2026-05-22
+  - Deployed cleanly in every destroy-redeploy cycle since the cutover.
+    Now part of the standard `deploy-allX` Phase 4.
 
 ### P1 — Operational improvements (close the traps that bit us)
 
@@ -301,29 +349,51 @@ prioritized by "would this bite again if we don't fix it."
   sandbox/staging/production) and run deploy-allX through it; don't
   migrate the working envs until the spike validates. Captured 2026-05-20.
 
-- [ ] **`build-amis-if-needed`: skip rebuild when recipe hasn't changed.**
-  Today's deploy-allX triggered build #3 of recipe 1.0.10 even though
-  the recipe content is identical to yesterday's build #2. Image Builder
-  pipelines are CFN resources that get recreated on `destroy-all` →
-  `deploy-image-builder`, so they have no concept of "latest" and our
-  `build-amis` target blindly triggers every time. Design: a new
-  `build-amis-if-needed` target that, for each pipeline, reads the
-  current AMI ID from SSM (`/<env>/ami/<pipeline>`), describes the AMI
-  to get its Image Builder tag (recipe ARN + version), and compares
-  against the recipe currently configured in the pipeline. If they
-  match, skip — print "✓ <pipeline> AMI 1.0.10/2 is current". If not,
-  trigger + wait as today. Saves ~15-20 min on incremental deploys.
-  Make `build-amis-if-needed` the default in deploy-all; keep
-  `build-amis` as the force-rebuild variant. Captured 2026-05-19.
+- [x] **`build-amis-if-needed`: skip rebuild when recipe hasn't changed**
+  ✅ 2026-05-22 (commit 3dfbf44). Implemented as designed. Backed by
+  `scripts/check-ami-currency.sh`. Now wired into deploy-allX Phase 2
+  instead of `build-amis`. Future per-pipeline RecipeVersion would be
+  a further optimization (today, bumping RecipeVersion rebuilds all 3
+  pipelines even if only one recipe changed) but not urgent.
 
 
 
-- [ ] Configure CertBot DNS-01 on NGINX instances
-- [ ] Decide: Route 53 zone list in SSM Parameter vs. wildcard permission
-- [ ] Test: Request cert for test domain, verify renewal
-- [ ] Write docs/SSL-MANAGEMENT.md
-- [ ] Write scripts/health-check.sh (test ALB, NLB ports, RDS, FSx, cache)
-- [ ] Test: End-to-end request flow (Browser → ALB → NGINX → NLB → PHP-FPM → RDS)
+## Phase 3: HTTPS via ACM (target tag: v0.2.0-https)
+
+Replaces the original CertBot-on-nginx plan now that DNS sub-zone
+delegation works (commits bfcfebe/d942b9a). ACM is simpler, no
+CertBot infrastructure, auto-renewing.
+
+- [ ] **Request ACM wildcard cert for `*.envs.zoning-info.com`.**
+  DNS-01 validation writes a CNAME into the envs sub-zone (which lives
+  in ZI-Sandbox); no parent-account access needed for provisioning OR
+  renewal. One cert covers every current and future env subdomain
+  (sandbox.envs.*, test-new.envs.*, etc.). Auto-renewing forever.
+- [ ] **Add port 443 listener to ALB stack** (`cf-compute-alb.yaml`)
+  with the ACM cert ARN attached; forwards to the existing nginx target
+  group. Open 443 inbound 0.0.0.0/0 on the ALB security group.
+- [ ] **Optional: HTTP→HTTPS redirect on the port 80 listener** so all
+  traffic gets HTTPS.
+- [ ] **Drupal settings.php reverse-proxy trust.** Set
+  `$settings['reverse_proxy'] = TRUE` and `$settings['reverse_proxy_addresses']`
+  to the VPC CIDR (ALB-to-nginx is always intra-VPC). Drupal then trusts
+  `X-Forwarded-Proto` from the ALB and generates `https://` URLs.
+- [ ] **Verify nginx passes `X-Forwarded-Proto` through** to PHP-FPM as
+  a fastcgi_param. Usually free with stock `fastcgi_params`; double-check.
+- [ ] **Update `smoke-test-public` (and possibly `smoke-test-drupal`)** to
+  curl `https://` instead of `http://` after this lands.
+- [ ] **Write `docs/SSL-MANAGEMENT.md`** documenting the ACM cert
+  ownership, validation flow, renewal expectations, and rotation steps
+  if the parent-zone delegation ever needs to be rebuilt.
+- [ ] **Tag `v0.2.0-https`** when smoke-test-public passes over real
+  HTTPS end-to-end.
+
+## Phase 3.x — Other tests + tooling
+
+- [ ] Write `scripts/health-check.sh` (test ALB, NLB ports, RDS, FSx, cache)
+- [x] **Test: End-to-end request flow (Browser → ALB → NGINX → NLB →
+  PHP-FPM → RDS)** ✅ 2026-05-23 — `make smoke-test-drupal` and
+  `make smoke-test-public` cover this for the sandbox env.
 
 ## Phase 4: Auto Scaling & Lifecycle
 
@@ -410,7 +480,10 @@ prioritized by "would this bite again if we don't fix it."
 
 ## Open Questions
 
-- [ ] Route 53 zone permission strategy: SSM Parameter list vs. wildcard?
+- [x] **Route 53 zone permission strategy** ✅ Resolved 2026-05-22 —
+  sub-zone delegation pattern (`envs.zoning-info.com` delegated from
+  parent zone to ZI-Sandbox account). Workload IAM only ever touches
+  its own sub-zone. See `docs/DNS-SETUP.md`.
 - [ ] Lambda for AMI auto-update, or manual SSM Parameter change?
 - [ ] Multi-AZ for FSx (production only, or always)?
 
@@ -422,7 +495,9 @@ prioritized by "would this bite again if we don't fix it."
 **Phase 1 Completed:** 2026-01-26
 **Phase 2 Completed:** 2026-04-24 (compute fleet)
 **Phase C (Drupal install) Completed:** 2026-05-15 (Drupal serving end-to-end)
-**Status:** Operational hardening (post-debug-arc cleanup); SSL/Routing (Phase 3) deferred
+**v0.1.0-base-infra tagged:** 2026-05-23 (clean destroy-redeploy cycle)
+**Status:** Phase 3 (HTTPS via ACM) and P1 salt-persistence-to-SSM are the
+two near-term focuses.
 
 ---
 
