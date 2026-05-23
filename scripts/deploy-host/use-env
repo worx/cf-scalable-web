@@ -152,31 +152,27 @@ else
   echo "WARN: refresh-env-config not on PATH — /etc/hosts FSx block may be stale"
 fi
 
-# ----- mount target env's FSx — two mounts to match nginx layout -----
-# /var/www gets the volume root. /etc/nginx/shared gets the /fsx/nginx
-# submount, so operators on the deploy-host see vhost configs at the
-# SAME path nginx instances see them. Two-mount design (rather than
-# operators having to remember "/var/www/nginx/sites-enabled = what's
-# at /etc/nginx/shared/sites-enabled on the runtime fleet"). Bonus:
-# enables `sudo apt install nginx` + a local nginx serve for sandbox
-# testing without round-tripping through AMI rebuilds.
+# ----- mount target env's FSx as two SIBLING leaf-subtree mounts -----
+# /var/www gets /fsx/www (Drupal source + private + config + multi-tenant
+#                          site root). PHP-FPM fleet mounts ONLY this.
+# /etc/nginx/shared gets /fsx/nginx (per-env vhost configs). nginx fleet
+#                                    mounts this AND /fsx/www (for static
+#                                    file serving).
+#
+# Why siblings (not /fsx-root → /var/www with nginx as a subdir):
+# Defense in depth. Mounting only the /fsx/www subtree on PHP-FPM means
+# PHP workers literally cannot see /fsx/nginx via filesystem traversal —
+# there's no `..` path from /var/www that reaches the nginx config tree.
+# Mitigates information disclosure from any PHP file-read primitive
+# (vulnerable module, debug bug, careless file_get_contents on user input).
+# See docs/FSX-LAYOUT.md for the full rationale.
+#
+# Both subtrees must exist on FSx before this script runs. init-fsx-layout
+# (deploy-allX Phase 1) does that on a fresh FSx via a temporary root mount.
 mkdir -p "$MOUNT_POINT" "$NGINX_MOUNT_POINT"
-echo "Mounting $FSX_DNS:/fsx -> $MOUNT_POINT (env=$ENV)"
-mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" "$MOUNT_POINT"
 
-# On a freshly-created FSx volume, /fsx/nginx doesn't exist yet — the
-# second mount below would fail with "No such file or directory" from
-# the NFS server. Create the dir via the just-mounted /var/www access
-# path so the FSx server has the expected layout before we ask it to
-# export the subtree. Idempotent (mkdir -p), so re-runs are safe.
-# init-fsx-layout (deploy-allX Phase 1) does additional layout work
-# beyond this, but use-env owning its own "make my mounts succeed"
-# preconditions is the right place to start.
-if [ ! -d "$MOUNT_POINT/nginx" ]; then
-  echo "  /fsx/nginx not yet on FSx — creating via $MOUNT_POINT/nginx"
-  mkdir -p "$MOUNT_POINT/nginx/sites-enabled"
-  chmod 755 "$MOUNT_POINT/nginx" "$MOUNT_POINT/nginx/sites-enabled"
-fi
+echo "Mounting $FSX_DNS:/fsx/www -> $MOUNT_POINT (env=$ENV)"
+mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/www" "$MOUNT_POINT"
 
 echo "Mounting $FSX_DNS:/fsx/nginx -> $NGINX_MOUNT_POINT"
 mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/nginx" "$NGINX_MOUNT_POINT"
@@ -185,7 +181,7 @@ mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/nginx" "$NGINX_MOUNT_POINT"
 {
   echo ""
   echo "$FSTAB_TAG"
-  echo "$FSX_DNS:/fsx $MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
+  echo "$FSX_DNS:/fsx/www $MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
   echo "$FSX_DNS:/fsx/nginx $NGINX_MOUNT_POINT nfs4 vers=4.1,port=2049,nofail,_netdev,noatime 0 0"
   echo ""
 } >> /etc/fstab
@@ -196,7 +192,7 @@ echo "$ENV" > "$CURRENT_ENV_FILE"
 
 echo ""
 echo "Active environment: $ENV"
-echo "  /var/www           -> $FSX_DNS:/fsx"
+echo "  /var/www           -> $FSX_DNS:/fsx/www"
 echo "  /etc/nginx/shared  -> $FSX_DNS:/fsx/nginx"
 echo "  /etc/worxco/current-env updated (zsh prompt will refresh next render)"
 echo ""

@@ -545,14 +545,19 @@ Resources:
                         echo "[configure-nginx] FATAL: /$ENV/fsx/dns-name not set in SSM" >&2
                         exit 1
                       fi
-                      echo "[configure-nginx] Mounting $FSX_DNS:/fsx at /var/www"
-                      if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" /var/www; then
-                        echo "[configure-nginx] FATAL: mount of $FSX_DNS:/fsx at /var/www failed" >&2
+                      # FSx mounted as two SIBLING leaf-subtree mounts (NOT
+                      # the FSx root). /fsx/www serves Drupal static files;
+                      # /fsx/nginx holds vhost configs. Sibling design ensures
+                      # PHP-FPM fleet (which mounts only /fsx/www) cannot reach
+                      # /fsx/nginx via filesystem traversal — defense in depth
+                      # against PHP file-read primitives leaking nginx config.
+                      # See docs/FSX-LAYOUT.md.
+                      echo "[configure-nginx] Mounting $FSX_DNS:/fsx/www at /var/www"
+                      if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/www" /var/www; then
+                        echo "[configure-nginx] FATAL: mount of $FSX_DNS:/fsx/www at /var/www failed" >&2
                         exit 1
                       fi
 
-                      # Mount the nginx-shared subtree at /etc/nginx/shared so
-                      # nginx.conf's `include` path stays AMI-baked + env-agnostic.
                       echo "[configure-nginx] Mounting $FSX_DNS:/fsx/nginx at /etc/nginx/shared"
                       if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/nginx" /etc/nginx/shared; then
                         echo "[configure-nginx] FATAL: mount of $FSX_DNS:/fsx/nginx at /etc/nginx/shared failed" >&2

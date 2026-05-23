@@ -60,9 +60,14 @@ if [ -z "$FSX_DNS" ] || [ "$FSX_DNS" = "None" ]; then
   echo "[configure-php] FATAL: /$ENV/fsx/dns-name not set in SSM" >&2
   exit 1
 fi
-echo "[configure-php] Mounting $FSX_DNS:/fsx at /var/www"
-if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx" /var/www; then
-  echo "[configure-php] FATAL: mount of $FSX_DNS:/fsx at /var/www failed" >&2
+# Mount the /fsx/www subtree (NOT the FSx root). PHP-FPM has no legitimate
+# need to see nginx vhost configs at /fsx/nginx, and mounting only the
+# /www subtree means PHP workers literally cannot reach /fsx/nginx via
+# any filesystem path — defense in depth against information disclosure
+# through a PHP file-read primitive. See docs/FSX-LAYOUT.md.
+echo "[configure-php] Mounting $FSX_DNS:/fsx/www at /var/www"
+if ! mount -t nfs4 -o vers=4.1,port=2049 "$FSX_DNS:/fsx/www" /var/www; then
+  echo "[configure-php] FATAL: mount of $FSX_DNS:/fsx/www at /var/www failed" >&2
   exit 1
 fi
 

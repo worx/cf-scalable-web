@@ -22,46 +22,58 @@ production) has its own dedicated FSx OpenZFS file system created by
 FSx affects only that env. The environment name **does not appear
 inside** the volume — it's enforced by which volume is mounted.
 
-The FSx volume's internal root is `/fsx`. Everything below describes
-what lives at `/fsx/...` on the volume itself.
+The FSx volume's internal root is `/fsx`. Two **sibling subtrees** live
+directly under the root: `/fsx/www` (Drupal application data) and
+`/fsx/nginx` (nginx vhost configs). Everything below describes
+what lives under those two subtrees.
 
 ## Mount points
 
-The FSx volume exposes **two distinct mount sources** in the project:
+The FSx volume exposes **two leaf-subtree mount sources**, mounted as
+siblings (not parent-child):
 
-| Mount source | Mount path | What it surfaces |
-|---|---|---|
-| `$FSX:/fsx` | `/var/www` | Volume root — full FSx tree visible to anyone who needs to read code, write site files, or manage the layout |
-| `$FSX:/fsx/nginx` | `/etc/nginx/shared` | The nginx subtree, mounted at the path nginx's base config (`include /etc/nginx/shared/sites-enabled/*.conf`) expects to find vhost files |
+| Mount source        | Mount path          | What it surfaces                                                                                                                          |
+| ------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `$FSX:/fsx/www`     | `/var/www`          | Drupal source + per-tenant `sites/` + `drupal-private/` + `drupal-config/`. The application data tree.                                    |
+| `$FSX:/fsx/nginx`   | `/etc/nginx/shared` | Per-env vhost configs. Mounted at the path nginx's base config (`include /etc/nginx/shared/sites-enabled/*.conf`) expects.                |
 
-**Both mounts are present on deploy-host and on nginx instances.**
-PHP-FPM instances mount only `/var/www`.
+**Sibling layout, not parent-child.** Earlier design mounted the FSx
+root (`$FSX:/fsx`) at `/var/www`, which placed the nginx config tree as
+a *subdirectory* of `/var/www`. That worked but was an audit weakness:
+PHP-FPM workers running as `www-data` could read every nginx vhost
+config via `/var/www/nginx/...`. Linux permissions could mitigate, but
+the *structural* isolation lives at the mount layer.
+
+The current sibling design fixes that. PHP-FPM mounts ONLY
+`$FSX:/fsx/www` at `/var/www`. From PHP's perspective, `/fsx/nginx`
+simply does not exist anywhere in its filesystem namespace — no `..`
+path, no symlink, no traversal trick reaches it. **Defense in depth
+against information-disclosure primitives in PHP code.**
 
 | Host class | `df` entries | Why |
 |---|---|---|
-| **deploy-host** | 2 — `/var/www` AND `/etc/nginx/shared` | Operators see vhost configs at the SAME path nginx instances see them. Zero translation between "where I edit" and "where the runtime fleet reads." Also enables future local-nginx serve for sandbox testing without needing an AMI rebuild round-trip. |
-| **PHP-FPM** | 1 — `/var/www` | Reads code, writes user-uploaded files. Doesn't read or care about the nginx config subtree. Second mount would be inert weight. |
-| **NGINX** | 2 — `/var/www` AND `/etc/nginx/shared` | Same as deploy-host. `/var/www` for static-asset `try_files` serving; `/etc/nginx/shared` because that's the path the AMI-baked `nginx.conf` includes vhost configs from. |
+| **deploy-host** | 2 — `/var/www` AND `/etc/nginx/shared` | Operator workbench. Both subtrees needed: write Drupal source, write nginx vhost configs, both at the same paths the runtime fleet sees them. |
+| **PHP-FPM** | 1 — `/var/www` (= `/fsx/www`) | Reads code, writes user-uploaded files. **Cannot** see `/fsx/nginx` — by mount design, not by chmod. |
+| **NGINX** | 2 — `/var/www` AND `/etc/nginx/shared` | `/var/www` (= `/fsx/www`) for static-asset `try_files` serving; `/etc/nginx/shared` (= `/fsx/nginx`) because that's the path the AMI-baked `nginx.conf` includes vhost configs from. |
 
-The sub-mount (`$FSX:/fsx/nginx` at `/etc/nginx/shared`) and the root
-mount (`$FSX:/fsx` at `/var/www`) are different access paths into the
-same underlying FSx volume — not separate volumes. Operators can read
-`/etc/nginx/shared/sites-enabled/drupal.conf` and
-`/var/www/nginx/sites-enabled/drupal.conf` and see the same file
-content; they're aliases via NFS export of overlapping subtrees.
+The two mount sources are different access paths into the same
+underlying FSx volume — not separate volumes. Operators on the
+deploy-host see vhost configs at `/etc/nginx/shared/sites-enabled/...`
+and Drupal at `/var/www/...` — the exact paths the runtime fleet sees.
+No translation between "where I edit" and "where it's read."
 
-**Why deploy-host gets both mounts (revised 2026-05-20):** earlier
-design gave the deploy-host only `/var/www` since it COULD read the
-nginx subtree as `/var/www/nginx/...`. Per-host-class mount-count
-asymmetry caused operator confusion (debugging an nginx config issue
-required mentally translating "where I'm editing on deploy-host" to
-"where nginx reads on the runtime fleet"). The two-mount design
-eliminates that translation step. Cost is one extra NFS mount and
-fstab entry per env switch — trivially small.
+**Bootstrap consideration:** Both subtrees must exist on FSx before
+`use-env` mounts them. On a freshly-created FSx volume, the subtrees
+don't exist yet. `scripts/init-fsx-layout.sh` (run as part of
+deploy-allX Phase 1) does a one-time temporary root mount to create
+both subtrees, then unmounts. From that point onward, `use-env` and
+the runtime AMI boot scripts mount only the leaf subtrees — never the
+FSx root.
 
 No additional FSx mount points are needed anywhere. If a future
 requirement looks like it needs a third mount source, the layout is
-probably wrong — restructure subfolders first.
+probably wrong — restructure subfolders within one of the existing
+subtrees first.
 
 ## Top-level directory structure
 
@@ -69,40 +81,48 @@ Under `/fsx/`:
 
 ```
 /fsx/
-├── sites/
-│   ├── <site-slug-1>/                 ← one folder per Drupal site (multi-tenant)
-│   │   ├── drupal/                    ← composer create-project drupal/recommended-project
-│   │   │   ├── web/                   ← Drupal docroot (nginx points here)
-│   │   │   ├── vendor/                ← composer deps
-│   │   │   ├── composer.json
-│   │   │   └── composer.lock
-│   │   ├── drupal-private/            ← outside docroot; site's hash_salt + private files
-│   │   │   ├── salt.txt               ← hash_salt; persists across reinstalls
-│   │   │   └── files/                 ← Drupal "private://" file system
-│   │   ├── drupal-config/             ← Drupal config-sync directory (export/import)
-│   │   ├── site-meta.yml              ← non-secret site config (URI, db-name, php-version, etc.)
-│   │   └── .installed                 ← marker; presence means install completed
-│   ├── <site-slug-2>/
-│   │   └── ...
-│   └── default/                       ← single-site case lives here for layout consistency
-│       └── ...
-└── nginx/
+├── www/                                 ← mounted at /var/www on all fleets + deploy-host
+│   ├── sites/
+│   │   ├── <site-slug-1>/               ← one folder per Drupal site (multi-tenant)
+│   │   │   ├── drupal/                  ← composer create-project drupal/recommended-project
+│   │   │   │   ├── web/                 ← Drupal docroot (nginx points here)
+│   │   │   │   ├── vendor/              ← composer deps
+│   │   │   │   ├── composer.json
+│   │   │   │   └── composer.lock
+│   │   │   ├── drupal-private/          ← outside docroot; site's hash_salt + private files
+│   │   │   │   ├── salt.txt             ← hash_salt; persists across reinstalls
+│   │   │   │   └── files/               ← Drupal "private://" file system
+│   │   │   ├── drupal-config/           ← Drupal config-sync directory (export/import)
+│   │   │   ├── site-meta.yml            ← non-secret site config (URI, db-name, php-version, etc.)
+│   │   │   └── .installed               ← marker; presence means install completed
+│   │   ├── <site-slug-2>/
+│   │   │   └── ...
+│   │   └── default/                     ← single-site case lives here for layout consistency
+│   │       └── ...
+│   └── (today's flat install: drupal/, drupal-private/, drupal-config/
+│        directly under /fsx/www/ — a /fsx/www/sites/default/ migration
+│        is a future cleanup)
+└── nginx/                               ← mounted at /etc/nginx/shared on nginx + deploy-host
     └── sites-enabled/
-        ├── <site-slug-1>.conf         ← one vhost per site
+        ├── <site-slug-1>.conf           ← one vhost per site
         ├── <site-slug-2>.conf
-        └── default.conf               ← fallback / single-site
+        └── default.conf                 ← fallback / single-site (today: drupal.conf)
 ```
 
 **Key invariants:**
 
+- **`/fsx/www` and `/fsx/nginx` are siblings, not parent-child.** This
+  isolation enables the PHP-FPM-only-mounts-`/fsx/www` defense-in-depth
+  pattern. No code path should ever mount the FSx root (`$FSX:/fsx`)
+  except `init-fsx-layout.sh`'s one-time bootstrap mount.
 - **No `<env>` segment anywhere in the path.** The env is enforced by
   which FSx volume is mounted (each env gets its own volume); putting
   it in the path would be redundant and would break the
   env-portability of the codebase.
 - **Single-tenant is just multi-tenant with N=1.** A single-site
-  install lives at `/fsx/sites/default/` — same structure, no
-  special case. Migrating today's `/fsx/drupal/` to
-  `/fsx/sites/default/drupal/` is a future cleanup.
+  install lives at `/fsx/www/sites/default/` — same structure, no
+  special case. Migrating today's `/fsx/www/drupal/` to
+  `/fsx/www/sites/default/drupal/` is a future cleanup.
 - **Each site is fully independent.** Its own composer install, its
   own vendor/, its own drupal-private/. Sites do not share a codebase.
   See `docs/plans/multi-tenancy.md` for the rationale.
@@ -127,16 +147,16 @@ Three principles govern who can read/write what:
 
 | Path | Owner | Group | Mode | Writable by |
 |---|---|---|---|---|
-| `/fsx/sites/<slug>/drupal/web/` (except `files/`) | `root` | `www-data` | `0755` dirs, `0644` files | deploy-host only |
-| `/fsx/sites/<slug>/drupal/web/sites/default/files/` | `www-data` | `www-data` | `0755` dirs, `0664` files | PHP-FPM workers (Drupal public://) |
-| `/fsx/sites/<slug>/drupal-private/files/` | `www-data` | `www-data` | `0750` dirs, `0640` files | PHP-FPM workers (Drupal private://) |
-| `/fsx/sites/<slug>/drupal-private/salt.txt` | `root` | `www-data` | `0640` | deploy-host only; read by settings.php |
-| `/fsx/sites/<slug>/site-meta.yml` | `root` | `www-data` | `0640` | deploy-host only; read by settings.php + drush |
+| `/fsx/www/sites/<slug>/drupal/web/` (except `files/`) | `root` | `www-data` | `0755` dirs, `0644` files | deploy-host only |
+| `/fsx/www/sites/<slug>/drupal/web/sites/default/files/` | `www-data` | `www-data` | `0755` dirs, `0664` files | PHP-FPM workers (Drupal public://) |
+| `/fsx/www/sites/<slug>/drupal-private/files/` | `www-data` | `www-data` | `0750` dirs, `0640` files | PHP-FPM workers (Drupal private://) |
+| `/fsx/www/sites/<slug>/drupal-private/salt.txt` | `root` | `www-data` | `0640` | deploy-host only; read by settings.php |
+| `/fsx/www/sites/<slug>/site-meta.yml` | `root` | `www-data` | `0640` | deploy-host only; read by settings.php + drush |
 | `/fsx/nginx/sites-enabled/*.conf` | `root` | `root` | `0644` | deploy-host only; read by nginx |
 
 ## Per-site config: `site-meta.yml`
 
-Each site has a `site-meta.yml` at `/fsx/sites/<slug>/site-meta.yml`
+Each site has a `site-meta.yml` at `/fsx/www/sites/<slug>/site-meta.yml`
 that's the **single source of truth for non-secret site config**.
 Both Drupal's `settings.php` (at request time) and `drush` (at CLI
 time) read it. Generated by the deploy-host when the site is
@@ -145,7 +165,7 @@ installed; rewritten by the deploy-host when site config changes.
 Example:
 
 ```yaml
-# /fsx/sites/client1/site-meta.yml
+# /fsx/www/sites/client1/site-meta.yml
 site:
   slug: client1
   uri: https://client1.example.com
@@ -193,7 +213,7 @@ FSx, generated alongside `site-meta.yml`) consumes the same fields.
   view changes consistently. SSM params are individual keys; a
   multi-key change isn't atomic without orchestration.
 - **Drush can read it natively.** Drush 13's alias files are YAML.
-- **Self-documenting.** Operators can `cat /fsx/sites/client1/site-meta.yml`
+- **Self-documenting.** Operators can `cat /fsx/www/sites/client1/site-meta.yml`
   to see everything about a site in one place.
 - **Secrets stay out.** Only secret *references* live here; the
   actual values come from Secrets Manager at runtime.
@@ -287,8 +307,8 @@ Three classes of data, three backup strategies:
 | Data | Where it lives | Backup mechanism | Granularity |
 |---|---|---|---|
 | **Database** | RDS PostgreSQL (one instance per env, multiple DBs per instance — one per site) | RDS automated snapshots + point-in-time recovery | Per-DB via `pg_dump`; per-env via snapshot |
-| **Drupal codebase** | FSx under `/fsx/sites/<slug>/drupal/` | FSx OpenZFS snapshots (daily, 14-day retention) | Per-FSx-volume (per env) |
-| **Customer assets** | FSx under `/fsx/sites/<slug>/drupal/web/sites/default/files/` and `/fsx/sites/<slug>/drupal-private/files/` | FSx snapshots **plus** per-site git delta capture to self-hosted GitLab CE (nightly cron from deploy-host) | Per-site, per-day deltas |
+| **Drupal codebase** | FSx under `/fsx/www/sites/<slug>/drupal/` | FSx OpenZFS snapshots (daily, 14-day retention) | Per-FSx-volume (per env) |
+| **Customer assets** | FSx under `/fsx/www/sites/<slug>/drupal/web/sites/default/files/` and `/fsx/www/sites/<slug>/drupal-private/files/` | FSx snapshots **plus** per-site git delta capture to self-hosted GitLab CE (nightly cron from deploy-host) | Per-site, per-day deltas |
 
 ### Per-site customer-asset git capture
 

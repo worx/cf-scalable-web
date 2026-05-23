@@ -63,33 +63,66 @@ if [ ! -f /etc/worxco/deploy-host-marker ]; then
   exit 1
 fi
 
-echo "=== 2. Refresh env config + mount env's FSx ==="
+echo "=== 2. Refresh env config (resolves FSX_DNS from SSM into /etc/worxco/envs/\$ENV) ==="
 sudo refresh-env-config "\$ENV"
+# Source the env file to get FSX_DNS into this shell.
+# shellcheck disable=SC1090
+source "/etc/worxco/envs/\$ENV"
+if [ -z "\${FSX_DNS:-}" ]; then
+  echo "ERROR: FSX_DNS not in /etc/worxco/envs/\$ENV after refresh" >&2
+  exit 1
+fi
+
+echo "=== 3. Temporary root-mount of FSx to bootstrap the sibling subtree layout ==="
+# Why a temporary root mount instead of using use-env:
+#   use-env mounts /fsx/www and /fsx/nginx as SIBLING subtrees (since the
+#   FSx-isolation refactor). Those two subtree paths don't exist on a fresh
+#   FSx volume yet — so use-env would fail with "no such file or directory"
+#   from the NFS server. This script is the one that creates them, ONCE,
+#   from a temp mount of the FSx root. After that, use-env's leaf-subtree
+#   mounts work cleanly forever.
+BOOTSTRAP_MNT="/mnt/fsx-bootstrap"
+sudo mkdir -p "\$BOOTSTRAP_MNT"
+echo "  Mounting \$FSX_DNS:/fsx -> \$BOOTSTRAP_MNT (temporary)"
+sudo mount -t nfs4 -o vers=4.1,port=2049 "\$FSX_DNS:/fsx" "\$BOOTSTRAP_MNT"
+
+echo "=== 4. Create sibling subtrees on FSx ==="
+# Two top-level subtrees, mounted independently by downstream consumers:
+#   /fsx/www    → /var/www on nginx + PHP + deploy-host fleets
+#                 (Drupal source, drupal-private, drupal-config, sites/)
+#   /fsx/nginx  → /etc/nginx/shared on nginx + deploy-host fleets
+#                 (per-env vhost configs)
+# Separation matters: PHP-FPM fleet mounts ONLY /fsx/www, so PHP workers
+# CANNOT see /fsx/nginx via filesystem traversal — defense in depth against
+# information disclosure of nginx vhost configs through a PHP file-read bug.
+# See docs/FSX-LAYOUT.md for the full rationale.
+sudo mkdir -p "\$BOOTSTRAP_MNT/www" "\$BOOTSTRAP_MNT/nginx/sites-enabled"
+sudo chmod 755 "\$BOOTSTRAP_MNT/www" "\$BOOTSTRAP_MNT/nginx" "\$BOOTSTRAP_MNT/nginx/sites-enabled"
+
+# Multi-tenant site root inside /fsx/www — install-drupal / install-site write here
+sudo mkdir -p "\$BOOTSTRAP_MNT/www/sites"
+sudo chmod 755 "\$BOOTSTRAP_MNT/www/sites"
+
+echo "  Layout created:"
+sudo ls -la "\$BOOTSTRAP_MNT/" | head -10
+
+echo "=== 5. Unmount temporary root mount ==="
+sudo umount "\$BOOTSTRAP_MNT"
+sudo rmdir "\$BOOTSTRAP_MNT" 2>/dev/null || true
+
+echo "=== 6. Activate env via use-env (now uses the sibling subtree mounts) ==="
 sudo use-env "\$ENV"
-if ! mountpoint -q /var/www; then
+if ! awk -v mp="/var/www" '\$2==mp {found=1; exit} END{exit !found}' /proc/mounts; then
   echo "ERROR: /var/www not mounted after use-env" >&2
   exit 1
 fi
 
-echo "=== 3. Create expected FSx layout directories ==="
-# These are the directories that downstream consumers (nginx ASG via
-# /etc/nginx/shared mount, install-drupal.sh, future install-site)
-# expect to find. mkdir -p is idempotent.
-
-# nginx shared config tree — mounted by nginx instances at /etc/nginx/shared
-sudo mkdir -p /var/www/nginx/sites-enabled
-sudo chmod 755 /var/www/nginx /var/www/nginx/sites-enabled
-
-# Multi-tenant site root — install-drupal-remote / install-site write here
-sudo mkdir -p /var/www/sites
-sudo chmod 755 /var/www/sites
-
-echo "=== 4. Verify ==="
+echo "=== 7. Verify ==="
 echo "  /var/www tree:"
 sudo ls -la /var/www | head -20
 echo ""
-echo "  /var/www/nginx/sites-enabled/:"
-sudo ls -la /var/www/nginx/sites-enabled/
+echo "  /etc/nginx/shared/sites-enabled/:"
+sudo ls -la /etc/nginx/shared/sites-enabled/
 
 echo ""
 echo "✓ FSx layout initialized for env=\$ENV"

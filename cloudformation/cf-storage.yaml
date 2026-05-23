@@ -280,8 +280,8 @@ Outputs:
       Name: !Sub '${EnvironmentName}-fsx-root-volume-id'
 
   FSxMountCommand:
-    Description: NFS mount command for /var/www
-    Value: !Sub 'mount -t nfs4 -o vers=4.1,port=2049 ${FSxFileSystem.DNSName}:/fsx /var/www'
+    Description: NFS mount command for /var/www (mounts the /fsx/www subtree — see docs/FSX-LAYOUT.md for the sibling-subtree design)
+    Value: !Sub 'mount -t nfs4 -o vers=4.1,port=2049 ${FSxFileSystem.DNSName}:/fsx/www /var/www'
     Export:
       Name: !Sub '${EnvironmentName}-fsx-mount-command'
 

@@ -159,18 +159,20 @@ phases:
 
               echo "[configure-nginx] Starting configuration for $ENV"
 
-              # Mount FSx webroot
+              # Mount FSx as two SIBLING leaf-subtree mounts. /fsx/www holds
+              # Drupal source (nginx serves static files from here); /fsx/nginx
+              # holds per-env vhost configs. Mounting them as siblings (instead
+              # of /fsx-root → /var/www with nginx as a subdir) means the
+              # PHP-FPM fleet — which mounts ONLY /fsx/www — cannot reach
+              # /fsx/nginx via any path. See docs/FSX-LAYOUT.md.
               FSX_DNS=$(aws ssm get-parameter --name "/$ENV/fsx/dns-name" --region "$REGION" \
                 --query 'Parameter.Value' --output text)
               if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
-                echo "[configure-nginx] Mounting /var/www from $FSX_DNS"
+                echo "[configure-nginx] Mounting /var/www from $FSX_DNS:/fsx/www"
                 mount -t nfs4 -o vers=4.1,port=2049 \
-                  "$FSX_DNS:/fsx" /var/www || echo "[configure-nginx] WARNING: Failed to mount /var/www"
-              fi
+                  "$FSX_DNS:/fsx/www" /var/www || echo "[configure-nginx] WARNING: Failed to mount /var/www"
 
-              # Mount shared NGINX config
-              if [ -n "$FSX_DNS" ] && [ "$FSX_DNS" != "None" ]; then
-                echo "[configure-nginx] Mounting /etc/nginx/shared from $FSX_DNS"
+                echo "[configure-nginx] Mounting /etc/nginx/shared from $FSX_DNS:/fsx/nginx"
                 mount -t nfs4 -o vers=4.1,port=2049 \
                   "$FSX_DNS:/fsx/nginx" /etc/nginx/shared || echo "[configure-nginx] WARNING: Failed to mount /etc/nginx/shared"
               fi
