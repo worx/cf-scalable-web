@@ -2421,10 +2421,19 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB �
 		exit 1;; \
 	esac; \
 	echo "  URL:  http://$$SITE_NAME/"; \
-	RESOLVED=$$(dig +short "$$SITE_NAME" | head -2 | tr '\n' ' '); \
+	echo -n "  DNS:  resolving"; \
+	RESOLVED=""; \
+	for _ in $$(seq 1 12); do \
+		RESOLVED=$$(dig +short "$$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' '); \
+		[ -n "$$RESOLVED" ] && break; \
+		echo -n "."; \
+		sleep 5; \
+	done; \
+	echo ""; \
 	if [ -z "$$RESOLVED" ]; then \
-		echo "$(RED)✗ DNS lookup for $$SITE_NAME returned no records$(NC)"; \
+		echo "$(RED)✗ DNS lookup for $$SITE_NAME returned no records after 60s$(NC)"; \
 		echo "  Has the Route 53 alias been published? See docs/DNS-SETUP.md."; \
+		echo "  Check with: dig +short @8.8.8.8 $$SITE_NAME"; \
 		exit 1; \
 	fi; \
 	echo "  DNS:  $$RESOLVED"; \

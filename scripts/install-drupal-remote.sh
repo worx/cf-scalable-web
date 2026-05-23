@@ -138,9 +138,20 @@ for i in $(seq 1 90); do
 done
 
 echo ""
-echo "--- Deploy-host output ---"
-aws ssm list-command-invocations --command-id "$CMD_ID" --details \
-  --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
+# Pull stdout and stderr separately and label them with non-scary headings.
+# The combined `CommandPlugins[0].Output` field separates the two streams
+# with `----------ERROR-------`, which reads like a failure marker even
+# when everything succeeded — composer happens to write its progress
+# (downloads, package installs) to stderr by convention, so that header
+# always appeared during successful installs. Separating the streams here
+# and using neutral labels removes the false-alarm signal.
+echo "--- Deploy-host stdout (truncated at SSM's 24000-char limit) ---"
+aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$DEPLOY_ID" \
+  --query 'StandardOutputContent' --output text 2>/dev/null || true
+echo ""
+echo "--- Deploy-host stderr (composer progress + any real errors) ---"
+aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$DEPLOY_ID" \
+  --query 'StandardErrorContent' --output text 2>/dev/null || true
 
 if [ -z "$FINAL_STATUS" ]; then
   echo ""

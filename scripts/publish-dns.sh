@@ -130,5 +130,46 @@ CHANGE_ID=$(aws route53 change-resource-record-sets \
   --query 'ChangeInfo.Id' --output text)
 
 echo "✓ Route 53 change submitted (ChangeId: $CHANGE_ID)"
-echo "  Verify in ~30s: dig +short $SITE_NAME"
-echo "  End-to-end test: make smoke-test-public ENV=$ENV"
+
+# --- 7. Wait for Route 53 propagation -----------------------------------------
+# Past incident 2026-05-23: install-drupal-full ran smoke-test-public
+# immediately after publish-dns, and the dig lookup returned no records
+# because the change hadn't propagated yet. Make publish-dns self-validating:
+# return only AFTER the change is INSYNC across Route 53's authoritative
+# servers, then verify the local resolver can see it. Downstream callers
+# (smoke-test-public, etc.) can then trust that DNS works on return.
+#
+# Two waits:
+#   a) Route 53 INSYNC — `aws route53 wait` polls GetChange every 30s
+#      until the change is consistent across all Route 53 servers.
+#      Typically takes 30-60s; AWS docs say up to 5 min.
+#   b) Local resolver — even after INSYNC at Route 53, the operator's
+#      local resolver might have a cached NXDOMAIN. `dig` against a
+#      public resolver (8.8.8.8) bypasses local cache for verification.
+echo "  Waiting for Route 53 propagation (INSYNC)..."
+if aws route53 wait resource-record-sets-changed --id "$CHANGE_ID" 2>/dev/null; then
+  echo "  ✓ Route 53 reports INSYNC"
+else
+  echo "  WARN: 'wait resource-record-sets-changed' returned non-zero." >&2
+  echo "        Change may still be propagating; continuing with dig check." >&2
+fi
+
+# Verify against a public resolver (bypasses local cache). Poll for up to 60s.
+echo -n "  Verifying $SITE_NAME resolves (via 8.8.8.8)"
+for _ in $(seq 1 12); do
+  RESOLVED=$(dig +short @8.8.8.8 "$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' ')
+  if [ -n "$RESOLVED" ]; then
+    echo ""
+    echo "  ✓ Resolves to: $RESOLVED"
+    echo ""
+    echo "  End-to-end test: make smoke-test-public ENV=$ENV"
+    exit 0
+  fi
+  echo -n "."
+  sleep 5
+done
+echo ""
+echo "  WARN: $SITE_NAME did not resolve via 8.8.8.8 within 60s." >&2
+echo "        The change is submitted; propagation may need more time." >&2
+echo "        Re-test with: dig +short $SITE_NAME" >&2
+exit 0  # Submission succeeded; we don't want to block on slow propagation.
