@@ -2483,6 +2483,35 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB �
 		head -10 "$$BODY"; \
 		rm -f "$$BODY"; \
 		exit 1; \
+	elif [ "$$HTTP" = "000" ]; then \
+		echo "  $(RED)✗ HTTP 000 — curl could not connect.$(NC)"; \
+		FIRST_IP=$$(echo "$$RESOLVED" | awk '{print $$1}'); \
+		echo "  Diagnosing: trying again with --resolve $$SITE_NAME:443:$$FIRST_IP ..."; \
+		PINNED=$$(curl -sL -o /dev/null -w "%{http_code}" \
+			--resolve "$$SITE_NAME:443:$$FIRST_IP" \
+			"https://$$SITE_NAME/" --max-time 20); \
+		if [ "$$PINNED" = "200" ]; then \
+			echo "  $(YELLOW)→ Pinned-IP curl returned 200. dig sees the record, but your OS$(NC)"; \
+			echo "  $(YELLOW)  resolver does not. This is a stale negative-cache (NXDOMAIN cached$(NC)"; \
+			echo "  $(YELLOW)  before publish-dns wrote the record). The ALB / cert / Drupal stack$(NC)"; \
+			echo "  $(YELLOW)  is fine — your Mac's resolver just hasn't refreshed.$(NC)"; \
+			echo ""; \
+			if [ "$$(uname -s)" = "Darwin" ]; then \
+				echo "  $(YELLOW)  Fix (macOS):$(NC)"; \
+				echo "  $(YELLOW)    sudo dscacheutil -flushcache$(NC)"; \
+				echo "  $(YELLOW)    sudo killall -HUP mDNSResponder$(NC)"; \
+			else \
+				echo "  $(YELLOW)  Fix: flush your OS resolver cache. On Linux with systemd-resolved:$(NC)"; \
+				echo "  $(YELLOW)    sudo resolvectl flush-caches$(NC)"; \
+			fi; \
+			echo "  $(YELLOW)  Then: make smoke-test-public ENV=$(ENV)$(NC)"; \
+		else \
+			echo "  $(RED)→ Pinned-IP curl also failed (HTTP $$PINNED).$(NC)"; \
+			echo "  $(RED)  Real failure, not a resolver cache issue. Try:$(NC)"; \
+			echo "  $(RED)    curl -v https://$$SITE_NAME/ --max-time 20$(NC)"; \
+		fi; \
+		rm -f "$$BODY"; \
+		exit 1; \
 	else \
 		echo "  $(RED)✗ HTTP $$HTTP$(NC)"; \
 		head -10 "$$BODY"; \
