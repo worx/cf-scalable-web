@@ -28,7 +28,7 @@ export
         deploy-deploy-host verify-deploy-host destroy-deploy-host \
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
-        deploy-allXX find-default-subnet upload-build-configs \
+        deploy-allXX destroy-allXX find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
         init-secrets list-secrets test clean consolidate-logs \
@@ -311,7 +311,8 @@ help:  ## Show this help message
 	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
 	@echo "  make pause-compute            Scale NGINX and PHP ASGs to 0 (saves ~\$$30-50/mo for short pauses)"
 	@echo "  make resume-compute           Restore ASGs to pre-pause sizes"
-	@echo "  make destroy-all              Delete all stacks (reverse order; CONFIRMED=yes to skip prompt)"
+	@echo "  make destroy-all              Sequential destroy (~20-25 min); CONFIRMED=yes to skip prompt"
+	@echo "  make destroy-allXX            Parallel destroy (~10-12 min); CONFIRMED=yes to skip prompt"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host:$(NC)"
 	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
@@ -764,6 +765,15 @@ deploy-allXX:  ## Fully parallel infra deploy via scripts/deploy-all-parallel.py
 	@# of scripts/deploy-all-parallel.py. Adding a new track (e.g.,
 	@# future Node.js compute) is one entry plus a make target.
 	@./scripts/deploy-all-parallel.py $(ENV)
+
+destroy-allXX:  ## Fully parallel destroy via scripts/destroy-all-parallel.py (~10-12 min)
+	@# Symmetric counterpart to deploy-allXX. Reverse-dependency graph;
+	@# compute, image-builder, and unmount-deploy-host-fsx start at T=0
+	@# in parallel; cache/db/storage/iam/peering follow as their
+	@# dependents disappear; vpc is absolute last.
+	@# Pass CONFIRMED=yes to skip the interactive prompt (matches the
+	@# existing destroy-all convention).
+	@./scripts/destroy-all-parallel.py $(ENV) $(if $(filter yes,$(CONFIRMED)),--yes,)
 
 # -----------------------------------------------------------------------------
 # Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
