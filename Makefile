@@ -2326,31 +2326,41 @@ install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both
 	@#
 	@# Order chosen to validate progressively narrower scopes:
 	@#   1. install-drupal-remote — installs Drupal on FSx via the deploy-host
-	@#   2. smoke-test-drupal     — ALB+nginx+PHP-FPM+Drupal serve (forged Host)
-	@#   3. publish-dns           — UPSERT Route 53 alias to env's ALB
-	@#   4. smoke-test-public     — end-to-end via real public DNS
+	@#   2. publish-drupal-vhost  — (re)write drupal.conf to FSx — idempotent,
+	@#                              defense against the "install marker exists
+	@#                              but drupal.conf is stale or missing" mode
+	@#   3. reload-nginx          — SSM-reload nginx fleet to pick up the vhost
+	@#   4. smoke-test-drupal     — ALB+cert+nginx+PHP-FPM+Drupal (DNS-bypassed)
+	@#   5. publish-dns           — UPSERT Route 53 alias to env's ALB
+	@#   6. smoke-test-public     — end-to-end via real public DNS
 	@# A failure at step N tells you the issue is at layer N (or later).
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  install-drupal-full: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
-	@echo "$(CYAN)Step 1/4: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
+	@echo "$(CYAN)Step 1/6: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
 	@$(MAKE) install-drupal-remote ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 2/4: Smoke-test Drupal (forged Host header)$(NC)"
+	@echo "$(CYAN)Step 2/6: (Re)publish drupal.conf to FSx (idempotent)$(NC)"
+	@$(MAKE) publish-drupal-vhost ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Step 3/6: Reload nginx fleet to pick up vhost$(NC)"
+	@$(MAKE) reload-nginx ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)Step 4/6: Smoke-test Drupal (DNS-bypassed via --resolve)$(NC)"
 	@$(MAKE) smoke-test-drupal ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 3/4: Publish Route 53 alias for the env's site name$(NC)"
+	@echo "$(CYAN)Step 5/6: Publish Route 53 alias for the env's site name$(NC)"
 	@$(MAKE) publish-dns ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 4/4: End-to-end smoke test via real public DNS$(NC)"
+	@echo "$(CYAN)Step 6/6: End-to-end smoke test via real public DNS$(NC)"
 	@$(MAKE) smoke-test-public ENV=$(ENV)
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ install-drupal-full done: ENV=$(ENV)$(NC)"
 	@SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
-	echo "$(GREEN)  Sandbox Drupal live at http://$$SITE_NAME/$(NC)"
+	echo "$(GREEN)  Sandbox Drupal live at https://$$SITE_NAME/$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
 
 install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the deploy-host

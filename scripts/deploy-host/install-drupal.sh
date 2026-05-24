@@ -533,14 +533,18 @@ fi
 step "Publish Drupal nginx vhost to FSx (read by all nginx instances)"
 # ============================================================
 # nginx hosts mount $FSX:/fsx/nginx at /etc/nginx/shared and include
-# /etc/nginx/shared/sites-enabled/*.conf. From the deploy-host's
-# perspective (FSx mounted at /var/www), that path is
-# /var/www/nginx/sites-enabled/. Writing the vhost here makes it
-# visible to every nginx instance immediately via NFS; a separate
-# `make reload-nginx ENV=<env>` SSM-reloads the running workers.
-NGINX_VHOST_DIR="/var/www/nginx/sites-enabled"
+# /etc/nginx/shared/sites-enabled/*.conf. Since the FSx sibling-isolation
+# refactor, the deploy-host ALSO mounts $FSX:/fsx/nginx directly at
+# /etc/nginx/shared — so we write the vhost to the same path nginx
+# instances read it from. (Earlier code wrote to /var/www/nginx/sites-
+# enabled/, which worked under the OLD layout where /var/www was the
+# FSx volume root, but silently created a dead path on FSx under the
+# new layout where /var/www is the /fsx/www subtree only. Past
+# incident: 2026-05-23, drupal.conf at /fsx/www/nginx/sites-enabled/
+# was invisible to nginx; smoke test got the default_server 404.)
+NGINX_VHOST_DIR="/etc/nginx/shared/sites-enabled"
 sudo mkdir -p "$NGINX_VHOST_DIR"
-sudo chmod 755 /var/www/nginx "$NGINX_VHOST_DIR"
+sudo chmod 755 "$NGINX_VHOST_DIR"
 
 sudo tee "$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
 # Drupal vhost — managed by scripts/deploy-host/install-drupal.sh

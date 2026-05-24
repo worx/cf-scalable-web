@@ -56,14 +56,20 @@ fi
 SITE_NAME=\$(aws ssm get-parameter --name "/\$ENV/drupal/site-name" \
   --query 'Parameter.Value' --output text 2>/dev/null || echo "drupal-\$ENV.test")
 INSTALL_DIR="/var/www/drupal"
-NGINX_VHOST_DIR="/var/www/nginx/sites-enabled"
+# Since the FSx sibling-isolation refactor, /etc/nginx/shared is the
+# /fsx/nginx subtree (also mounted on deploy-host). Write to the same
+# path nginx instances read from. Pre-refactor this was
+# /var/www/nginx/sites-enabled which resolved to /fsx/nginx via the
+# root mount; post-refactor that path is /fsx/www/nginx — a dead path
+# nginx doesn't see. Past incident: 2026-05-23.
+NGINX_VHOST_DIR="/etc/nginx/shared/sites-enabled"
 
 echo "Site name: \$SITE_NAME"
 echo "Doc root:  \$INSTALL_DIR/web"
 echo "Writing:   \$NGINX_VHOST_DIR/drupal.conf"
 
 sudo mkdir -p "\$NGINX_VHOST_DIR"
-sudo chmod 755 /var/www/nginx "\$NGINX_VHOST_DIR"
+sudo chmod 755 "\$NGINX_VHOST_DIR"
 
 sudo tee "\$NGINX_VHOST_DIR/drupal.conf" > /dev/null <<NGINX_VHOST_EOF
 # Drupal vhost — managed by scripts/publish-drupal-vhost.sh
