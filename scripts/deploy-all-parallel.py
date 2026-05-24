@@ -50,51 +50,53 @@ os.chdir(PROJECT_ROOT)
 # Each track:
 #   deps:  list of track keys this track waits for (must reach state=done or skipped)
 #   cmd:   shell command (env name substitutes via {env})
-#   label: 3-char display abbreviation
+#   label: 3-char display abbreviation (must be width 3 — pad with leading space if needed)
+#   name:  human-readable description (shown in the live status block)
 #
 # To add a new track (e.g., future Node.js compute):
-#   1. Add an entry below with deps + cmd + label
+#   1. Add an entry below with deps + cmd + label + name
 #   2. Add the make target the cmd references
-#   3. Add the label to DISPLAY_ORDER
+#   3. Add the key to DISPLAY_ORDER
 # Done — the orchestrator picks it up automatically.
 
 TRACKS = {
     # Phase 0 — no dependencies, start at T=0
-    "vpc": {"deps": [], "label": "vpc",
+    "vpc": {"deps": [], "label": "vpc", "name": "VPC + subnets + security groups",
             "cmd": "make deploy-vpc ENV={env} VALIDATED=1"},
-    "iam": {"deps": [], "label": "iam",
+    "iam": {"deps": [], "label": "iam", "name": "IAM roles + instance profiles",
             "cmd": "make deploy-iam ENV={env} VALIDATED=1"},
-    "app": {"deps": [], "label": "app",
+    "app": {"deps": [], "label": "app", "name": "app-drupal (SSM params + secrets)",
             "cmd": "make deploy-app-drupal ENV={env} VALIDATED=1"},
-    "ib":  {"deps": [], "label": " ib",
+    "ib":  {"deps": [], "label": " ib", "name": "image-builder stack + S3 configs",
             "cmd": "make deploy-image-builder ENV={env} VALIDATED=1 && "
                    "make upload-build-configs ENV={env} VALIDATED=1"},
 
     # AMI bake — long pole. Triggered as soon as image-builder stack exists.
-    "ami": {"deps": ["ib"], "label": "ami",
+    "ami": {"deps": ["ib"], "label": "ami", "name": "AMI bake (nginx/php74/php83)",
             "cmd": "make build-amis-if-needed ENV={env} VALIDATED=1"},
 
     # Phase 1 tier — VPC-dependent, mutually independent
-    "str": {"deps": ["vpc"], "label": "str",
+    "str": {"deps": ["vpc"], "label": "str", "name": "storage (FSx + S3 buckets)",
             "cmd": "make deploy-storage ENV={env} VALIDATED=1"},
-    "per": {"deps": ["vpc"], "label": "per",
+    "per": {"deps": ["vpc"], "label": "per", "name": "peering (deploy-host <-> workload)",
             "cmd": "make deploy-peering ENV={env} VALIDATED=1"},
-    "db":  {"deps": ["vpc"], "label": " db",
+    "db":  {"deps": ["vpc"], "label": " db", "name": "database (RDS PostgreSQL)",
             "cmd": "make deploy-database ENV={env} VALIDATED=1"},
-    "cch": {"deps": ["vpc"], "label": "cch",
+    "cch": {"deps": ["vpc"], "label": "cch", "name": "cache (ElastiCache Valkey)",
             "cmd": "make deploy-cache ENV={env} VALIDATED=1"},
 
     # init-fsx-layout — needs storage (FSx available) AND peering (deploy-host can reach it)
-    "fsx": {"deps": ["str", "per"], "label": "fsx",
+    "fsx": {"deps": ["str", "per"], "label": "fsx", "name": "init FSx layout (/fsx/www + /fsx/nginx)",
             "cmd": "make init-fsx-layout ENV={env}"},
 
     # Compute — every other infrastructure piece must be ready
     "cmp": {"deps": ["ami", "db", "cch", "str", "iam", "fsx", "app"], "label": "cmp",
+            "name": "compute (ALB+NLB+nginx+PHP ASGs)",
             "cmd": "make update-ami-params ENV={env} VALIDATED=1 && "
                    "make deploy-compute ENV={env} VALIDATED=1"},
 }
 
-# Track display order in the heartbeat line (left-to-right)
+# Track display order in the live status block (top-to-bottom)
 DISPLAY_ORDER = ["vpc", "iam", "app", "ib", "ami", "str", "per", "db", "cch", "fsx", "cmp"]
 
 # Single-character state codes (per design discussion 2026-05-24)
@@ -120,9 +122,10 @@ ANSI_CLEAR_LINE = "\r\x1b[K"
 
 @dataclass
 class TrackState:
-    name: str
+    name: str          # short key (e.g., "vpc")
     deps: List[str]
-    label: str
+    label: str         # 3-char display code (e.g., "vpc")
+    full_name: str     # human-readable description (e.g., "VPC + subnets...")
     cmd: str
     state: str = "pending"
     started_at: Optional[float] = None
@@ -134,7 +137,7 @@ class TrackState:
 
     def duration_str(self) -> str:
         if self.started_at is None:
-            return "    -"
+            return "  -  "
         end = self.ended_at if self.ended_at is not None else time.time()
         secs = int(end - self.started_at)
         return f"{secs // 60:>2}m{secs % 60:02d}s"
@@ -144,31 +147,78 @@ class TrackState:
 # Helpers
 # ============================================================
 
-def fmt_elapsed(start: float) -> str:
-    secs = int(time.time() - start)
+def fmt_secs(secs: float) -> str:
+    secs = int(secs)
     return f"{secs // 60:>2}m{secs % 60:02d}s"
 
 
-def clear_status_line():
-    sys.stdout.write(ANSI_CLEAR_LINE)
+def fmt_elapsed(start: float) -> str:
+    return fmt_secs(time.time() - start)
+
+
+def waiting_on(track: TrackState, tracks: dict) -> List[str]:
+    """List of dep labels still in non-terminal-success state."""
+    return [tracks[d].label.strip() for d in track.deps
+            if tracks[d].state not in ("done", "skipped")]
+
+
+def format_track_line(track: TrackState, tracks: dict, start: float) -> str:
+    """One line in the live status block — fixed-width columns so the block
+    updates in place cleanly when state changes."""
+    sc = STATE_CHARS[track.state]
+    name_col = f"{track.full_name:<40}"  # 40-char description column
+
+    if track.state == "pending":
+        if not track.deps:
+            tail = "queued"
+        else:
+            still_waiting = waiting_on(track, tracks)
+            tail = f"waiting on: {', '.join(still_waiting)}" if still_waiting else "ready"
+        return f"  {sc} {track.label} {name_col}                      {tail}"
+
+    if track.state == "running":
+        s_str = fmt_secs(track.started_at - start)
+        run_str = track.duration_str()
+        return f"  {sc} {track.label} {name_col} S:{s_str}  E:  -    ({run_str})  running"
+
+    # done / skipped / failed / aborted
+    if track.started_at is not None and track.ended_at is not None:
+        s_str = fmt_secs(track.started_at - start)
+        e_str = fmt_secs(track.ended_at - start)
+        dur = track.duration_str()
+        tail = ""
+        if track.state == "failed":
+            tail = f"  exit={track.exit_code} log:{track.log_path.name}"
+        return f"  {sc} {track.label} {name_col} S:{s_str}  E:{e_str}  ({dur}){tail}"
+    # aborted before start, or impossible state
+    return f"  {sc} {track.label} {name_col}                      (never started)"
+
+
+_last_block_lines = 0
+
+
+def print_status_block(start: float, tracks: dict):
+    """Erase the previously-printed status block and redraw it. The block
+    is a single visual unit that updates in place — operator sees each
+    track's lifecycle on the SAME line, no scrolling needed to find a
+    given track's events."""
+    global _last_block_lines
+
+    if _last_block_lines > 0:
+        # ANSI: move cursor up N lines, then clear from cursor to end of screen
+        sys.stdout.write(f"\x1b[{_last_block_lines}A\x1b[J")
+
+    lines = []
+    lines.append(f"[T+{fmt_elapsed(start)}]  deploy-all-parallel  "
+                 f"({sum(1 for t in tracks.values() if t.state == 'done')}/"
+                 f"{len(tracks)} done)")
+    for k in DISPLAY_ORDER:
+        lines.append(format_track_line(tracks[k], tracks, start))
+
+    out = "\n".join(lines) + "\n"
+    sys.stdout.write(out)
     sys.stdout.flush()
-
-
-def print_milestone(start: float, msg: str):
-    """Print a permanent line above the live status."""
-    clear_status_line()
-    print(f"[T+{fmt_elapsed(start)}] {msg}", flush=True)
-
-
-def heartbeat_line(start: float, tracks: dict) -> str:
-    parts = [f"{tracks[k].label}{STATE_CHARS[tracks[k].state]}" for k in DISPLAY_ORDER]
-    return f"[{fmt_elapsed(start)}] " + " ".join(parts)
-
-
-def print_heartbeat(start: float, tracks: dict):
-    clear_status_line()
-    sys.stdout.write(heartbeat_line(start, tracks))
-    sys.stdout.flush()
+    _last_block_lines = len(lines)
 
 
 # ============================================================
@@ -243,16 +293,24 @@ def main() -> int:
     log_dir = Path(f"/tmp/parallel-deploy.{os.getpid()}")
     log_dir.mkdir(exist_ok=True)
     print(f"deploy-all-parallel  ENV={env}  logs={log_dir}/")
-    print(f"  state codes: . pending  > running  ✓ done  - skipped  ✗ failed  ! aborted")
+    print()
+    print(f"State legend:")
+    print(f"  .  pending     >  running    ✓  done")
+    print(f"  -  skipped     ✗  failed     !  aborted (upstream failed or interrupted)")
+    print()
+    print(f"Each track updates in place on the same line. "
+          f"Tail any log: tail -f {log_dir}/<track>.log")
     print()
 
     tracks = {
-        name: TrackState(name=name, deps=meta["deps"], label=meta["label"], cmd=meta["cmd"])
+        name: TrackState(name=name, deps=meta["deps"], label=meta["label"],
+                         full_name=meta["name"], cmd=meta["cmd"])
         for name, meta in TRACKS.items()
     }
 
     start_time = time.time()
-    last_heartbeat = 0.0
+    last_refresh = 0.0
+    state_changed_this_iter = False
     abort_in_effect = False
 
     # Ctrl-C / SIGTERM: trigger abort cascade. Second hit exits.
@@ -262,38 +320,30 @@ def main() -> int:
         nonlocal interrupt_count, abort_in_effect
         interrupt_count += 1
         if interrupt_count == 1:
-            print_milestone(start_time,
-                "⚠ Interrupt — aborting unstarted tracks. In-flight tracks will complete.")
             mark_pending_as_aborted(tracks)
             abort_in_effect = True
         else:
-            print_milestone(start_time, "⚠ Second interrupt — exiting immediately.")
+            print()  # leave the block visible
+            print("⚠ Second interrupt — exiting immediately.", file=sys.stderr)
             sys.exit(130)
 
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
+    # Initial render so the operator sees the block right away
+    print_status_block(start_time, tracks)
+    last_refresh = time.time()
+
     # Orchestration loop
     while True:
-        # Heartbeat?
-        if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
-            print_heartbeat(start_time, tracks)
-            last_heartbeat = time.time()
-
         # Check completions
+        state_changed_this_iter = False
         for t in tracks.values():
             if check_completed(t):
-                if t.state == "done":
-                    print_milestone(start_time, f"✓ {t.label} completed ({t.duration_str()})")
-                elif t.state == "failed":
-                    print_milestone(start_time,
-                        f"✗ {t.label} FAILED (exit {t.exit_code}, {t.duration_str()}) "
-                        f"— see {t.log_path}")
-                    if not abort_in_effect:
-                        mark_pending_as_aborted(tracks)
-                        abort_in_effect = True
-                # Force a heartbeat refresh on the next loop iteration for snappier feedback
-                last_heartbeat = 0.0
+                state_changed_this_iter = True
+                if t.state == "failed" and not abort_in_effect:
+                    mark_pending_as_aborted(tracks)
+                    abort_in_effect = True
 
         # Start newly-eligible tracks (no-op once abort is in effect, since
         # mark_pending_as_aborted already flipped every pending track to aborted)
@@ -301,10 +351,17 @@ def main() -> int:
             if t.state == "pending":
                 if any_dep_failed(t, tracks):
                     t.state = "aborted"
+                    state_changed_this_iter = True
                 elif deps_satisfied(t, tracks):
                     start_track(t, env, log_dir)
-                    print_milestone(start_time, f"> {t.label} started")
-                    last_heartbeat = 0.0
+                    state_changed_this_iter = True
+
+        # Refresh display: immediately on any state change, or every HEARTBEAT_INTERVAL_SEC.
+        # The heartbeat refresh while nothing changes keeps running-track durations
+        # ticking visibly so the operator can see the long-pole AMI track is still alive.
+        if state_changed_this_iter or (time.time() - last_refresh >= HEARTBEAT_INTERVAL_SEC):
+            print_status_block(start_time, tracks)
+            last_refresh = time.time()
 
         # Termination: every track in a terminal state
         terminal = ("done", "skipped", "failed", "aborted")
@@ -313,8 +370,11 @@ def main() -> int:
 
         time.sleep(POLL_INTERVAL_SEC)
 
-    # Final
-    print_heartbeat(start_time, tracks)
+    # Final render — overlays the previous in-place block one last time so
+    # the operator sees the terminal state of every track. Then a blank line
+    # so the summary text below scrolls separately from the block.
+    print_status_block(start_time, tracks)
+    print()
     print()
     print()
 
