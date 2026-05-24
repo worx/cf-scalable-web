@@ -109,7 +109,11 @@ STATE_CHARS = {
     "aborted": "!",
 }
 
-HEARTBEAT_INTERVAL_SEC = 15
+# Refresh the live block every N seconds even when no state has changed.
+# Lower = more "alive" feel (running-track durations tick visibly). The
+# refresh is cheap (ANSI cursor-up + redraw of ~12 lines, no AWS calls),
+# so the limit is operator preference, not cost.
+HEARTBEAT_INTERVAL_SEC = 2
 POLL_INTERVAL_SEC = 1
 
 # ANSI escape sequences for in-place line updates
