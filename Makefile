@@ -28,7 +28,7 @@ export
         deploy-deploy-host verify-deploy-host destroy-deploy-host \
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
-        find-default-subnet upload-build-configs \
+        deploy-allXX find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
         init-secrets list-secrets test clean consolidate-logs \
@@ -240,7 +240,8 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
 	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
-	@echo "  make deploy-allX              Same + data layer + Drupal install + smoke (~30 min, parallel Phase 2)"
+	@echo "  make deploy-allX              Sequential phases (~45-50 min) — validated; safe fallback"
+	@echo "  make deploy-allXX             Fully parallel — all 11 tracks (~30-35 min); new, observe first runs"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
 	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
@@ -753,6 +754,16 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	@echo ""
 	@echo "$(CYAN)That target installs Drupal, publishes the Route 53 alias,$(NC)"
 	@echo "$(CYAN)and runs both smoke tests. ~5-7 min.$(NC)"
+
+deploy-allXX:  ## Fully parallel infra deploy via scripts/deploy-all-parallel.py (~30-35 min)
+	@# Coexists with deploy-allX (the validated sequential version).
+	@# Same result, different orchestration: each track starts as soon
+	@# as ITS specific deps clear, not via synchronous phase barriers.
+	@# 11 tracks fan out under the AMI bake's 25-min shadow.
+	@# Track definitions are declarative — see TRACKS dict at the top
+	@# of scripts/deploy-all-parallel.py. Adding a new track (e.g.,
+	@# future Node.js compute) is one entry plus a make target.
+	@./scripts/deploy-all-parallel.py $(ENV)
 
 # -----------------------------------------------------------------------------
 # Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
