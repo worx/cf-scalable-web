@@ -39,33 +39,42 @@ os.chdir(PROJECT_ROOT)
 # ============================================================
 
 TRACKS = {
-    # Tier 1 — independent, can start at T=0
-    "cmp": {"deps": [], "label": "cmp", "name": "compute (PHP, nginx, NLB, ALB)",
-            "cmd": "make destroy-compute ENV={env} CONFIRMED=yes || true"},
+    # Tier 1 — start at T=0 (no CFN imports gate these)
+    "cnx": {"deps": [], "label": "cnx", "name": "nginx ASG + instances",
+            "cmd": "make destroy-compute-nginx ENV={env} CONFIRMED=yes || true"},
+    "cph": {"deps": [], "label": "cph", "name": "PHP ASGs (74 + 83) + instances",
+            "cmd": "make destroy-compute-php ENV={env} CONFIRMED=yes || true"},
     "ib":  {"deps": [], "label": " ib", "name": "image-builder + its AMIs",
             "cmd": "make destroy-image-builder ENV={env} CONFIRMED=yes || true"},
     "umn": {"deps": [], "label": "umn", "name": "unmount FSx on deploy-host",
             "cmd": "make unmount-deploy-host-fsx || true"},
-
-    # Tier 2 — after compute (cmp was the last consumer of cache/db/storage/iam)
-    "cch": {"deps": ["cmp"], "label": "cch", "name": "cache (ElastiCache Valkey)",
+    # cch + db have NO CFN imports from compute — independent stacks. Hoist to T=0.
+    "cch": {"deps": [], "label": "cch", "name": "cache (ElastiCache Valkey)",
             "cmd": "make destroy-cache ENV={env} CONFIRMED=yes || true"},
-    "db":  {"deps": ["cmp"], "label": " db", "name": "database (RDS PostgreSQL)",
+    "db":  {"deps": [], "label": " db", "name": "database (RDS PostgreSQL)",
             "cmd": "make destroy-database ENV={env} CONFIRMED=yes || true"},
-    "str": {"deps": ["cmp", "umn"], "label": "str", "name": "storage (FSx + S3 buckets)",
+
+    # Tier 2 — load balancers (after their ASG consumers are gone)
+    "alb": {"deps": ["cnx"], "label": "alb", "name": "compute ALB + target groups",
+            "cmd": "make destroy-compute-alb ENV={env} CONFIRMED=yes || true"},
+    "nlb": {"deps": ["cph"], "label": "nlb", "name": "compute NLB + target groups",
+            "cmd": "make destroy-compute-nlb ENV={env} CONFIRMED=yes || true"},
+
+    # Tier 3 — depend on compute ASGs gone (and ib for iam, umn for str)
+    "str": {"deps": ["cnx", "cph", "umn"], "label": "str", "name": "storage (FSx + S3 buckets)",
             "cmd": "make destroy-storage ENV={env} CONFIRMED=yes || true"},
-    "iam": {"deps": ["cmp", "ib"], "label": "iam", "name": "IAM roles + instance profiles",
+    "iam": {"deps": ["cnx", "cph", "ib"], "label": "iam", "name": "IAM roles + instance profiles",
             "cmd": "make destroy-iam ENV={env} CONFIRMED=yes || true"},
-    "per": {"deps": ["cmp"], "label": "per", "name": "peering (deploy-host <-> workload)",
+    "per": {"deps": ["cnx", "cph"], "label": "per", "name": "peering (deploy-host <-> workload)",
             "cmd": "make destroy-peering ENV={env} || true"},
 
-    # Tier 3 — VPC must be ABSOLUTE last. Any lingering ENI hangs the delete.
-    "vpc": {"deps": ["cmp", "ib", "cch", "db", "str", "iam", "per"], "label": "vpc",
-            "name": "VPC + subnets + security groups",
+    # Tier 4 — VPC must be ABSOLUTE last. Any lingering ENI hangs the delete.
+    "vpc": {"deps": ["cnx", "cph", "alb", "nlb", "ib", "cch", "db", "str", "iam", "per"],
+            "label": "vpc", "name": "VPC + subnets + security groups",
             "cmd": "make destroy-vpc ENV={env} CONFIRMED=yes || true"},
 }
 
-DISPLAY_ORDER = ["cmp", "umn", "ib", "cch", "db", "str", "iam", "per", "vpc"]
+DISPLAY_ORDER = ["cnx", "cph", "alb", "nlb", "umn", "ib", "cch", "db", "str", "iam", "per", "vpc"]
 
 STATE_CHARS = {
     "pending": ".",

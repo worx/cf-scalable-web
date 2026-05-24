@@ -72,8 +72,11 @@ TRACKS = {
                    "make upload-build-configs ENV={env} VALIDATED=1"},
 
     # AMI bake — long pole. Triggered as soon as image-builder stack exists.
+    # Update-ami-params is bundled here (writes AMI IDs to SSM) so downstream
+    # tracks can depend on `ami` for both bake completion AND SSM availability.
     "ami": {"deps": ["ib"], "label": "ami", "name": "AMI bake (nginx/php74/php83)",
-            "cmd": "make build-amis-if-needed ENV={env} VALIDATED=1"},
+            "cmd": "make build-amis-if-needed ENV={env} VALIDATED=1 && "
+                   "make update-ami-params ENV={env} VALIDATED=1"},
 
     # Phase 1 tier — VPC-dependent, mutually independent
     "str": {"deps": ["vpc"], "label": "str", "name": "storage (FSx + S3 buckets)",
@@ -89,15 +92,28 @@ TRACKS = {
     "fsx": {"deps": ["str", "per"], "label": "fsx", "name": "init FSx layout (/fsx/www + /fsx/nginx)",
             "cmd": "make init-fsx-layout ENV={env}"},
 
-    # Compute — every other infrastructure piece must be ready
-    "cmp": {"deps": ["ami", "db", "cch", "str", "iam", "fsx", "app"], "label": "cmp",
-            "name": "compute (ALB+NLB+nginx+PHP ASGs)",
-            "cmd": "make update-ami-params ENV={env} VALIDATED=1 && "
-                   "make deploy-compute ENV={env} VALIDATED=1"},
+    # Compute load balancers — depend only on VPC. ALB and NLB are mutually
+    # independent (no CFN imports between them) so they run in parallel.
+    "alb": {"deps": ["vpc"], "label": "alb", "name": "compute ALB + target group",
+            "cmd": "make deploy-compute-alb ENV={env} VALIDATED=1"},
+    "nlb": {"deps": ["vpc"], "label": "nlb", "name": "compute NLB + target groups",
+            "cmd": "make deploy-compute-nlb ENV={env} VALIDATED=1"},
+
+    # Compute ASGs — need their LB's target group + AMI in SSM + every other
+    # infra piece (db endpoint, cache endpoint, FSx mountable, IAM profile,
+    # app-drupal SSM params). nginx and PHP are mutually independent.
+    "cnx": {"deps": ["alb", "ami", "db", "cch", "str", "iam", "fsx", "app"],
+            "label": "cnx", "name": "nginx ASG + instances",
+            "cmd": "make deploy-compute-nginx ENV={env} VALIDATED=1"},
+    "cph": {"deps": ["nlb", "ami", "db", "cch", "str", "iam", "fsx", "app"],
+            "label": "cph", "name": "PHP ASGs (74 + 83) + instances",
+            "cmd": "make deploy-compute-php ENV={env} VALIDATED=1"},
 }
 
 # Track display order in the live status block (top-to-bottom)
-DISPLAY_ORDER = ["vpc", "iam", "app", "ib", "ami", "str", "per", "db", "cch", "fsx", "cmp"]
+DISPLAY_ORDER = ["vpc", "iam", "app", "ib", "ami",
+                 "str", "per", "db", "cch", "fsx",
+                 "alb", "nlb", "cnx", "cph"]
 
 # Single-character state codes (per design discussion 2026-05-24)
 STATE_CHARS = {
