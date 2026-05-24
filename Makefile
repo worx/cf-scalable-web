@@ -2298,6 +2298,14 @@ build-amis-async:  ## Trigger all 3 pipeline executions (fire-and-forget; no wai
 wait-amis:  ## Poll Image Builder pipelines until all 3 reach AVAILABLE or any FAIL
 	@echo "$(BLUE)Waiting for all 3 pipelines to reach AVAILABLE...$(NC)"
 	@echo "$(YELLOW)(checks every 30s; ~10-15 min per pipeline in parallel, hard cap 40 min)$(NC)"
+	@# Status query uses `jq` on the full JSON output, NOT AWS CLI's --query.
+	@# Past incident (2026-05-24): JMESPath `reverse(sort_by(...))[0].state.status`
+	@# was applied PER PAGE by AWS CLI's auto-pagination, then results were
+	@# concatenated — returning multiple statuses on `--output text`. The
+	@# resulting "AVAILABLE\nBUILDING" string matched neither AVAILABLE nor any
+	@# FAILED-class case, so the loop hung at "still running" until the 40-min
+	@# cap, even though pipelines had been AVAILABLE for 30+ min. jq operates on
+	@# the post-pagination aggregated JSON, so sort/index work correctly.
 	@TIMEOUT_SECS=2400; \
 	START=$$(date +%s); \
 	while true; do \
@@ -2313,8 +2321,8 @@ wait-amis:  ## Poll Image Builder pipelines until all 3 reach AVAILABLE or any F
 				--output text --region $(AWS_REGION) 2>/dev/null); do \
 			NAME=$$(echo "$$P" | awk -F/ '{print $$NF}' | sed -e 's/sandbox-//' -e 's/-pipeline//'); \
 			STATUS=$$(aws imagebuilder list-image-pipeline-images --image-pipeline-arn "$$P" \
-				--query "reverse(sort_by(imageSummaryList, &dateCreated))[0].state.status" \
-				--output text --region $(AWS_REGION) 2>/dev/null); \
+				--output json --region $(AWS_REGION) 2>/dev/null \
+				| jq -r '.imageSummaryList | sort_by(.dateCreated) | reverse | .[0].state.status // "UNKNOWN"'); \
 			printf "%s=%s  " "$$NAME" "$$STATUS"; \
 			case "$$STATUS" in \
 				AVAILABLE) ;; \
