@@ -28,7 +28,10 @@ export
         deploy-deploy-host verify-deploy-host destroy-deploy-host \
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
-        deploy-allXX destroy-allXX find-default-subnet upload-build-configs \
+        deploy-all deploy-all-parallel deploy-all-linear deploy-all-no-data \
+        destroy-all destroy-all-parallel destroy-all-linear \
+        deploy-allX deploy-allXX destroy-allXX \
+        find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
         init-secrets list-secrets test clean consolidate-logs \
@@ -246,9 +249,9 @@ help:  ## Show this help message
 	@echo "  make deploy-compute-nginx     Deploy NGINX compute stack"
 	@echo "  make deploy-compute-php       Deploy PHP compute stack"
 	@echo "  make deploy-compute           Deploy all compute stacks in order"
-	@echo "  make deploy-all               Full lifecycle (foundation → AMIs → compute)"
-	@echo "  make deploy-allX              Sequential phases (~45-50 min) — validated; safe fallback"
-	@echo "  make deploy-allXX             Fully parallel — all 11 tracks (~30-35 min); new, observe first runs"
+	@echo "  make deploy-all               Parallel full-stack deploy (default; ~30 min)"
+	@echo "  make deploy-all TYPE=linear   Sequential full-stack (~45-50 min; old behavior)"
+	@echo "  make deploy-all TYPE=no-data  Foundation + compute only — no RDS / cache / app-drupal"
 	@echo ""
 	@echo "$(YELLOW)Drupal Install (local — SQLite, deploy-host only, for iteration):$(NC)"
 	@echo "  make install-drupal-local     Install Drupal 11 locally (SQLite, ~3 min)"
@@ -320,8 +323,8 @@ help:  ## Show this help message
 	@echo "  make destroy-compute          Delete all compute stacks (reverse order)"
 	@echo "  make pause-compute            Scale NGINX and PHP ASGs to 0 (saves ~\$$30-50/mo for short pauses)"
 	@echo "  make resume-compute           Restore ASGs to pre-pause sizes"
-	@echo "  make destroy-all              Sequential destroy (~20-25 min); CONFIRMED=yes to skip prompt"
-	@echo "  make destroy-allXX            Parallel destroy (~10-12 min); CONFIRMED=yes to skip prompt"
+	@echo "  make destroy-all              Parallel destroy (default; ~15-20 min); CONFIRMED=yes to skip prompt"
+	@echo "  make destroy-all TYPE=linear  Sequential destroy (~25 min); CONFIRMED=yes to skip prompt"
 	@echo ""
 	@echo "$(YELLOW)Deploy Host:$(NC)"
 	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
@@ -649,7 +652,7 @@ deploy-cache: validate check-params  ## Deploy cache stack
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ Cache stack deployed: $(CACHE_STACK)$(NC)"
 
-deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
+deploy-all-no-data:  ## Foundation + compute only — no RDS / cache / app-drupal (~10-15 min)
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  Full Deployment: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
@@ -693,7 +696,7 @@ deploy-all:  ## Deploy all stacks from scratch (full lifecycle)
 	@echo ""
 	@echo "  make deploy-allX ENV=$(ENV)        # everything above + database + cache"
 
-deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 min) — set it and forget it
+deploy-all-linear:  ## Sequential full-stack deploy with phase barriers (~45-50 min)
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  Full Deployment + Drupal: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
@@ -783,24 +786,61 @@ deploy-allX:  ## Deploy ALL incl data layer + Drupal app + install + smoke (~30 
 	@echo "$(CYAN)That target installs Drupal, publishes the Route 53 alias,$(NC)"
 	@echo "$(CYAN)and runs both smoke tests. ~5-7 min.$(NC)"
 
-deploy-allXX:  ## Fully parallel infra deploy via scripts/deploy-all-parallel.py (~30-35 min)
-	@# Coexists with deploy-allX (the validated sequential version).
-	@# Same result, different orchestration: each track starts as soon
-	@# as ITS specific deps clear, not via synchronous phase barriers.
-	@# 11 tracks fan out under the AMI bake's 25-min shadow.
+deploy-all-parallel:  ## Fully parallel infra deploy via scripts/deploy-all-parallel.py (~30 min)
+	@# Each track starts as soon as ITS specific deps clear, not via
+	@# synchronous phase barriers. 15 tracks fan out under the AMI bake's
+	@# 25-min shadow.
 	@# Track definitions are declarative — see TRACKS dict at the top
 	@# of scripts/deploy-all-parallel.py. Adding a new track (e.g.,
 	@# future Node.js compute) is one entry plus a make target.
 	@./scripts/deploy-all-parallel.py $(ENV)
 
-destroy-allXX:  ## Fully parallel destroy via scripts/destroy-all-parallel.py (~10-12 min)
-	@# Symmetric counterpart to deploy-allXX. Reverse-dependency graph;
-	@# compute, image-builder, and unmount-deploy-host-fsx start at T=0
-	@# in parallel; cache/db/storage/iam/peering follow as their
-	@# dependents disappear; vpc is absolute last.
-	@# Pass CONFIRMED=yes to skip the interactive prompt (matches the
-	@# existing destroy-all convention).
+destroy-all-parallel:  ## Fully parallel destroy via scripts/destroy-all-parallel.py (~15-20 min)
+	@# Symmetric counterpart to deploy-all-parallel. Reverse-dependency
+	@# graph; compute ASGs, image-builder, S3, cache, database, and
+	@# unmount-deploy-host-fsx start at T=0 in parallel; load balancers
+	@# follow their ASGs; FSx/IAM/peering after; vpc is absolute last.
+	@# Pass CONFIRMED=yes to skip the interactive prompt.
 	@./scripts/destroy-all-parallel.py $(ENV) $(if $(filter yes,$(CONFIRMED)),--yes,)
+
+# -----------------------------------------------------------------------------
+# Dispatchers: TYPE-based public entry points for deploy-all and destroy-all
+# -----------------------------------------------------------------------------
+# `make deploy-all` and `make destroy-all` default to the parallel variants
+# (the fastest, validated path). The TYPE variable selects an alternate
+# orchestration when the operator has a reason:
+#
+#   make deploy-all                  → parallel (default, ~30 min)
+#   make deploy-all TYPE=parallel    → parallel (explicit)
+#   make deploy-all TYPE=linear      → sequential full-stack (~45-50 min)
+#   make deploy-all TYPE=no-data     → foundation + compute only, no RDS / cache / app-drupal
+#
+#   make destroy-all                 → parallel (default, ~15-20 min)
+#   make destroy-all TYPE=parallel   → parallel (explicit)
+#   make destroy-all TYPE=linear     → sequential (slower, was the original)
+#
+# Old names (deploy-allXX, deploy-allX, destroy-allXX) retained below as
+# aliases for muscle memory; they invoke the same canonical targets.
+
+deploy-all:  ## Deploy infra. TYPE=parallel (default) | linear | no-data
+	@case "$(TYPE)" in \
+		""|parallel) $(MAKE) deploy-all-parallel ENV=$(ENV) ;; \
+		linear)      $(MAKE) deploy-all-linear ENV=$(ENV) ;; \
+		no-data)     $(MAKE) deploy-all-no-data ENV=$(ENV) ;; \
+		*) echo "Unknown TYPE=$(TYPE). Valid values: parallel (default), linear, no-data" >&2; exit 1 ;; \
+	esac
+
+destroy-all:  ## Destroy infra. TYPE=parallel (default) | linear. Pass CONFIRMED=yes to skip prompt.
+	@case "$(TYPE)" in \
+		""|parallel) $(MAKE) destroy-all-parallel ENV=$(ENV) CONFIRMED=$(CONFIRMED) ;; \
+		linear)      $(MAKE) destroy-all-linear ENV=$(ENV) CONFIRMED=$(CONFIRMED) ;; \
+		*) echo "Unknown TYPE=$(TYPE). Valid values: parallel (default), linear" >&2; exit 1 ;; \
+	esac
+
+# Backward-compatibility aliases. Old names invoke the new canonical targets.
+deploy-allXX: deploy-all-parallel  ## Alias for deploy-all-parallel (old name)
+deploy-allX: deploy-all-linear      ## Alias for deploy-all-linear (old name)
+destroy-allXX: destroy-all-parallel ## Alias for destroy-all-parallel (old name)
 
 # -----------------------------------------------------------------------------
 # Drupal Local Install (SQLite, deploy-host only — fast iteration playground)
@@ -1344,7 +1384,7 @@ destroy-cache:  ## Delete cache stack
 	$(call cf-wait,stack-delete-complete,$(CACHE_STACK))
 	@echo "$(GREEN)✓ Cache stack deleted: $(CACHE_STACK)$(NC)"
 
-destroy-all:  ## Delete all stacks (reverse order; pass CONFIRMED=yes to skip prompt)
+destroy-all-linear:  ## Sequential destroy with phase barriers (was original destroy-all; ~25 min)
 	@echo "$(RED)========================================$(NC)"
 	@echo "$(RED)WARNING: This will DELETE ALL STACKS$(NC)"
 	@echo "$(RED)Environment: $(ENV)$(NC)"
