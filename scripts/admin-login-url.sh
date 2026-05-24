@@ -29,9 +29,15 @@ if [ -z "$ENV" ]; then
   exit 2
 fi
 
-# Resolve deploy-host instance and ALB DNS (so the generated URL
-# points at the public entry point rather than the site-name which
-# the operator's browser can't resolve without /etc/hosts editing).
+# Resolve deploy-host instance + decide which URL prefix to embed in the
+# drush-generated login URL.
+#
+# Prefer the public DNS name (https://<site-name>) when HTTPS is enabled
+# for this env. Detection: compute-alb stack has AlbCertificateArn output
+# iff DomainName was set at deploy time (per the HTTPS work). If HTTPS is
+# off (env deployed with DomainName empty), fall back to http://<alb-dns>
+# — the bare amazonaws.com name, which works but produces an ugly URL
+# and a cert-mismatch warning if the operator manually adds https://.
 DEPLOY_ID=$(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=cf-deploy-host" \
             "Name=instance-state-name,Values=running" \
@@ -47,8 +53,24 @@ ALB_DNS=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
   --output text 2>/dev/null || true)
 if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" = "None" ]; then
-  echo "ERROR: couldn't resolve ALB DNS from $ALB_STACK." >&2
+  echo "ERROR: couldn't read ALB DNS from $ALB_STACK." >&2
   exit 1
+fi
+
+CERT_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "$ALB_STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='AlbCertificateArn'].OutputValue" \
+  --output text 2>/dev/null || true)
+SITE_NAME=$(aws ssm get-parameter --name "/$ENV/drupal/site-name" \
+  --query 'Parameter.Value' --output text 2>/dev/null || true)
+
+if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ] && \
+   [ -n "$SITE_NAME" ] && [ "$SITE_NAME" != "None" ]; then
+  DRUSH_URI="https://$SITE_NAME"
+  echo "URI: $DRUSH_URI (HTTPS, public DNS)"
+else
+  DRUSH_URI="http://$ALB_DNS"
+  echo "URI: $DRUSH_URI (HTTP fallback — env has no ACM cert)"
 fi
 
 echo "Generating one-time admin login URL via $DEPLOY_ID..."
@@ -86,10 +108,12 @@ export DRUPAL_DB_PASS=\$(aws secretsmanager get-secret-value \\
   --secret-id "worxco/$ENV/drupal/db-password" \\
   --query SecretString --output text)
 
-# --uri tells drush which hostname to embed in the generated URL.
-# Pre-expanded at outer-shell time (no inner expansion) so drush gets
-# the literal URL, not a \$VAR string it doesn't know what to do with.
-sudo -E HOME=/root vendor/bin/drush user:login --uri=http://$ALB_DNS
+# --uri tells drush which hostname (and scheme) to embed in the generated
+# URL. Pre-expanded at outer-shell time (no inner expansion) so drush
+# gets the literal URL string. \$DRUSH_URI is set by the outer script to
+# either https://<site-name> (when HTTPS is enabled) or http://<alb-dns>
+# (HTTP fallback).
+sudo -E HOME=/root vendor/bin/drush user:login --uri=$DRUSH_URI
 EOF_INNER
 )
 B64=$(echo "$INNER" | base64 | tr -d '\n')

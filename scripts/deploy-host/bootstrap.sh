@@ -117,6 +117,27 @@ cat > /etc/tmux.conf <<'TMUXEOF'
 set -g mouse on
 set -g history-limit 50000
 
+# Push tmux's copy buffer to the system clipboard via OSC 52 escape
+# sequences. This makes click-drag selections (which are captured by
+# tmux when `mouse on` is set) end up in the host's clipboard instead
+# of disappearing the moment you release the trackpad. Requires a
+# terminal emulator that supports OSC 52 — macOS Terminal supports it
+# by default; iTerm2 needs "Applications in terminal may access
+# clipboard" enabled in Preferences → General → Selection.
+#
+# Without this, the alternative is to HOLD OPTION while click-dragging,
+# which makes the terminal emulator (not tmux) handle the selection.
+# That works fine but operators have to remember it; OSC 52 makes
+# the obvious behavior also be the correct one.
+set -g set-clipboard on
+
+# In copy-mode-vi, MouseDragEnd is the right time to copy: when the
+# user releases the mouse after a drag selection. `copy-pipe-no-clear`
+# copies the selection AND keeps it highlighted briefly so the operator
+# can confirm they got what they wanted. With set-clipboard on (above),
+# tmux pushes the result through OSC 52 to the system clipboard.
+bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-no-clear
+
 # vi key bindings in copy-mode (Ctrl-b [ to enter):
 #   Ctrl-u / Ctrl-d  half-page scroll
 #   Ctrl-b / Ctrl-f  full-page scroll

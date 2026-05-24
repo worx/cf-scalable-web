@@ -439,15 +439,24 @@ endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Va
 		--output text --region $(AWS_REGION) 2>/dev/null); \
 	SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null || echo "(cf-app-drupal not deployed)"); \
+	CERT_ARN=$$(aws cloudformation describe-stacks \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='AlbCertificateArn'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
 	if [ -z "$$ALB_DNS" ] || [ "$$ALB_DNS" = "None" ]; then \
 		echo "  $(YELLOW)(cf-compute-alb not deployed)$(NC)"; \
+	elif [ -n "$$CERT_ARN" ] && [ "$$CERT_ARN" != "None" ]; then \
+		echo "  $(GREEN)Browser URL:$(NC)  https://$$SITE_NAME/"; \
+		echo "  $(GREEN)Site name:$(NC)    $$SITE_NAME (with ACM cert)"; \
+		echo "  $(GREEN)ALB DNS:$(NC)      $$ALB_DNS (ALB cert won't match — use the site-name URL)"; \
+		echo "  $(GREEN)curl test:$(NC)    curl https://$$SITE_NAME/"; \
 	else \
-		echo "  $(GREEN)Browser URL:$(NC)  http://$$ALB_DNS/"; \
+		echo "  $(GREEN)Browser URL:$(NC)  http://$$ALB_DNS/ (HTTP — no cert configured for this env)"; \
 		echo "  $(GREEN)Site name:$(NC)    $$SITE_NAME"; \
 		echo "  $(GREEN)curl test:$(NC)    curl -H 'Host: $$SITE_NAME' http://$$ALB_DNS/"; \
-		echo "  $(CYAN)(trusted_host_patterns in settings.php includes *.elb.amazonaws.com,$(NC)"; \
-		echo "  $(CYAN) so browsing the ALB URL directly works without any Host-header tricks.$(NC)"; \
-		echo "  $(CYAN) For the site-name path: add to /etc/hosts or use a Host-header browser ext.)$(NC)"; \
+		echo "  $(CYAN)(trusted_host_patterns includes *.elb.amazonaws.com, so the ALB URL works$(NC)"; \
+		echo "  $(CYAN) without a Host header. Set DomainName in compute-alb-$(ENV).json + redeploy$(NC)"; \
+		echo "  $(CYAN) to enable HTTPS via ACM.)$(NC)"; \
 	fi
 	@echo ""
 	@echo "$(CYAN)Drupal admin login:$(NC)"
@@ -455,15 +464,26 @@ endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Va
 		--stack-name $(COMPUTE_ALB_STACK) \
 		--query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
 		--output text --region $(AWS_REGION) 2>/dev/null); \
+	SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
+		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
+	CERT_ARN=$$(aws cloudformation describe-stacks \
+		--stack-name $(COMPUTE_ALB_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='AlbCertificateArn'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
 	ADMIN_USER=$$(aws ssm get-parameter --name "/$(ENV)/drupal/admin-username" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
 	ADMIN_SECRET="worxco/$(ENV)/drupal/admin-password"; \
+	if [ -n "$$CERT_ARN" ] && [ "$$CERT_ARN" != "None" ] && [ -n "$$SITE_NAME" ] && [ "$$SITE_NAME" != "None" ]; then \
+		LOGIN_BASE="https://$$SITE_NAME"; \
+	else \
+		LOGIN_BASE="http://$$ALB_DNS"; \
+	fi; \
 	if [ -z "$$ALB_DNS" ] || [ "$$ALB_DNS" = "None" ]; then \
 		echo "  $(YELLOW)(ALB not deployed)$(NC)"; \
 	elif [ -z "$$ADMIN_USER" ]; then \
 		echo "  $(YELLOW)(cf-app-drupal not deployed — no admin-username SSM param)$(NC)"; \
 	else \
-		echo "  $(GREEN)Login URL:$(NC)   http://$$ALB_DNS/user/login"; \
+		echo "  $(GREEN)Login URL:$(NC)   $$LOGIN_BASE/user/login"; \
 		echo "  $(GREEN)Username:$(NC)    $$ADMIN_USER"; \
 		echo "  $(GREEN)Password:$(NC)    (not printed — fetch with the command below)"; \
 		echo "  $(GREEN)Fetch password:$(NC)"; \
