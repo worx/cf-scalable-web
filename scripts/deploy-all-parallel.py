@@ -67,7 +67,16 @@ TRACKS = {
             "cmd": "make deploy-iam ENV={env} VALIDATED=1"},
     "app": {"deps": [], "label": "app", "name": "app-drupal (SSM params + secrets)",
             "cmd": "make deploy-app-drupal ENV={env} VALIDATED=1"},
-    "ib":  {"deps": [], "label": " ib", "name": "image-builder stack + S3 configs",
+    # image-builder depends on storage (NOT obvious — cf-image-builder.yaml
+    # itself has no !ImportValue references and runs builds in the default
+    # VPC, but the deploy-image-builder + upload-build-configs make targets
+    # both read the S3 bucket name from SSM /<env>/s3/image-builder-bucket,
+    # which is written by cf-storage.yaml). Past incident: 2026-05-24, ib
+    # failed at T+2s on a fresh deploy because str hadn't finished writing
+    # the SSM param. The 5-min critical path penalty (vpc → str → ib → ami)
+    # could be eliminated by splitting cf-storage into separate s3 + fsx
+    # stacks; deferred until it's worth a stack refactor.
+    "ib":  {"deps": ["str"], "label": " ib", "name": "image-builder stack + S3 configs",
             "cmd": "make deploy-image-builder ENV={env} VALIDATED=1 && "
                    "make upload-build-configs ENV={env} VALIDATED=1"},
 
