@@ -2359,8 +2359,17 @@ install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the d
 admin-login-url:  ## Generate a one-time drush user:login URL for admin (Drupal-native, no password lookup)
 	@scripts/admin-login-url.sh $(ENV)
 
-smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 200
-	@echo "$(BLUE)Smoke-testing Drupal at ENV=$(ENV)$(NC)"
+smoke-test-drupal:  ## Curl the ALB with the Drupal Host header, bypassing DNS, and assert HTTP 200
+	@# Tests the stack WITHOUT depending on Route 53. curl --resolve pins
+	@# the SITE_NAME → ALB-IP mapping inside curl, so:
+	@#   - DNS lookup is bypassed (we tell curl the IP directly)
+	@#   - TLS SNI uses SITE_NAME → ALB returns the right ACM cert → cert validates
+	@#   - HTTP Host header is SITE_NAME → Drupal's trusted_host_patterns match
+	@#   - URL is https://, so we hit the 443 listener (port 80 just redirects)
+	@# A pass here means ALB + cert + nginx + PHP-FPM + Drupal all work,
+	@# independently of whether Route 53 alias is published. smoke-test-public
+	@# is the with-DNS counterpart.
+	@echo "$(BLUE)Smoke-testing Drupal at ENV=$(ENV) (DNS-bypassed via --resolve)$(NC)"
 	@ALB_DNS=$$(aws cloudformation describe-stacks \
 		--stack-name $(COMPUTE_ALB_STACK) \
 		--query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
@@ -2372,15 +2381,29 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header and assert HTTP 
 	SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null \
 		|| echo "drupal-$(ENV).test"); \
-	echo "  ALB:  $$ALB_DNS"; \
-	echo "  Host: $$SITE_NAME"; \
+	ALB_IP=$$(dig +short "$$ALB_DNS" | head -1); \
+	if [ -z "$$ALB_IP" ]; then \
+		echo "$(RED)ERROR: could not resolve ALB DNS $$ALB_DNS to an IP$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  ALB:    $$ALB_DNS (pinned to $$ALB_IP)"; \
+	echo "  Host:   $$SITE_NAME"; \
+	echo "  URL:    https://$$SITE_NAME/  (via --resolve, no DNS lookup)"; \
 	BODY=$$(mktemp); \
-	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" -H "Host: $$SITE_NAME" \
-		"http://$$ALB_DNS/" --max-time 20); \
+	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" \
+		--resolve "$$SITE_NAME:443:$$ALB_IP" \
+		"https://$$SITE_NAME/" --max-time 20); \
 	if [ "$$HTTP" = "200" ]; then \
-		echo "  $(GREEN)✓ Drupal returned HTTP 200$(NC)"; \
+		echo "  $(GREEN)✓ Drupal returned HTTP 200 over HTTPS (DNS-bypassed)$(NC)"; \
 		head -3 "$$BODY"; \
 		rm -f "$$BODY"; \
+	elif [ "$$HTTP" = "400" ]; then \
+		echo "  $(RED)✗ HTTP 400 — Drupal rejected the Host header.$(NC)"; \
+		echo "  Likely cause: DRUPAL_SITE_NAME hasn't reached the running PHP-FPM workers."; \
+		echo "  Fix: trigger an ASG instance refresh on the PHP-FPM ASGs (see docs/DNS-SETUP.md)."; \
+		head -10 "$$BODY"; \
+		rm -f "$$BODY"; \
+		exit 1; \
 	else \
 		echo "  $(RED)✗ Drupal returned HTTP $$HTTP$(NC)"; \
 		head -10 "$$BODY"; \
