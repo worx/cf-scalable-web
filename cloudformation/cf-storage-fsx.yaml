@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Storage — FSx OpenZFS Shared Filesystem
+#
+# Purpose: Creates the FSx for OpenZFS file system shared by nginx
+#          (/etc/nginx/shared subtree) and PHP-FPM (/var/www subtree).
+#          Split out from the old combined cf-storage.yaml so the S3
+#          buckets can be deployed in parallel with cf-vpc.yaml, while
+#          this stack waits for VPC subnets + SGs.
+#
+# Resources:
+#   - FSx for OpenZFS file system
+#   - 2 SSM parameters (DNS name + root volume ID)
+#
+# Dependencies: cf-vpc.yaml (subnets, fsx security group)
+#
+# Deploy time: ~5 min.
+#
+# See docs/FSX-LAYOUT.md for the /fsx/www + /fsx/nginx sibling-subtree
+# layout that PHP-FPM and nginx mount separately for defense in depth.
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Storage FSx OpenZFS for cf-scalable-web (shared /var/www + /etc/nginx/shared)'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    Default: production
+
+  FSxStorageCapacityGB:
+    Type: Number
+    Description: FSx storage capacity in GB (minimum 64GB, scales automatically)
+    MinValue: 64
+    MaxValue: 65536
+    Default: 100
+
+  FSxThroughputMBps:
+    Type: Number
+    Description: FSx throughput capacity in MB/s
+    AllowedValues: [64, 128, 256, 512, 1024, 2048, 3072, 4096]
+    Default: 128
+
+  FSxDeploymentType:
+    Type: String
+    Description: FSx deployment type (SINGLE_AZ_1 for dev/test, MULTI_AZ_1 for production)
+    AllowedValues: [SINGLE_AZ_1, MULTI_AZ_1]
+    Default: SINGLE_AZ_1
+
+  FSxAutomaticBackupRetentionDays:
+    Type: Number
+    Description: Number of days to retain automatic backups
+    MinValue: 0
+    MaxValue: 90
+    Default: 14
+
+Conditions:
+  MultiAZDeployment: !Equals [!Ref FSxDeploymentType, MULTI_AZ_1]
+
+Resources:
+  FSxFileSystem:
+    Type: AWS::FSx::FileSystem
+    Properties:
+      FileSystemType: OPENZFS
+      StorageCapacity: !Ref FSxStorageCapacityGB
+      SubnetIds:
+        - !If
+          - MultiAZDeployment
+          - Fn::ImportValue: !Sub '${EnvironmentName}-nginx-subnets'
+          - !Select [0, !Split [',', Fn::ImportValue: !Sub '${EnvironmentName}-nginx-subnets']]
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${EnvironmentName}-fsx-sg-id'
+      OpenZFSConfiguration:
+        DeploymentType: !Ref FSxDeploymentType
+        ThroughputCapacity: !Ref FSxThroughputMBps
+        AutomaticBackupRetentionDays: !Ref FSxAutomaticBackupRetentionDays
+        DailyAutomaticBackupStartTime: '02:00'
+        CopyTagsToBackups: true
+        CopyTagsToVolumes: true
+        RootVolumeConfiguration:
+          NfsExports:
+            - ClientConfigurations:
+                - Clients: '*'
+                  Options:
+                    - rw
+                    - sync
+                    - no_root_squash
+          DataCompressionType: ZSTD
+          ReadOnly: false
+          RecordSizeKiB: 128
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-fsx-openzfs'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: Shared web content storage
+
+  FSxDNSParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/fsx/dns-name'
+      Description: FSx OpenZFS DNS name for mounting
+      Type: String
+      Value: !GetAtt FSxFileSystem.DNSName
+      Tags:
+        Environment: !Ref EnvironmentName
+
+  FSxMountNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${EnvironmentName}/fsx/mount-name'
+      Description: FSx OpenZFS root volume mount name
+      Type: String
+      Value: !GetAtt FSxFileSystem.RootVolumeId
+      Tags:
+        Environment: !Ref EnvironmentName
+
+Outputs:
+  FSxFileSystemId:
+    Description: FSx file system ID
+    Value: !Ref FSxFileSystem
+    Export:
+      Name: !Sub '${EnvironmentName}-fsx-filesystem-id'
+
+  FSxDNSName:
+    Description: FSx DNS name for NFS mounting
+    Value: !GetAtt FSxFileSystem.DNSName
+    Export:
+      Name: !Sub '${EnvironmentName}-fsx-dns-name'
+
+  FSxRootVolumeId:
+    Description: FSx root volume ID (mount name)
+    Value: !GetAtt FSxFileSystem.RootVolumeId
+    Export:
+      Name: !Sub '${EnvironmentName}-fsx-root-volume-id'
+
+  FSxMountCommand:
+    Description: NFS mount command for /var/www (mounts the /fsx/www subtree — see docs/FSX-LAYOUT.md)
+    Value: !Sub 'mount -t nfs4 -o vers=4.1,port=2049 ${FSxFileSystem.DNSName}:/fsx/www /var/www'
+    Export:
+      Name: !Sub '${EnvironmentName}-fsx-mount-command'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

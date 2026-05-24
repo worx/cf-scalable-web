@@ -3,54 +3,37 @@
 # Author: Kurt Vanderwater <kurt@worxco.net>
 
 #
-# CloudFormation Template: Storage Infrastructure
+# CloudFormation Template: Storage — S3 Buckets
 #
-# Purpose: Creates FSx for OpenZFS shared filesystem and S3 buckets
+# Purpose: Creates the three S3 buckets (media, backup, image-builder) and
+#          their SSM parameter store entries. Split out from the old
+#          combined cf-storage.yaml so this stack has NO VPC dependency
+#          and can be deployed in parallel with cf-vpc.yaml.
+#
+# Why split: deploy-image-builder needs the image-builder S3 bucket name
+# from SSM (/<env>/s3/image-builder-bucket). Previously that param was
+# written by cf-storage which also created FSx, forcing image-builder
+# to wait ~5 min for FSx provisioning to finish even though it only
+# needed the bucket. Splitting removes the FSx wait from the AMI long-pole
+# critical path. See scripts/deploy-all-parallel.py for the orchestration.
 #
 # Resources:
-#   - FSx for OpenZFS (shared storage for /var/www across NGINX and PHP-FPM)
-#   - S3 buckets (Drupal media uploads, backups, Image Builder scripts)
-#   - SSM Parameters (FSx DNS name, S3 bucket names for easy reference)
+#   - 3 S3 buckets (drupal-media, backups, image-builder)
+#   - 3 SSM parameters (bucket name lookups)
 #
-# Dependencies: cf-vpc.yaml (subnets, security groups)
+# Dependencies: NONE — buckets are global resources, no VPC required.
 #
-# Outputs: FSx file system ID/DNS, S3 bucket names
+# Deploy time: ~30 sec.
 #
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Storage infrastructure - FSx OpenZFS and S3 buckets for scalable web hosting'
+Description: 'Storage S3 buckets (media + backup + image-builder) for cf-scalable-web'
 
 Parameters:
   EnvironmentName:
     Type: String
     Description: Environment name
     Default: production
-
-  FSxStorageCapacityGB:
-    Type: Number
-    Description: FSx storage capacity in GB (minimum 64GB, scales automatically)
-    MinValue: 64
-    MaxValue: 65536
-    Default: 100
-
-  FSxThroughputMBps:
-    Type: Number
-    Description: FSx throughput capacity in MB/s
-    AllowedValues: [64, 128, 256, 512, 1024, 2048, 3072, 4096]
-    Default: 128
-
-  FSxDeploymentType:
-    Type: String
-    Description: FSx deployment type (SINGLE_AZ_1 for dev/test, MULTI_AZ_1 for production)
-    AllowedValues: [SINGLE_AZ_1, MULTI_AZ_1]
-    Default: SINGLE_AZ_1
-
-  FSxAutomaticBackupRetentionDays:
-    Type: Number
-    Description: Number of days to retain automatic backups
-    MinValue: 0
-    MaxValue: 90
-    Default: 14
 
   EnableS3Versioning:
     Type: String
@@ -67,56 +50,11 @@ Parameters:
 
 Conditions:
   S3VersioningEnabled: !Equals [!Ref EnableS3Versioning, true]
-  MultiAZDeployment: !Equals [!Ref FSxDeploymentType, MULTI_AZ_1]
 
 Resources:
   # ========================================
-  # FSx for OpenZFS File System
-  # ========================================
-
-  FSxFileSystem:
-    Type: AWS::FSx::FileSystem
-    Properties:
-      FileSystemType: OPENZFS
-      StorageCapacity: !Ref FSxStorageCapacityGB
-      SubnetIds:
-        - !If
-          - MultiAZDeployment
-          - Fn::ImportValue: !Sub '${EnvironmentName}-nginx-subnets'
-          - !Select [0, !Split [',', Fn::ImportValue: !Sub '${EnvironmentName}-nginx-subnets']]
-      SecurityGroupIds:
-        - Fn::ImportValue: !Sub '${EnvironmentName}-fsx-sg-id'
-      OpenZFSConfiguration:
-        DeploymentType: !Ref FSxDeploymentType
-        ThroughputCapacity: !Ref FSxThroughputMBps
-        AutomaticBackupRetentionDays: !Ref FSxAutomaticBackupRetentionDays
-        DailyAutomaticBackupStartTime: '02:00'
-        CopyTagsToBackups: true
-        CopyTagsToVolumes: true
-        RootVolumeConfiguration:
-          NfsExports:
-            - ClientConfigurations:
-                - Clients: '*'
-                  Options:
-                    - rw
-                    - sync
-                    - no_root_squash
-          DataCompressionType: ZSTD
-          ReadOnly: false
-          RecordSizeKiB: 128
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-fsx-openzfs'
-        - Key: Environment
-          Value: !Ref EnvironmentName
-        - Key: Purpose
-          Value: Shared web content storage
-
-  # ========================================
-  # S3 Buckets
-  # ========================================
-
   # Drupal/WordPress Media Uploads
+  # ========================================
   MediaBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -147,7 +85,9 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+  # ========================================
   # Backups and Logs
+  # ========================================
   BackupBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -179,7 +119,9 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+  # ========================================
   # Image Builder Scripts and Artifacts
+  # ========================================
   ImageBuilderBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -207,28 +149,8 @@ Resources:
           Value: !Ref EnvironmentName
 
   # ========================================
-  # SSM Parameters (for easy reference by instances)
+  # SSM Parameters
   # ========================================
-
-  FSxDNSParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub '/${EnvironmentName}/fsx/dns-name'
-      Description: FSx OpenZFS DNS name for mounting
-      Type: String
-      Value: !GetAtt FSxFileSystem.DNSName
-      Tags:
-        Environment: !Ref EnvironmentName
-
-  FSxMountNameParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub '/${EnvironmentName}/fsx/mount-name'
-      Description: FSx OpenZFS root volume mount name
-      Type: String
-      Value: !GetAtt FSxFileSystem.RootVolumeId
-      Tags:
-        Environment: !Ref EnvironmentName
 
   MediaBucketParameter:
     Type: AWS::SSM::Parameter
@@ -261,30 +183,6 @@ Resources:
         Environment: !Ref EnvironmentName
 
 Outputs:
-  FSxFileSystemId:
-    Description: FSx file system ID
-    Value: !Ref FSxFileSystem
-    Export:
-      Name: !Sub '${EnvironmentName}-fsx-filesystem-id'
-
-  FSxDNSName:
-    Description: FSx DNS name for NFS mounting
-    Value: !GetAtt FSxFileSystem.DNSName
-    Export:
-      Name: !Sub '${EnvironmentName}-fsx-dns-name'
-
-  FSxRootVolumeId:
-    Description: FSx root volume ID (mount name)
-    Value: !GetAtt FSxFileSystem.RootVolumeId
-    Export:
-      Name: !Sub '${EnvironmentName}-fsx-root-volume-id'
-
-  FSxMountCommand:
-    Description: NFS mount command for /var/www (mounts the /fsx/www subtree — see docs/FSX-LAYOUT.md for the sibling-subtree design)
-    Value: !Sub 'mount -t nfs4 -o vers=4.1,port=2049 ${FSxFileSystem.DNSName}:/fsx/www /var/www'
-    Export:
-      Name: !Sub '${EnvironmentName}-fsx-mount-command'
-
   MediaBucketName:
     Description: S3 bucket name for media uploads
     Value: !Ref MediaBucket

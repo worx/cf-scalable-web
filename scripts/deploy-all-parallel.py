@@ -67,16 +67,16 @@ TRACKS = {
             "cmd": "make deploy-iam ENV={env} VALIDATED=1"},
     "app": {"deps": [], "label": "app", "name": "app-drupal (SSM params + secrets)",
             "cmd": "make deploy-app-drupal ENV={env} VALIDATED=1"},
-    # image-builder depends on storage (NOT obvious — cf-image-builder.yaml
-    # itself has no !ImportValue references and runs builds in the default
-    # VPC, but the deploy-image-builder + upload-build-configs make targets
-    # both read the S3 bucket name from SSM /<env>/s3/image-builder-bucket,
-    # which is written by cf-storage.yaml). Past incident: 2026-05-24, ib
-    # failed at T+2s on a fresh deploy because str hadn't finished writing
-    # the SSM param. The 5-min critical path penalty (vpc → str → ib → ami)
-    # could be eliminated by splitting cf-storage into separate s3 + fsx
-    # stacks; deferred until it's worth a stack refactor.
-    "ib":  {"deps": ["str"], "label": " ib", "name": "image-builder stack + S3 configs",
+    # Storage S3 buckets — no CFN deps. ~30 sec. Unblocks `ib` quickly.
+    "s3":  {"deps": [], "label": " s3", "name": "storage S3 buckets (media/backup/builder)",
+            "cmd": "make deploy-storage-s3 ENV={env} VALIDATED=1"},
+
+    # image-builder depends on S3 (not FSx). The deploy-image-builder +
+    # upload-build-configs make targets both read /<env>/s3/image-builder-
+    # bucket from SSM, which is written by cf-storage-s3. Splitting cf-storage
+    # into separate s3 + fsx stacks (commit on 2026-05-24) lets `ib` start
+    # in ~30 sec instead of waiting ~5 min for FSx provisioning.
+    "ib":  {"deps": ["s3"], "label": " ib", "name": "image-builder stack + S3 configs",
             "cmd": "make deploy-image-builder ENV={env} VALIDATED=1 && "
                    "make upload-build-configs ENV={env} VALIDATED=1"},
 
@@ -87,9 +87,10 @@ TRACKS = {
             "cmd": "make build-amis-if-needed ENV={env} VALIDATED=1 && "
                    "make update-ami-params ENV={env} VALIDATED=1"},
 
+    # Storage FSx — needs VPC. ~5 min. Runs in parallel with AMI bake.
+    "fxs": {"deps": ["vpc"], "label": "fxs", "name": "storage FSx OpenZFS",
+            "cmd": "make deploy-storage-fsx ENV={env} VALIDATED=1"},
     # Phase 1 tier — VPC-dependent, mutually independent
-    "str": {"deps": ["vpc"], "label": "str", "name": "storage (FSx + S3 buckets)",
-            "cmd": "make deploy-storage ENV={env} VALIDATED=1"},
     "per": {"deps": ["vpc"], "label": "per", "name": "peering (deploy-host <-> workload)",
             "cmd": "make deploy-peering ENV={env} VALIDATED=1"},
     "db":  {"deps": ["vpc"], "label": " db", "name": "database (RDS PostgreSQL)",
@@ -97,8 +98,8 @@ TRACKS = {
     "cch": {"deps": ["vpc"], "label": "cch", "name": "cache (ElastiCache Valkey)",
             "cmd": "make deploy-cache ENV={env} VALIDATED=1"},
 
-    # init-fsx-layout — needs storage (FSx available) AND peering (deploy-host can reach it)
-    "fsx": {"deps": ["str", "per"], "label": "fsx", "name": "init FSx layout (/fsx/www + /fsx/nginx)",
+    # init-fsx-layout — needs FSx available AND peering (deploy-host can reach it)
+    "fsi": {"deps": ["fxs", "per"], "label": "fsi", "name": "init FSx layout (/fsx/www + /fsx/nginx)",
             "cmd": "make init-fsx-layout ENV={env}"},
 
     # Compute load balancers — depend only on VPC. ALB and NLB are mutually
@@ -109,19 +110,20 @@ TRACKS = {
             "cmd": "make deploy-compute-nlb ENV={env} VALIDATED=1"},
 
     # Compute ASGs — need their LB's target group + AMI in SSM + every other
-    # infra piece (db endpoint, cache endpoint, FSx mountable, IAM profile,
-    # app-drupal SSM params). nginx and PHP are mutually independent.
-    "cnx": {"deps": ["alb", "ami", "db", "cch", "str", "iam", "fsx", "app"],
+    # infra piece (db endpoint, cache endpoint, FSx mountable + layout
+    # initialized, IAM profile, app-drupal SSM params). nginx and PHP are
+    # mutually independent.
+    "cnx": {"deps": ["alb", "ami", "db", "cch", "fxs", "iam", "fsi", "app"],
             "label": "cnx", "name": "nginx ASG + instances",
             "cmd": "make deploy-compute-nginx ENV={env} VALIDATED=1"},
-    "cph": {"deps": ["nlb", "ami", "db", "cch", "str", "iam", "fsx", "app"],
+    "cph": {"deps": ["nlb", "ami", "db", "cch", "fxs", "iam", "fsi", "app"],
             "label": "cph", "name": "PHP ASGs (74 + 83) + instances",
             "cmd": "make deploy-compute-php ENV={env} VALIDATED=1"},
 }
 
 # Track display order in the live status block (top-to-bottom)
-DISPLAY_ORDER = ["vpc", "iam", "app", "ib", "ami",
-                 "str", "per", "db", "cch", "fsx",
+DISPLAY_ORDER = ["vpc", "iam", "app", "s3", "ib", "ami",
+                 "fxs", "per", "db", "cch", "fsi",
                  "alb", "nlb", "cnx", "cph"]
 
 # Single-character state codes (per design discussion 2026-05-24)

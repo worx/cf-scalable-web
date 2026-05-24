@@ -60,21 +60,24 @@ TRACKS = {
     "nlb": {"deps": ["cph"], "label": "nlb", "name": "compute NLB + target groups",
             "cmd": "make destroy-compute-nlb ENV={env} CONFIRMED=yes || true"},
 
-    # Tier 3 — depend on compute ASGs gone (and ib for iam, umn for str)
-    "str": {"deps": ["cnx", "cph", "umn"], "label": "str", "name": "storage (FSx + S3 buckets)",
-            "cmd": "make destroy-storage ENV={env} CONFIRMED=yes || true"},
+    # Tier 3 — storage split: FSx needs compute gone (no mounters) + umn done;
+    # S3 needs image-builder gone (it consumes the image-builder bucket).
+    "fxs": {"deps": ["cnx", "cph", "umn"], "label": "fxs", "name": "storage FSx OpenZFS",
+            "cmd": "make destroy-storage-fsx ENV={env} CONFIRMED=yes || true"},
+    "s3":  {"deps": ["ib"], "label": " s3", "name": "storage S3 buckets",
+            "cmd": "make destroy-storage-s3 ENV={env} CONFIRMED=yes || true"},
     "iam": {"deps": ["cnx", "cph", "ib"], "label": "iam", "name": "IAM roles + instance profiles",
             "cmd": "make destroy-iam ENV={env} CONFIRMED=yes || true"},
     "per": {"deps": ["cnx", "cph"], "label": "per", "name": "peering (deploy-host <-> workload)",
             "cmd": "make destroy-peering ENV={env} || true"},
 
     # Tier 4 — VPC must be ABSOLUTE last. Any lingering ENI hangs the delete.
-    "vpc": {"deps": ["cnx", "cph", "alb", "nlb", "ib", "cch", "db", "str", "iam", "per"],
+    "vpc": {"deps": ["cnx", "cph", "alb", "nlb", "ib", "cch", "db", "fxs", "s3", "iam", "per"],
             "label": "vpc", "name": "VPC + subnets + security groups",
             "cmd": "make destroy-vpc ENV={env} CONFIRMED=yes || true"},
 }
 
-DISPLAY_ORDER = ["cnx", "cph", "alb", "nlb", "umn", "ib", "cch", "db", "str", "iam", "per", "vpc"]
+DISPLAY_ORDER = ["cnx", "cph", "alb", "nlb", "umn", "ib", "s3", "cch", "db", "fxs", "iam", "per", "vpc"]
 
 STATE_CHARS = {
     "pending": ".",

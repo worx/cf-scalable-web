@@ -19,11 +19,11 @@
 export
 
 .PHONY: help env-check validate show-params status \
-        deploy-all deploy-vpc deploy-iam deploy-storage deploy-database deploy-cache \
+        deploy-all deploy-vpc deploy-iam deploy-storage deploy-storage-s3 deploy-storage-fsx deploy-database deploy-cache \
         deploy-compute deploy-compute-alb deploy-compute-nlb deploy-compute-nginx deploy-compute-php \
         verify-all verify-vpc verify-iam verify-storage verify-database verify-cache \
         verify-compute verify-compute-alb verify-compute-nlb verify-compute-nginx verify-compute-php \
-        destroy-all destroy-vpc destroy-iam destroy-storage destroy-database destroy-cache \
+        destroy-all destroy-vpc destroy-iam destroy-storage destroy-storage-s3 destroy-storage-fsx destroy-database destroy-cache \
         destroy-compute destroy-compute-alb destroy-compute-nlb destroy-compute-nginx destroy-compute-php \
         deploy-deploy-host verify-deploy-host destroy-deploy-host \
         stop-deploy-host start-deploy-host set-deploy-host-password \
@@ -58,7 +58,11 @@ PARAM_FILE := cloudformation/parameters/$(ENV).json
 # Stack names
 VPC_STACK := $(STACK_PREFIX)-vpc
 IAM_STACK := $(STACK_PREFIX)-iam
-STORAGE_STACK := $(STACK_PREFIX)-storage
+# Storage is split into two stacks (S3 has no VPC dep, FSx does) so the
+# parallel orchestrator can fan out: S3 ready in 30s → unblocks image-builder
+# track immediately, FSx done in ~5 min in parallel.
+STORAGE_S3_STACK := $(STACK_PREFIX)-storage-s3
+STORAGE_FSX_STACK := $(STACK_PREFIX)-storage-fsx
 DATABASE_STACK := $(STACK_PREFIX)-database
 CACHE_STACK := $(STACK_PREFIX)-cache
 
@@ -81,7 +85,8 @@ APP_DRUPAL_PARAMS := cloudformation/parameters/app-drupal-$(ENV).json
 # Template files
 VPC_TEMPLATE := cloudformation/cf-vpc.yaml
 IAM_TEMPLATE := cloudformation/cf-iam.yaml
-STORAGE_TEMPLATE := cloudformation/cf-storage.yaml
+STORAGE_S3_TEMPLATE := cloudformation/cf-storage-s3.yaml
+STORAGE_FSX_TEMPLATE := cloudformation/cf-storage-fsx.yaml
 DATABASE_TEMPLATE := cloudformation/cf-database.yaml
 CACHE_TEMPLATE := cloudformation/cf-cache.yaml
 
@@ -231,7 +236,9 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Deployment (ENV=sandbox|staging|production):$(NC)"
 	@echo "  make deploy-vpc               Deploy VPC stack"
 	@echo "  make deploy-iam               Deploy IAM stack"
-	@echo "  make deploy-storage           Deploy storage stack (FSx, S3)"
+	@echo "  make deploy-storage-s3        Deploy storage S3 stack (~30 sec, no VPC dep)"
+	@echo "  make deploy-storage-fsx       Deploy storage FSx stack (~5 min, needs VPC)"
+	@echo "  make deploy-storage           Wrapper: deploy both storage stacks sequentially"
 	@echo "  make deploy-database          Deploy database stack (RDS)"
 	@echo "  make deploy-cache             Deploy cache stack (ElastiCache)"
 	@echo "  make deploy-compute-alb       Deploy ALB stack"
@@ -301,7 +308,9 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Destruction:$(NC)"
 	@echo "  make destroy-vpc              Delete VPC stack"
 	@echo "  make destroy-iam              Delete IAM stack"
-	@echo "  make destroy-storage          Delete storage stack"
+	@echo "  make destroy-storage-fsx      Delete storage FSx stack (CONFIRMED=yes to skip prompt)"
+	@echo "  make destroy-storage-s3       Delete storage S3 stack (empties buckets first)"
+	@echo "  make destroy-storage          Wrapper: destroy both storage stacks (FSx then S3)"
 	@echo "  make destroy-database         Delete database stack"
 	@echo "  make destroy-cache            Delete cache stack"
 	@echo "  make destroy-compute-php      Delete PHP compute stack"
@@ -387,7 +396,7 @@ validate:  ## Validate all CloudFormation templates + parameter files
 	fi; \
 	printf "$(BLUE)Validating CFN templates + param files... $(NC)"; \
 	TMPFAIL=$$(mktemp); TPL_COUNT=0; PARAM_COUNT=0; \
-	for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
+	for template in $(VPC_TEMPLATE) $(IAM_TEMPLATE) $(STORAGE_S3_TEMPLATE) $(STORAGE_FSX_TEMPLATE) $(DATABASE_TEMPLATE) $(CACHE_TEMPLATE) $(DEPLOY_HOST_TEMPLATE) $(IMAGE_BUILDER_TEMPLATE) $(COMPUTE_ALB_TEMPLATE) $(COMPUTE_NLB_TEMPLATE) $(COMPUTE_NGINX_TEMPLATE) $(COMPUTE_PHP_TEMPLATE); do \
 		if [ -f "$$template" ]; then \
 			TPL_COUNT=$$((TPL_COUNT + 1)); \
 			OUTPUT=$$(cfn-lint -f parseable "$$template" 2>&1); \
@@ -530,7 +539,7 @@ endpoints:  ## Show all key endpoints for ENV (ALB URL, deploy-host SSM, RDS, Va
 status:  ## Show status of all stacks for current environment
 	@echo "$(BLUE)Stack Status for ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
-	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_STACK) $(DATABASE_STACK) $(CACHE_STACK) $(IMAGE_BUILDER_STACK) $(COMPUTE_ALB_STACK) $(COMPUTE_NLB_STACK) $(COMPUTE_NGINX_STACK) $(COMPUTE_PHP_STACK); do \
+	@for stack in $(VPC_STACK) $(IAM_STACK) $(STORAGE_S3_STACK) $(STORAGE_FSX_STACK) $(DATABASE_STACK) $(CACHE_STACK) $(IMAGE_BUILDER_STACK) $(COMPUTE_ALB_STACK) $(COMPUTE_NLB_STACK) $(COMPUTE_NGINX_STACK) $(COMPUTE_PHP_STACK); do \
 		status=$$(aws cloudformation describe-stacks \
 			--stack-name "$$stack" \
 			--region $(AWS_REGION) \
@@ -581,20 +590,38 @@ deploy-iam: validate check-params  ## Deploy IAM stack
 		--no-fail-on-empty-changeset
 	@echo "$(GREEN)✓ IAM stack deployed: $(IAM_STACK)$(NC)"
 
-deploy-storage: validate check-params  ## Deploy storage stack (FSx ~15-20 min)
-	@echo "$(BLUE)Deploying storage stack: $(STORAGE_STACK)$(NC)"
+deploy-storage-s3: validate check-params  ## Deploy storage S3 buckets stack (~30 sec, no VPC dep)
+	@echo "$(BLUE)Deploying storage S3 stack: $(STORAGE_S3_STACK)$(NC)"
 	@time aws cloudformation deploy \
-		--template-file $(STORAGE_TEMPLATE) \
-		--stack-name $(STORAGE_STACK) \
+		--template-file $(STORAGE_S3_TEMPLATE) \
+		--stack-name $(STORAGE_S3_STACK) \
 		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION) \
 		--no-fail-on-empty-changeset \
 	|| { \
 		echo "$(YELLOW)Deploy command returned non-zero, checking stack status...$(NC)"; \
-		$(call cf-wait,stack-create-complete,$(STORAGE_STACK)); \
+		$(call cf-wait,stack-create-complete,$(STORAGE_S3_STACK)); \
 	}
-	@echo "$(GREEN)✓ Storage stack deployed: $(STORAGE_STACK)$(NC)"
+	@echo "$(GREEN)✓ Storage S3 stack deployed: $(STORAGE_S3_STACK)$(NC)"
+
+deploy-storage-fsx: validate check-params  ## Deploy storage FSx OpenZFS stack (~5 min, needs VPC)
+	@echo "$(BLUE)Deploying storage FSx stack: $(STORAGE_FSX_STACK)$(NC)"
+	@time aws cloudformation deploy \
+		--template-file $(STORAGE_FSX_TEMPLATE) \
+		--stack-name $(STORAGE_FSX_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(PARAM_FILE)) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset \
+	|| { \
+		echo "$(YELLOW)Deploy command returned non-zero, checking stack status...$(NC)"; \
+		$(call cf-wait,stack-create-complete,$(STORAGE_FSX_STACK)); \
+	}
+	@echo "$(GREEN)✓ Storage FSx stack deployed: $(STORAGE_FSX_STACK)$(NC)"
+
+deploy-storage: deploy-storage-s3 deploy-storage-fsx  ## Deploy both storage stacks (S3 + FSx) sequentially — wrapper for muscle memory
+	@echo "$(GREEN)✓ Storage stacks deployed (S3 + FSx)$(NC)"
 
 deploy-database: validate check-params  ## Deploy database stack (RDS ~15-20 min)
 	@echo "$(BLUE)Deploying database stack: $(DATABASE_STACK)$(NC)"
@@ -1128,26 +1155,26 @@ verify-iam:  ## Verify IAM deployment
 	@echo ""
 	@echo "$(GREEN)✓ IAM verification complete$(NC)"
 
-verify-storage:  ## Verify storage deployment
-	@echo "$(BLUE)Verifying storage stack: $(STORAGE_STACK)$(NC)"
+verify-storage:  ## Verify storage deployment (both S3 + FSx stacks)
+	@echo "$(BLUE)Verifying storage stacks: $(STORAGE_S3_STACK) + $(STORAGE_FSX_STACK)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
-	@echo "$(CYAN)1. FSx File Systems:$(NC)"
+	@echo "$(CYAN)1. FSx File Systems (from $(STORAGE_FSX_STACK)):$(NC)"
 	@aws fsx describe-file-systems \
-		--query 'FileSystems[?Tags[?Key==`aws:cloudformation:stack-name` && Value==`$(STORAGE_STACK)`]].{FileSystemId:FileSystemId,Type:FileSystemType,Lifecycle:Lifecycle}' \
+		--query 'FileSystems[?Tags[?Key==`aws:cloudformation:stack-name` && Value==`$(STORAGE_FSX_STACK)`]].{FileSystemId:FileSystemId,Type:FileSystemType,Lifecycle:Lifecycle}' \
 		--output table \
 		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Not found$(NC)"
 	@echo ""
-	@echo "$(CYAN)2. S3 Buckets:$(NC)"
+	@echo "$(CYAN)2. S3 Buckets (from $(STORAGE_S3_STACK)):$(NC)"
 	@aws cloudformation describe-stack-resources \
-		--stack-name $(STORAGE_STACK) \
+		--stack-name $(STORAGE_S3_STACK) \
 		--query 'StackResources[?ResourceType==`AWS::S3::Bucket`].{LogicalId:LogicalResourceId,PhysicalId:PhysicalResourceId,Status:ResourceStatus}' \
 		--output table \
 		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
 	@echo ""
-	@echo "$(CYAN)3. All Stack Resources:$(NC)"
+	@echo "$(CYAN)3. FSx stack resources:$(NC)"
 	@aws cloudformation describe-stack-resources \
-		--stack-name $(STORAGE_STACK) \
+		--stack-name $(STORAGE_FSX_STACK) \
 		--query 'StackResources[].{Type:ResourceType,LogicalId:LogicalResourceId,Status:ResourceStatus}' \
 		--output table \
 		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Stack not found$(NC)"
@@ -1229,18 +1256,33 @@ destroy-iam:  ## Delete IAM stack
 	$(call cf-wait,stack-delete-complete,$(IAM_STACK))
 	@echo "$(GREEN)✓ IAM stack deleted: $(IAM_STACK)$(NC)"
 
-destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
+destroy-storage-fsx:  ## Delete storage FSx stack (WARNING: Data loss!)
 	@if [ "$(CONFIRMED)" != "yes" ]; then \
-		echo "$(RED)WARNING: This will delete FSx and S3 with all data!$(NC)"; \
+		echo "$(RED)WARNING: This will delete the FSx file system and ALL data on it!$(NC)"; \
 		read -p "Type 'yes' to confirm: " confirm; \
 		if [ "$$confirm" != "yes" ]; then \
 			echo "Cancelled"; \
 			exit 0; \
 		fi; \
 	fi
-	@echo "$(BLUE)Emptying S3 buckets in stack $(STORAGE_STACK) before deletion...$(NC)"
+	@echo "$(YELLOW)Deleting storage FSx stack: $(STORAGE_FSX_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(STORAGE_FSX_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
+	$(call cf-wait,stack-delete-complete,$(STORAGE_FSX_STACK))
+	@echo "$(GREEN)✓ Storage FSx stack deleted: $(STORAGE_FSX_STACK)$(NC)"
+
+destroy-storage-s3:  ## Delete storage S3 stack (empties buckets first; WARNING: Data loss!)
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(RED)WARNING: This will delete the S3 buckets and all data on them!$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Cancelled"; \
+			exit 0; \
+		fi; \
+	fi
+	@echo "$(BLUE)Emptying S3 buckets in stack $(STORAGE_S3_STACK) before deletion...$(NC)"
 	@BUCKETS=$$(aws cloudformation describe-stack-resources \
-		--stack-name $(STORAGE_STACK) \
+		--stack-name $(STORAGE_S3_STACK) \
 		--region $(AWS_REGION) \
 		--query 'StackResources[?ResourceType==`AWS::S3::Bucket`].PhysicalResourceId' \
 		--output text 2>/dev/null || echo ""); \
@@ -1265,11 +1307,14 @@ destroy-storage:  ## Delete storage stack (WARNING: Data loss!)
 			echo "  $(GREEN)✓ Bucket emptied: $$bucket$(NC)"; \
 		fi; \
 	done
-	@echo "$(YELLOW)Deleting storage stack: $(STORAGE_STACK)$(NC)"
-	@time aws cloudformation delete-stack --stack-name $(STORAGE_STACK) --region $(AWS_REGION)
+	@echo "$(YELLOW)Deleting storage S3 stack: $(STORAGE_S3_STACK)$(NC)"
+	@time aws cloudformation delete-stack --stack-name $(STORAGE_S3_STACK) --region $(AWS_REGION)
 	@echo "$(BLUE)Waiting for deletion to complete...$(NC)"
-	$(call cf-wait,stack-delete-complete,$(STORAGE_STACK))
-	@echo "$(GREEN)✓ Storage stack deleted: $(STORAGE_STACK)$(NC)"
+	$(call cf-wait,stack-delete-complete,$(STORAGE_S3_STACK))
+	@echo "$(GREEN)✓ Storage S3 stack deleted: $(STORAGE_S3_STACK)$(NC)"
+
+destroy-storage: destroy-storage-fsx destroy-storage-s3  ## Delete both storage stacks (FSx then S3) — wrapper for muscle memory
+	@echo "$(GREEN)✓ Both storage stacks deleted$(NC)"
 
 destroy-database:  ## Delete database stack (WARNING: Data loss!)
 	@if [ "$(CONFIRMED)" != "yes" ]; then \
@@ -1867,7 +1912,7 @@ test-peering:  ## Verify deploy host can reach project VPC services (FSx, RDS, V
 	fi; \
 	echo "  $(CYAN)Deploy host: $$INSTANCE_ID$(NC)"; \
 	FSX_DNS=$$(aws cloudformation describe-stacks \
-		--stack-name $(STORAGE_STACK) \
+		--stack-name $(STORAGE_FSX_STACK) \
 		--query 'Stacks[0].Outputs[?OutputKey==`FSxDNSName`].OutputValue' \
 		--output text --region $(AWS_REGION) 2>/dev/null); \
 	RDS_ENDPOINT=$$(aws cloudformation describe-stacks \
