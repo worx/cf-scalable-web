@@ -230,7 +230,33 @@ nothing to do with the tunnel. Use the IP.
 
 ### 6. Run pgloader: MySQL (localhost via tunnel) → PostgreSQL (sandbox RDS) (~depends on DB size)
 
-In the second deploy-host shell:
+**Prerequisite — `drupal_user` must exist in PostgreSQL first.** The
+sandbox RDS instance is created with a *master* user (`dbadmin`) by
+CloudFormation, but the application user (`drupal_user`) that pgloader
+connects as is created later, by `install-drupal.sh`. If you haven't
+run `install-drupal-remote` against this sandbox yet, pgloader will
+fail at the connection step with "password authentication failed for
+user drupal_user."
+
+Quickest fix — bootstrap PostgreSQL and `settings.php`/`salt.txt` by
+running a one-shot Drupal install:
+
+```bash
+# From your Mac, in the cf-scalable-drupal repo:
+make install-drupal-remote ENV=sandbox
+# ~5 min. Creates drupal_user in PG, drops a fresh Drupal 11 install
+# onto FSx. The fresh install's schema/data are exactly what pgloader's
+# `include drop` clause will discard in the next step — so this is
+# wasted work in that sense, but the drupal_user + settings.php +
+# salt.txt it creates are what we need to keep.
+```
+
+(There isn't a dedicated "create the DB user only" make target. If
+this prep is something we end up doing repeatedly, we'd split it out.
+For one-off migration work, the install-drupal-remote shortcut is the
+path of least resistance.)
+
+Then in the second deploy-host shell:
 
 ```bash
 # Pull sandbox PG connection details from the env file
