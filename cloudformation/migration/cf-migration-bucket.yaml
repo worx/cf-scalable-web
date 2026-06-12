@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Migration S3 Bucket
+#
+# Purpose: One dedicated S3 bucket in the SANDBOX account that the prod
+#          migration jumpbox (in account 978068244875) is allowed to
+#          PutObject and ListBucket against. Used to ferry:
+#            - MySQL database dumps from prod
+#            - Drupal codebase tarballs from prod
+#          across to the sandbox account where pgloader + Drupal install
+#          tooling live.
+#
+#          Bucket lifecycle: temporary, destroy when migration complete.
+#
+# Deploy:  make deploy-migration-bucket   (ZI-Sandbox profile)
+# Destroy: make destroy-migration-bucket  (ZI-Sandbox profile)
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Migration S3 bucket — cross-account writes from prod jumpbox'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (used in bucket naming)
+    Default: sandbox
+
+  BucketSuffix:
+    Type: String
+    Description: Unique suffix for the bucket name (global uniqueness)
+    AllowedPattern: '^[a-z0-9-]{4,12}$'
+    Default: kv-worxco
+
+  ProdAccountId:
+    Type: String
+    Description: AWS account ID of the prod account whose jumpbox writes here
+    AllowedPattern: '^[0-9]{12}$'
+    Default: '978068244875'
+
+  JumpboxRoleNamePattern:
+    Type: String
+    Description: >
+      ARN pattern of prod IAM roles allowed to write. Used in a
+      StringLike condition on aws:PrincipalArn so only the migration
+      jumpbox role can write — not any role in the prod account.
+    Default: 'arn:aws:iam::978068244875:role/cf-migration-jumpbox-*'
+
+Resources:
+  MigrationBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${EnvironmentName}-migration-${BucketSuffix}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireMigrationArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+          - Id: AbortIncompleteMultipartUpload
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-migration-${BucketSuffix}'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: Cross-account migration ferry - temporary
+
+  # Cross-account bucket policy. Allows write+list from the prod account,
+  # but ONLY when the calling principal's ARN matches the jumpbox role
+  # pattern. Prevents any other role in the prod account from writing
+  # even if it had S3 permissions in its own IAM policy.
+  MigrationBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MigrationBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowProdJumpboxWrite
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ProdAccountId}:root'
+            Action:
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:DeleteObject'
+            Resource:
+              - !GetAtt MigrationBucket.Arn
+              - !Sub '${MigrationBucket.Arn}/*'
+            Condition:
+              StringLike:
+                'aws:PrincipalArn': !Ref JumpboxRoleNamePattern
+
+Outputs:
+  MigrationBucketName:
+    Description: Name of the migration bucket
+    Value: !Ref MigrationBucket
+    Export:
+      Name: !Sub '${EnvironmentName}-migration-bucket-name'
+
+  MigrationBucketArn:
+    Description: ARN of the migration bucket (pass to jumpbox template)
+    Value: !GetAtt MigrationBucket.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-migration-bucket-arn'
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

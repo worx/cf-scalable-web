@@ -1,0 +1,8 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "BucketSuffix": "kv-worxco",
+    "ProdAccountId": "978068244875",
+    "JumpboxRoleNamePattern": "arn:aws:iam::978068244875:role/cf-migration-jumpbox-*"
+  }
+}
