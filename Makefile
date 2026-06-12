@@ -36,7 +36,8 @@ export
         update-ami-param \
         deploy-migration-bucket destroy-migration-bucket \
         deploy-migration-jumpbox destroy-migration-jumpbox \
-        ssm-migration-jumpbox migration-jumpbox-pubkey \
+        ssm-migration-jumpbox ssm-migration-tunnel migration-jumpbox-pubkey \
+        .migration-preflight \
         init-secrets list-secrets test clean consolidate-logs \
         ssm-report ssm-remediate ssm-audit-params
 
@@ -376,7 +377,8 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Prod → Sandbox Migration (one-time cross-account ferry — docs/MIGRATION.md):$(NC)"
 	@echo "  make deploy-migration-bucket     S3 bucket in SANDBOX (ZI-Sandbox profile)"
 	@echo "  make deploy-migration-jumpbox    EC2 in PROD (ZoningInfoAdmin profile)"
-	@echo "  make ssm-migration-jumpbox       Open SSM shell on the prod jumpbox"
+	@echo "  make ssm-migration-jumpbox       Open SSM interactive shell on the prod jumpbox"
+	@echo "  make ssm-migration-tunnel        Open SSM port-forward (localhost → prod RDS) — blocks"
 	@echo "  make migration-jumpbox-pubkey    Show jumpbox SSH pubkey (paste into React2)"
 	@echo "  make destroy-migration-jumpbox   Tear down prod EC2 (CONFIRMED=yes)"
 	@echo "  make destroy-migration-bucket    Tear down sandbox bucket (CONFIRMED=yes)"
@@ -2744,6 +2746,14 @@ MIGRATION_BUCKET_STACK := cf-scalable-web-sandbox-migration-bucket
 MIGRATION_BUCKET_TEMPLATE := cloudformation/migration/cf-migration-bucket.yaml
 MIGRATION_BUCKET_PARAMS := cloudformation/parameters/migration-bucket-sandbox.json
 
+# Source endpoints for the SSM port-forwarding tunnel. Override on the
+# command line if migrating from a different prod cluster or to a
+# different local port (e.g., if 3306 is already in use):
+#   make ssm-migration-tunnel MIGRATION_LOCAL_PORT=3307
+MIGRATION_SOURCE_HOST := d8demo-cluster.cluster-cmbywichztfj.us-east-1.rds.amazonaws.com
+MIGRATION_SOURCE_PORT := 3306
+MIGRATION_LOCAL_PORT := 3306
+
 MIGRATION_JUMPBOX_STACK := cf-migration-jumpbox
 MIGRATION_JUMPBOX_TEMPLATE := cloudformation/migration/cf-migration-jumpbox.yaml
 MIGRATION_JUMPBOX_PARAMS := cloudformation/parameters/migration-jumpbox.json
@@ -2819,16 +2829,60 @@ destroy-migration-jumpbox:  ## Delete the jumpbox (PROD). CONFIRMED=yes to skip 
 		--stack-name $(MIGRATION_JUMPBOX_STACK) --region $(AWS_REGION)
 	@echo "$(GREEN)✓ Migration jumpbox deleted$(NC)"
 
-ssm-migration-jumpbox:  ## Open an SSM Session Manager shell on the prod jumpbox
+# Internal: diagnostic pre-flight for any target that needs to start an
+# SSM session against the prod jumpbox. Distinguishes between the three
+# real failure modes (missing plugin, missing/invalid profile, missing
+# stack) instead of swallowing all of them as "jumpbox not deployed."
+.migration-preflight:
+	@command -v session-manager-plugin >/dev/null 2>&1 || { \
+		echo "$(RED)session-manager-plugin not installed.$(NC)"; \
+		echo "$(YELLOW)On the deploy-host (Ubuntu ARM64):$(NC)"; \
+		echo "  sudo curl -sSL \"https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb\" -o /tmp/smp.deb"; \
+		echo "  sudo dpkg -i /tmp/smp.deb && rm /tmp/smp.deb"; \
+		echo "$(YELLOW)On macOS:$(NC)"; \
+		echo "  brew install --cask session-manager-plugin"; \
+		exit 1; \
+	}
+	@aws --profile ZoningInfoAdmin sts get-caller-identity --query Account --output text >/dev/null 2>&1 || { \
+		echo "$(RED)ZoningInfoAdmin profile not configured (or credentials invalid/expired).$(NC)"; \
+		echo "$(YELLOW)Set up per docs/MIGRATION.md step 4 — copy the [ZoningInfoAdmin] block from$(NC)"; \
+		echo "$(YELLOW)your ~/.aws/config and ~/.aws/credentials onto the host running 'make'.$(NC)"; \
+		exit 1; \
+	}
+
+ssm-migration-jumpbox: .migration-preflight  ## Open an SSM Session Manager interactive shell on the prod jumpbox
 	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
 		--stack-name $(MIGRATION_JUMPBOX_STACK) \
 		--query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
-		--output text --region $(AWS_REGION) 2>/dev/null); \
-	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
-		echo "$(RED)Migration jumpbox not deployed. Run: make deploy-migration-jumpbox$(NC)"; exit 1; \
+		--output text --region $(AWS_REGION) 2>&1); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ] || echo "$$INSTANCE_ID" | grep -q "does not exist"; then \
+		echo "$(RED)Migration jumpbox stack not found in prod.$(NC)"; \
+		echo "$(YELLOW)Run from your Mac: make deploy-migration-jumpbox$(NC)"; \
+		exit 1; \
 	fi; \
 	echo "$(BLUE)Opening SSM session to jumpbox $$INSTANCE_ID (prod)...$(NC)"; \
 	aws --profile ZoningInfoAdmin ssm start-session --target $$INSTANCE_ID --region $(AWS_REGION)
+
+ssm-migration-tunnel: .migration-preflight  ## Open SSM port-forward: localhost:$(MIGRATION_LOCAL_PORT) → prod RDS via jumpbox (blocks)
+	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
+		--stack-name $(MIGRATION_JUMPBOX_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>&1); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ] || echo "$$INSTANCE_ID" | grep -q "does not exist"; then \
+		echo "$(RED)Migration jumpbox stack not found in prod.$(NC)"; \
+		echo "$(YELLOW)Run from your Mac: make deploy-migration-jumpbox$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(BLUE)Opening SSM port-forwarding tunnel:$(NC)"; \
+	echo "  $(CYAN)localhost:$(MIGRATION_LOCAL_PORT)$(NC)  ──tunnel──▶  $(CYAN)$(MIGRATION_SOURCE_HOST):$(MIGRATION_SOURCE_PORT)$(NC)"; \
+	echo "  via jumpbox $$INSTANCE_ID (prod)"; \
+	echo "$(CYAN)This command BLOCKS. Use Ctrl-C to close the tunnel.$(NC)"; \
+	echo "$(CYAN)Open a second shell on this host to run pgloader against localhost:$(MIGRATION_LOCAL_PORT).$(NC)"; \
+	aws --profile ZoningInfoAdmin ssm start-session \
+		--target "$$INSTANCE_ID" \
+		--document-name AWS-StartPortForwardingSessionToRemoteHost \
+		--parameters host=$(MIGRATION_SOURCE_HOST),portNumber=$(MIGRATION_SOURCE_PORT),localPortNumber=$(MIGRATION_LOCAL_PORT) \
+		--region $(AWS_REGION)
 
 migration-jumpbox-pubkey:  ## Display the jumpbox's ed25519 pubkey (paste into React2's authorized_keys)
 	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
