@@ -211,13 +211,22 @@ sessions don't share state but they share the host.
 Verify the tunnel works (from a second deploy-host shell):
 
 ```bash
-mysql -h localhost -P 3306 -u worxco -p -e "SHOW DATABASES;" zinew
-# Same DB list as if you ran it on the jumpbox in step 3.
+# IMPORTANT: use 127.0.0.1, NOT localhost. The mysql CLI treats "localhost"
+# as a special token meaning "skip TCP, use UNIX domain socket" — which
+# fails with ERROR 2002 (HY000) "Can't connect to local MySQL server
+# through socket /var/run/mysqld/mysqld.sock" regardless of whether the
+# tunnel is up. Use the IP literal to force TCP.
+mysql -h 127.0.0.1 -P 3306 -u worxco -p -e "SHOW DATABASES;" zinew
+# Should print the same DB list as if you ran it on the jumpbox in step 3.
 ```
 
-If you get "ERROR 2003 Can't connect to MySQL server on 'localhost'" —
-the tunnel isn't established. Check the first shell for the
+If you get "ERROR 2003 Can't connect to MySQL server on '127.0.0.1'" —
+the tunnel isn't actually established. Check the first shell for the
 "Waiting for connections..." line; if the SSM session died, restart it.
+
+If you get "ERROR 2002 ... socket /var/run/mysqld/mysqld.sock" — you
+typed `localhost` instead of `127.0.0.1`. Same error every time, has
+nothing to do with the tunnel. Use the IP.
 
 ### 6. Run pgloader: MySQL (localhost via tunnel) → PostgreSQL (sandbox RDS) (~depends on DB size)
 
@@ -239,7 +248,7 @@ read -s -p "Prod MySQL password for user 'worxco': " PROD_PW
 echo
 cat > /tmp/zinew.load <<EOF
 LOAD DATABASE
-  FROM      mysql://worxco:${PROD_PW}@localhost:3306/zinew
+  FROM      mysql://worxco:${PROD_PW}@127.0.0.1:3306/zinew
   INTO      postgresql://${DRUPAL_DB_USER}:${DRUPAL_DB_PASS}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}
 
 WITH include drop, create tables, create indexes, reset sequences, foreign keys,
@@ -372,6 +381,13 @@ sed -i '/root@cf-migration-jumpbox/d' /home/ubuntu/.ssh/authorized_keys
   `--from-encoding utf8mb4` or specifying the collation in the load
   file's `WITH` clause. Inspect `/tmp/zinew-pgloader.log` after the
   first run.
+- **`localhost` vs `127.0.0.1`.** The MySQL command-line client
+  treats `-h localhost` as "use the UNIX socket at
+  `/var/run/mysqld/mysqld.sock`" regardless of TCP listeners. With
+  no local mysqld running, that fails with ERROR 2002 every time.
+  Always use the IP literal (`127.0.0.1`) for the MySQL CLI when
+  hitting the tunnel. pgloader URLs are TCP-by-default but we use
+  the IP there too for consistency.
 - **Password in the load file.** It's there for the duration of the
   pgloader run only. `chmod 600` immediately after writing it,
   `shred -u` immediately after the run. Don't `cat /tmp/zinew.load`
