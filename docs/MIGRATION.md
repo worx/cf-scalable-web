@@ -246,10 +246,18 @@ source /etc/worxco/envs/sandbox     # provides DRUPAL_DB_HOST, _PORT, _NAME, _US
 # after the run.
 read -s -p "Prod MySQL password for user 'worxco': " PROD_PW
 echo
+# URL-encode the password — required if it contains any URL-reserved chars
+# (* $ @ / # ? % & + ' " etc). RFC 3986 allows some of these in userinfo
+# unencoded, but pgloader's URL parser is happier with everything escaped.
+# Same for any DRUPAL_DB_PASS containing special chars (the SSM-sourced
+# value from /etc/worxco/envs/sandbox might have any of these).
+PROD_PW_ENC=$(printf '%s' "$PROD_PW" | jq -sRr @uri)
+SANDBOX_PW_ENC=$(printf '%s' "$DRUPAL_DB_PASS" | jq -sRr @uri)
+
 cat > /tmp/zinew.load <<EOF
 LOAD DATABASE
-  FROM      mysql://worxco:${PROD_PW}@127.0.0.1:3306/zinew
-  INTO      postgresql://${DRUPAL_DB_USER}:${DRUPAL_DB_PASS}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}
+  FROM      mysql://worxco:${PROD_PW_ENC}@127.0.0.1:3306/zinew
+  INTO      postgresql://${DRUPAL_DB_USER}:${SANDBOX_PW_ENC}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}
 
 WITH include drop, create tables, create indexes, reset sequences, foreign keys,
      downcase identifiers, batch rows = 1000, prefetch rows = 1000
@@ -266,8 +274,9 @@ unset PROD_PW
 # Run it
 pgloader /tmp/zinew.load 2>&1 | tee /tmp/zinew-pgloader.log
 
-# Cleanup the password file IMMEDIATELY after the run completes
+# Cleanup the password file + shell variables IMMEDIATELY after the run
 shred -u /tmp/zinew.load
+unset PROD_PW_ENC SANDBOX_PW_ENC
 ```
 
 pgloader prints a summary at the end: tables read, rows loaded,
@@ -388,6 +397,13 @@ sed -i '/root@cf-migration-jumpbox/d' /home/ubuntu/.ssh/authorized_keys
   Always use the IP literal (`127.0.0.1`) for the MySQL CLI when
   hitting the tunnel. pgloader URLs are TCP-by-default but we use
   the IP there too for consistency.
+- **URL-encode passwords.** RFC 3986 allows `* $ ! ' ( )` in URL
+  userinfo unencoded, but pgloader's URL parser is more reliable
+  when everything is percent-encoded. The runbook uses `jq -sRr @uri`
+  to encode both the prod MySQL password and the sandbox PostgreSQL
+  password before they go into the load file. Skipping this step
+  produces obscure connection errors for passwords containing
+  `@ / # ? &` and is a real time-sink to diagnose otherwise.
 - **Password in the load file.** It's there for the duration of the
   pgloader run only. `chmod 600` immediately after writing it,
   `shred -u` immediately after the run. Don't `cat /tmp/zinew.load`
