@@ -1,9 +1,0 @@
-{
-  "Parameters": {
-    "KeyPairName": "WorxZoning",
-    "SubnetId": "subnet-85e938dc",
-    "VpcId": "vpc-7fbd291a",
-    "InstanceType": "t4g.micro",
-    "MigrationBucketArn": "arn:aws:s3:::sandbox-migration-kv-worxco"
-  }
-}

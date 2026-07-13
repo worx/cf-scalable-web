@@ -1,0 +1,371 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Migration Jumpbox (Prod Account)
+#
+# Purpose: One small EC2 instance in the prod account, serving as a
+#          conduit for one-time Drupal migration work:
+#            1. mysqldump from d8demo-cluster → pipe to S3 (cross-account
+#               to the sandbox migration bucket)
+#            2. rsync from React2 (prod Drupal server) → pipe to S3
+#          Authenticated to AWS via SSM Session Manager — no inbound
+#          SSH from the world, just the AWS-managed control channel.
+#
+# Why placement in subnet-85e938dc:
+#   - same subnet as React2 → free SSH (React2's WebSSH SG already
+#     allows ALL traffic from 172.31.16.0/20)
+#   - inside vpc-7fbd291a → free MySQL access to d8demo-cluster
+#     (cluster SG allows 3306 from 172.31.0.0/16)
+#   - public subnet with IGW → SSM Agent can phone home without NAT
+#
+# Lifecycle: temporary. Destroy when migration testing is done.
+#
+# Deploy:  make deploy-migration-jumpbox   [FROM: Mac|deploy-host, PROFILE: ZoningInfoAdmin]
+# SSH in:  make ssm-migration-jumpbox      [FROM: Mac|deploy-host, PROFILE: ZoningInfoAdmin]
+# Destroy: make destroy-migration-jumpbox  [FROM: Mac|deploy-host, PROFILE: ZoningInfoAdmin]
+#
+# Prerequisite: deploy the sandbox migration bucket FIRST and pass its
+# ARN as MigrationBucketArn. The jumpbox role grants are scoped to that
+# specific bucket; without the bucket existing, the role still creates,
+# but PutObject would fail at runtime.
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Migration jumpbox — SSM-only EC2 in prod for one-time data ferry'
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair name (for emergency direct SSH if SSM ever fails)
+    Default: WorxZoning
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet to launch the jumpbox in (must be in default VPC)
+    Default: subnet-85e938dc
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC the jumpbox lives in (must contain the subnet above)
+    Default: vpc-7fbd291a
+
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t4g.micro
+    AllowedValues:
+      - t4g.nano
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: >-
+      Ubuntu 24.04 ARM64 AMI, resolved dynamically from Canonical's
+      published SSM parameter. Whenever AWS publishes a newer AMI,
+      subsequent `make deploy-jumpbox` runs will replace the instance
+      with the newer image.
+
+      That replacement WILL destroy the running instance — but the
+      UserData auto-restore block (this same file, below in the
+      Instance resource) pulls the latest jumpbox state backup from
+      s3://<bucket>/config/jumpbox-latest.tar.gz, so SSH keys, /etc/,
+      and other operator-managed content survive the churn.
+
+      Nightly EventBridge backups keep the S3 latest pointer fresh, so
+      the state gap on replacement is at most 24 hours.
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+
+  MigrationBucketArn:
+    Type: String
+    Description: ARN of the sandbox migration bucket the jumpbox writes to
+    AllowedPattern: '^arn:aws:s3:::[a-z0-9.-]+$'
+    Default: 'arn:aws:s3:::sandbox-migration-kv-worxco'
+
+  MigrationBucketName:
+    Type: String
+    Description: >-
+      Bucket name of the sandbox migration bucket (bare name, no arn:
+      prefix). Used by UserData for auto-restore and by EventBridge
+      Scheduler for the nightly backup.
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Default: 'sandbox-migration-kv-worxco'
+
+  MigrationSecretArn:
+    Type: String
+    Description: >-
+      ARN of the Secrets Manager secret holding prod DB credentials
+      (from cf-migration-secret stack). Jumpbox IAM role gets
+      GetSecretValue scoped to this ARN only.
+    AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
+
+Resources:
+  # ========================================
+  # IAM role + instance profile
+  # ========================================
+  JumpboxRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cf-migration-jumpbox-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CrossAccountMigrationBucketWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteAndReadMigrationBucket
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Ref MigrationBucketArn
+                  - !Sub '${MigrationBucketArn}/*'
+        # Scoped to just the migration secret's ARN, not the whole
+        # Secrets Manager. Any other role or secret in the prod
+        # account is unaffected.
+        - PolicyName: ReadMigrationSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GetMigrationSecretValue
+                Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                Resource: !Ref MigrationSecretArn
+      Tags:
+        - Key: Name
+          Value: cf-migration-jumpbox-role
+        - Key: Purpose
+          Value: Cross-account migration ferry - temporary
+
+  JumpboxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: cf-migration-jumpbox-instance-profile
+      Roles:
+        - !Ref JumpboxRole
+
+  # ========================================
+  # Security group (zero inbound rules)
+  # ========================================
+  JumpboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: cf-migration-jumpbox-sg
+      GroupDescription: Jumpbox - outbound only (SSM, S3, RDS, SSH to React2)
+      VpcId: !Ref VpcId
+      # No SecurityGroupIngress — zero listening surface from the outside.
+      # SSM Session Manager works via outbound TLS, no inbound needed.
+      Tags:
+        - Key: Name
+          Value: cf-migration-jumpbox-sg
+
+  # ========================================
+  # The jumpbox instance itself
+  # ========================================
+  Jumpbox:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref JumpboxInstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref JumpboxSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            DeleteOnTermination: true
+      # UserData is evaluated at INSTANCE LAUNCH. If the CFN stack is
+      # updated while the instance is running, this content is stored
+      # on the instance metadata but NOT re-executed. So the auto-restore
+      # block below only fires on a NEW instance (deploy from scratch or
+      # instance replacement). That's the intended behavior.
+      #
+      # Fn::Sub is used so we can inject the bucket name from a parameter.
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -euxo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            # ---- Tool install (unchanged) ----
+            apt-get update
+            apt-get upgrade -y
+            apt-get install -y \
+              mysql-client-core-8.0 \
+              pigz \
+              rsync \
+              unzip \
+              jq
+
+            # AWS CLI v2 (Ubuntu's awscli package is v1; we want v2)
+            curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            /tmp/aws/install
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+
+            # ---- Auto-restore prior state from sandbox S3, if available ----
+            # This is what makes AMI-driven instance replacement painless:
+            # a new instance boots, checks for a prior jumpbox state
+            # backup, and if one exists, pulls the operator-managed files
+            # (SSH keys, .env, /etc/worxco) back into place. If nothing
+            # exists in S3 (fresh migration, or operator explicitly
+            # deleted the latest pointer), this block quietly no-ops.
+            BUCKET_NAME="${MigrationBucketName}"
+            LATEST_KEY="config/jumpbox-latest.tar.gz"
+
+            if aws s3api head-object \
+                 --bucket "$BUCKET_NAME" --key "$LATEST_KEY" >/dev/null 2>&1; then
+              echo "Prior jumpbox state found in S3 — running restore-state.sh"
+              mkdir -p /opt/migration/scripts/jumpbox
+              # Pull the ACTUAL restore-state.sh (not a copy embedded here)
+              # so we always use whatever's current in S3 — same script the
+              # operator uses via `make restore-jumpbox`.
+              aws s3 cp "s3://$BUCKET_NAME/scripts/_common.sh" \
+                        /opt/migration/scripts/_common.sh --quiet
+              aws s3 cp "s3://$BUCKET_NAME/scripts/jumpbox/restore-state.sh" \
+                        /opt/migration/scripts/jumpbox/restore-state.sh --quiet
+              chmod +x /opt/migration/scripts/jumpbox/restore-state.sh
+              # CONFIRMED=yes — UserData is non-interactive
+              CONFIRMED=yes MIGRATION_BUCKET="$BUCKET_NAME" \
+                /opt/migration/scripts/jumpbox/restore-state.sh \
+                || echo "restore-state.sh exited non-zero — proceeding without restore"
+            else
+              echo "No prior jumpbox state found in S3 — this is a fresh instance."
+            fi
+
+            # ---- Ready marker (used by operator scripts) ----
+            touch /etc/migration-jumpbox-ready
+      Tags:
+        - Key: Name
+          Value: cf-migration-jumpbox
+        - Key: Purpose
+          Value: Cross-account Drupal migration ferry - TEMPORARY
+
+  # ========================================
+  # EventBridge Scheduler — nightly state backup
+  # ========================================
+  # Uses AWS::Scheduler::Schedule (the newer service, launched Nov 2022)
+  # rather than AWS::Events::Rule (the classic one) because Scheduler
+  # supports IANA timezones directly. Cron fires at 02:00 America/Chicago
+  # year-round with automatic DST handling.
+  #
+  # The scheduler assumes SchedulerExecutionRole, then calls ssm:SendCommand
+  # to push the backup-state.sh workflow onto the jumpbox — same pattern
+  # as `make backup-jumpbox` from the operator side.
+  #
+  # Prerequisites for the scheduled backup to succeed:
+  #   1. This stack must be deployed (creates the schedule)
+  #   2. scripts/_common.sh and scripts/jumpbox/backup-state.sh must
+  #      exist in s3://<bucket>/scripts/ (uploaded automatically the
+  #      first time an operator runs `make backup-jumpbox`)
+  # First-time bootstrap: run `make backup-jumpbox` once after deploying.
+
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cf-migration-jumpbox-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendCommandToJumpbox
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  # Scope tightly: only THIS jumpbox instance, only the
+                  # AWS-RunShellScript document.
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Jumpbox}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript'
+      Tags:
+        - Key: Name
+          Value: cf-migration-jumpbox-scheduler-role
+        - Key: Purpose
+          Value: Cross-account Drupal migration - temporary
+
+  NightlyBackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: cf-migration-jumpbox-nightly-backup
+      Description: >-
+        Nightly backup of jumpbox operator-managed state to sandbox S3.
+        Fires at 02:00 America/Chicago (2 AM Central time, DST-aware).
+      ScheduleExpression: cron(0 2 * * ? *)
+      ScheduleExpressionTimezone: America/Chicago
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        # Universal target: invoke any AWS API call. Here: ssm:SendCommand.
+        Arn: 'arn:aws:scheduler:::aws-sdk:ssm:sendCommand'
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        # The Input JSON matches the SSM SendCommand API request shape.
+        # Note: dash (default SSM shell) so `set -eu` (no pipefail).
+        Input: !Sub |
+          {
+            "DocumentName": "AWS-RunShellScript",
+            "InstanceIds": ["${Jumpbox}"],
+            "TimeoutSeconds": 600,
+            "Parameters": {
+              "commands": [
+                "set -eu",
+                "mkdir -p /opt/migration/scripts/jumpbox",
+                "aws s3 cp \"s3://${MigrationBucketName}/scripts/_common.sh\" /opt/migration/scripts/_common.sh --quiet",
+                "aws s3 cp \"s3://${MigrationBucketName}/scripts/jumpbox/backup-state.sh\" /opt/migration/scripts/jumpbox/backup-state.sh --quiet",
+                "chmod +x /opt/migration/scripts/jumpbox/backup-state.sh",
+                "CONFIRMED=yes MIGRATION_BUCKET=${MigrationBucketName} /opt/migration/scripts/jumpbox/backup-state.sh"
+              ]
+            }
+          }
+
+Outputs:
+  JumpboxInstanceId:
+    Description: Instance ID — use this for `aws ssm start-session --target ...`
+    Value: !Ref Jumpbox
+
+  JumpboxPrivateIp:
+    Description: Private IP inside vpc-7fbd291a
+    Value: !GetAtt Jumpbox.PrivateIp
+
+  JumpboxRoleArn:
+    Description: IAM role ARN (must match sandbox bucket policy's allowed pattern)
+    Value: !GetAtt JumpboxRole.Arn
+
+  SSMStartCommand:
+    Description: Command to start an SSM session to this jumpbox
+    Value: !Sub 'aws --profile ZoningInfoAdmin ssm start-session --target ${Jumpbox}'
+
+  ScheduledBackupName:
+    Description: EventBridge Scheduler name (fires nightly at 02:00 America/Chicago)
+    Value: !Ref NightlyBackupSchedule
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>

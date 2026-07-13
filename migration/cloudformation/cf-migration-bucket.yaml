@@ -15,8 +15,8 @@
 #
 #          Bucket lifecycle: temporary, destroy when migration complete.
 #
-# Deploy:  make deploy-migration-bucket   (ZI-Sandbox profile)
-# Destroy: make destroy-migration-bucket  (ZI-Sandbox profile)
+# Deploy:  make deploy-migration-bucket   [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+# Destroy: make destroy-migration-bucket  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 #
 
 AWSTemplateFormatVersion: '2010-09-09'
@@ -62,11 +62,54 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      # Prefix-scoped retention. The old rule expired ALL objects at
+      # 30 days indiscriminately — problem for config/jumpbox-latest.tar.gz
+      # which we want to keep indefinitely as the auto-restore source.
+      #
+      # Prefix layout in this bucket:
+      #   dumps/                          data ferry (mysqldumps, tarballs)
+      #   logs/                           script execution logs
+      #   scripts/                        scripts pushed for SSM send-command runs
+      #   config/jumpbox-archive/         timestamped jumpbox state backups
+      #   config/jumpbox-latest.tar.gz    latest jumpbox state (auto-restore source)
       LifecycleConfiguration:
         Rules:
-          - Id: ExpireMigrationArtifacts
+          # Migration data ferry — 30 days is plenty of runway to complete
+          # a client migration end-to-end.
+          - Id: ExpireDumps
             Status: Enabled
+            Prefix: dumps/
             ExpirationInDays: 30
+
+          # Script execution logs — keep enough for post-mortem on any run.
+          - Id: ExpireLogs
+            Status: Enabled
+            Prefix: logs/
+            ExpirationInDays: 30
+
+          # Scripts uploaded during SSM orchestration.
+          # NO EXPIRATION — the nightly EventBridge Scheduler and
+          # UserData auto-restore both read these scripts from S3
+          # WITHOUT running a make target. Expiring them would cause
+          # silent failures for those automated triggers.
+          # Scripts are overwritten in place on every `make X`, so
+          # there's no version accumulation. `make destroy-bucket`
+          # handles final cleanup.
+
+          # Timestamped jumpbox state backups — 90 days of history for
+          # rollback / audit. The latest pointer is kept separately below.
+          - Id: ExpireArchivedJumpboxState
+            Status: Enabled
+            Prefix: config/jumpbox-archive/
+            ExpirationInDays: 90
+
+          # NOTE: config/jumpbox-latest.tar.gz has NO expiration rule.
+          # S3 lifecycle only expires objects matching a rule prefix, so
+          # a single object at the top of the config/ prefix (not under
+          # config/jumpbox-archive/) is untouched by any rule above.
+
+          # Cancel and clean up incomplete multipart uploads after 1 day.
+          # These can accumulate from failed streaming uploads.
           - Id: AbortIncompleteMultipartUpload
             Status: Enabled
             AbortIncompleteMultipartUpload:

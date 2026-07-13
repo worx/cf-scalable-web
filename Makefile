@@ -18,6 +18,10 @@
 -include .env
 export
 
+# Migration workflow lives in its own subdirectory (`migration/`) with a
+# standalone Makefile. Run `cd migration && make help` to see targets, or
+# delete the entire folder when the client migration is complete.
+
 .PHONY: help env-check validate show-params status \
         deploy-all deploy-vpc deploy-iam deploy-storage deploy-storage-s3 deploy-storage-fsx deploy-database deploy-cache \
         deploy-compute deploy-compute-alb deploy-compute-nlb deploy-compute-nginx deploy-compute-php \
@@ -34,10 +38,6 @@ export
         find-default-subnet upload-build-configs \
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
-        deploy-migration-bucket destroy-migration-bucket \
-        deploy-migration-jumpbox destroy-migration-jumpbox \
-        ssm-migration-jumpbox ssm-migration-tunnel migration-jumpbox-pubkey \
-        .migration-preflight \
         init-secrets list-secrets test clean consolidate-logs \
         ssm-report ssm-remediate ssm-audit-params
 
@@ -374,14 +374,9 @@ help:  ## Show this help message
 	@echo "  make ssm-report               Report instances missing from SSM"
 	@echo "  make ssm-remediate            Remediate SSM Agent (SSM_SSH_KEY required)"
 	@echo ""
-	@echo "$(YELLOW)Prod → Sandbox Migration (one-time cross-account ferry — docs/MIGRATION.md):$(NC)"
-	@echo "  make deploy-migration-bucket     S3 bucket in SANDBOX (ZI-Sandbox profile)"
-	@echo "  make deploy-migration-jumpbox    EC2 in PROD (ZoningInfoAdmin profile)"
-	@echo "  make ssm-migration-jumpbox       Open SSM interactive shell on the prod jumpbox"
-	@echo "  make ssm-migration-tunnel        Open SSM port-forward (localhost → prod RDS) — blocks"
-	@echo "  make migration-jumpbox-pubkey    Show jumpbox SSH pubkey (paste into React2)"
-	@echo "  make destroy-migration-jumpbox   Tear down prod EC2 (CONFIRMED=yes)"
-	@echo "  make destroy-migration-bucket    Tear down sandbox bucket (CONFIRMED=yes)"
+	@echo "$(YELLOW)Prod → Sandbox Migration (one-time client workflow):$(NC)"
+	@echo "  $(CYAN)cd migration && make help$(NC)      — enter the migration subfolder for its targets"
+	@echo "  $(CYAN)rm -rf migration/$(NC)              — delete when the migration is complete"
 	@echo ""
 	@echo "$(YELLOW)Testing & Maintenance:$(NC)"
 	@echo "  make test                     Run test suite"
@@ -2729,180 +2724,6 @@ ssm-remediate:  ## Attach IAM profile + install SSM Agent via SSH (SSM_SSH_KEY r
 		--ssh-key $(SSM_SSH_KEY) \
 		remediate
 
-# -----------------------------------------------------------------------------
-# Migration (prod → sandbox Drupal data + codebase migration)
-#
-# Two-stack pattern, two AWS accounts:
-#   - cf-migration-bucket    deployed to SANDBOX (--profile ZI-Sandbox)
-#   - cf-migration-jumpbox   deployed to PROD (--profile ZoningInfoAdmin)
-# These are EXPLICITLY scoped to the right profile via --profile flags in
-# every command so there's no chance of accidentally deploying the prod
-# jumpbox into sandbox or vice versa.
-#
-# Operator runbook: docs/MIGRATION.md
-# -----------------------------------------------------------------------------
-
-MIGRATION_BUCKET_STACK := cf-scalable-web-sandbox-migration-bucket
-MIGRATION_BUCKET_TEMPLATE := cloudformation/migration/cf-migration-bucket.yaml
-MIGRATION_BUCKET_PARAMS := cloudformation/parameters/migration-bucket-sandbox.json
-
-# Source endpoints for the SSM port-forwarding tunnel. Override on the
-# command line if migrating from a different prod cluster or to a
-# different local port (e.g., if 3306 is already in use):
-#   make ssm-migration-tunnel MIGRATION_LOCAL_PORT=3307
-MIGRATION_SOURCE_HOST := d8demo-cluster.cluster-cmbywichztfj.us-east-1.rds.amazonaws.com
-MIGRATION_SOURCE_PORT := 3306
-MIGRATION_LOCAL_PORT := 3306
-
-MIGRATION_JUMPBOX_STACK := cf-migration-jumpbox
-MIGRATION_JUMPBOX_TEMPLATE := cloudformation/migration/cf-migration-jumpbox.yaml
-MIGRATION_JUMPBOX_PARAMS := cloudformation/parameters/migration-jumpbox.json
-
-deploy-migration-bucket:  ## Create the migration S3 bucket in SANDBOX (ZI-Sandbox profile)
-	@echo "$(BLUE)Deploying migration bucket: $(MIGRATION_BUCKET_STACK) (ZI-Sandbox)$(NC)"
-	@aws --profile ZI-Sandbox cloudformation deploy \
-		--template-file $(MIGRATION_BUCKET_TEMPLATE) \
-		--stack-name $(MIGRATION_BUCKET_STACK) \
-		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(MIGRATION_BUCKET_PARAMS)) \
-		--region $(AWS_REGION) \
-		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ Migration bucket deployed$(NC)"
-	@aws --profile ZI-Sandbox cloudformation describe-stacks \
-		--stack-name $(MIGRATION_BUCKET_STACK) \
-		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
-		--output table --region $(AWS_REGION)
-
-destroy-migration-bucket:  ## Delete the migration bucket (SANDBOX). CONFIRMED=yes to skip prompt.
-	@if [ "$(CONFIRMED)" != "yes" ]; then \
-		echo "$(RED)WARNING: This will delete the migration S3 bucket and all data in it.$(NC)"; \
-		read -p "Type 'yes' to confirm: " confirm; \
-		if [ "$$confirm" != "yes" ]; then echo "Cancelled"; exit 0; fi; \
-	fi
-	@echo "$(BLUE)Emptying migration bucket before deletion...$(NC)"
-	@BUCKET=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
-		--stack-name $(MIGRATION_BUCKET_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
-		--output text --region $(AWS_REGION) 2>/dev/null); \
-	if [ -n "$$BUCKET" ] && [ "$$BUCKET" != "None" ]; then \
-		echo "  Emptying: $$BUCKET"; \
-		aws --profile ZI-Sandbox s3 rm "s3://$$BUCKET" --recursive --region $(AWS_REGION) 2>/dev/null || true; \
-	fi
-	@aws --profile ZI-Sandbox cloudformation delete-stack \
-		--stack-name $(MIGRATION_BUCKET_STACK) --region $(AWS_REGION)
-	@echo "$(BLUE)Waiting for deletion...$(NC)"
-	@aws --profile ZI-Sandbox cloudformation wait stack-delete-complete \
-		--stack-name $(MIGRATION_BUCKET_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ Migration bucket deleted$(NC)"
-
-deploy-migration-jumpbox:  ## Create the jumpbox EC2 in PROD (ZoningInfoAdmin profile)
-	@echo "$(BLUE)Deploying migration jumpbox: $(MIGRATION_JUMPBOX_STACK) (ZoningInfoAdmin / prod)$(NC)"
-	@aws --profile ZoningInfoAdmin cloudformation deploy \
-		--template-file $(MIGRATION_JUMPBOX_TEMPLATE) \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) \
-		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(MIGRATION_JUMPBOX_PARAMS)) \
-		--capabilities CAPABILITY_NAMED_IAM \
-		--region $(AWS_REGION) \
-		--no-fail-on-empty-changeset
-	@echo "$(GREEN)✓ Migration jumpbox deployed$(NC)"
-	@aws --profile ZoningInfoAdmin cloudformation describe-stacks \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) \
-		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
-		--output table --region $(AWS_REGION)
-	@echo ""
-	@echo "$(CYAN)Note: UserData may take ~2 min to finish installing tools.$(NC)"
-	@echo "$(CYAN)Check readiness: aws --profile ZoningInfoAdmin ssm start-session \\$(NC)"
-	@echo "$(CYAN)  --target \$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \\$(NC)"
-	@echo "$(CYAN)  --stack-name $(MIGRATION_JUMPBOX_STACK) \\$(NC)"
-	@echo "$(CYAN)  --query \"Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue\" --output text)$(NC)"
-	@echo "$(CYAN)Or just: make ssm-migration-jumpbox$(NC)"
-
-destroy-migration-jumpbox:  ## Delete the jumpbox (PROD). CONFIRMED=yes to skip prompt.
-	@if [ "$(CONFIRMED)" != "yes" ]; then \
-		echo "$(RED)WARNING: This will delete the prod jumpbox EC2 instance.$(NC)"; \
-		read -p "Type 'yes' to confirm: " confirm; \
-		if [ "$$confirm" != "yes" ]; then echo "Cancelled"; exit 0; fi; \
-	fi
-	@aws --profile ZoningInfoAdmin cloudformation delete-stack \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) --region $(AWS_REGION)
-	@echo "$(BLUE)Waiting for deletion...$(NC)"
-	@aws --profile ZoningInfoAdmin cloudformation wait stack-delete-complete \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) --region $(AWS_REGION)
-	@echo "$(GREEN)✓ Migration jumpbox deleted$(NC)"
-
-# Internal: diagnostic pre-flight for any target that needs to start an
-# SSM session against the prod jumpbox. Distinguishes between the three
-# real failure modes (missing plugin, missing/invalid profile, missing
-# stack) instead of swallowing all of them as "jumpbox not deployed."
-.migration-preflight:
-	@command -v session-manager-plugin >/dev/null 2>&1 || { \
-		echo "$(RED)session-manager-plugin not installed.$(NC)"; \
-		echo "$(YELLOW)On the deploy-host (Ubuntu ARM64):$(NC)"; \
-		echo "  sudo curl -sSL \"https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb\" -o /tmp/smp.deb"; \
-		echo "  sudo dpkg -i /tmp/smp.deb && rm /tmp/smp.deb"; \
-		echo "$(YELLOW)On macOS:$(NC)"; \
-		echo "  brew install --cask session-manager-plugin"; \
-		exit 1; \
-	}
-	@aws --profile ZoningInfoAdmin sts get-caller-identity --query Account --output text >/dev/null 2>&1 || { \
-		echo "$(RED)ZoningInfoAdmin profile not configured (or credentials invalid/expired).$(NC)"; \
-		echo "$(YELLOW)Set up per docs/MIGRATION.md step 4 — copy the [ZoningInfoAdmin] block from$(NC)"; \
-		echo "$(YELLOW)your ~/.aws/config and ~/.aws/credentials onto the host running 'make'.$(NC)"; \
-		exit 1; \
-	}
-
-ssm-migration-jumpbox: .migration-preflight  ## Open an SSM Session Manager interactive shell on the prod jumpbox
-	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
-		--output text --region $(AWS_REGION) 2>&1); \
-	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ] || echo "$$INSTANCE_ID" | grep -q "does not exist"; then \
-		echo "$(RED)Migration jumpbox stack not found in prod.$(NC)"; \
-		echo "$(YELLOW)Run from your Mac: make deploy-migration-jumpbox$(NC)"; \
-		exit 1; \
-	fi; \
-	echo "$(BLUE)Opening SSM session to jumpbox $$INSTANCE_ID (prod)...$(NC)"; \
-	aws --profile ZoningInfoAdmin ssm start-session --target $$INSTANCE_ID --region $(AWS_REGION)
-
-ssm-migration-tunnel: .migration-preflight  ## Open SSM port-forward: localhost:$(MIGRATION_LOCAL_PORT) → prod RDS via jumpbox (blocks)
-	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
-		--output text --region $(AWS_REGION) 2>&1); \
-	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ] || echo "$$INSTANCE_ID" | grep -q "does not exist"; then \
-		echo "$(RED)Migration jumpbox stack not found in prod.$(NC)"; \
-		echo "$(YELLOW)Run from your Mac: make deploy-migration-jumpbox$(NC)"; \
-		exit 1; \
-	fi; \
-	echo "$(BLUE)Opening SSM port-forwarding tunnel:$(NC)"; \
-	echo "  $(CYAN)localhost:$(MIGRATION_LOCAL_PORT)$(NC)  ──tunnel──▶  $(CYAN)$(MIGRATION_SOURCE_HOST):$(MIGRATION_SOURCE_PORT)$(NC)"; \
-	echo "  via jumpbox $$INSTANCE_ID (prod)"; \
-	echo "$(CYAN)This command BLOCKS. Use Ctrl-C to close the tunnel.$(NC)"; \
-	echo "$(CYAN)Open a second shell on this host to run pgloader against localhost:$(MIGRATION_LOCAL_PORT).$(NC)"; \
-	aws --profile ZoningInfoAdmin ssm start-session \
-		--target "$$INSTANCE_ID" \
-		--document-name AWS-StartPortForwardingSessionToRemoteHost \
-		--parameters host=$(MIGRATION_SOURCE_HOST),portNumber=$(MIGRATION_SOURCE_PORT),localPortNumber=$(MIGRATION_LOCAL_PORT) \
-		--region $(AWS_REGION)
-
-migration-jumpbox-pubkey:  ## Display the jumpbox's ed25519 pubkey (paste into React2's authorized_keys)
-	@INSTANCE_ID=$$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
-		--stack-name $(MIGRATION_JUMPBOX_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
-		--output text --region $(AWS_REGION) 2>/dev/null); \
-	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
-		echo "$(RED)Migration jumpbox not deployed.$(NC)"; exit 1; \
-	fi; \
-	echo "$(BLUE)Fetching ed25519 pubkey from jumpbox (creates one if absent)...$(NC)"; \
-	CMD_ID=$$(aws --profile ZoningInfoAdmin ssm send-command \
-		--instance-ids $$INSTANCE_ID \
-		--document-name AWS-RunShellScript \
-		--parameters 'commands=["[ -f /root/.ssh/id_ed25519 ] || sudo ssh-keygen -t ed25519 -N \"\" -f /root/.ssh/id_ed25519 -q","sudo cat /root/.ssh/id_ed25519.pub"]' \
-		--query 'Command.CommandId' --output text --region $(AWS_REGION)); \
-	echo "  CommandId: $$CMD_ID"; \
-	sleep 5; \
-	aws --profile ZoningInfoAdmin ssm get-command-invocation \
-		--command-id $$CMD_ID --instance-id $$INSTANCE_ID \
-		--query 'StandardOutputContent' --output text --region $(AWS_REGION)
 
 # -----------------------------------------------------------------------------
 # Testing & Maintenance
