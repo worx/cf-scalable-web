@@ -29,7 +29,7 @@ export
         verify-compute verify-compute-alb verify-compute-nlb verify-compute-nginx verify-compute-php \
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-storage-s3 destroy-storage-fsx destroy-database destroy-cache \
         destroy-compute destroy-compute-alb destroy-compute-nlb destroy-compute-nginx destroy-compute-php \
-        deploy-deploy-host verify-deploy-host destroy-deploy-host \
+        deploy-deploy-host verify-deploy-host destroy-deploy-host ssm-deploy-host \
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
         deploy-all deploy-all-parallel deploy-all-linear deploy-all-no-data \
@@ -39,7 +39,7 @@ export
         build-ami-nginx build-ami-php74 build-ami-php83 build-amis build-amis-if-needed \
         update-ami-param \
         init-secrets list-secrets test clean consolidate-logs \
-        ssm-report ssm-remediate ssm-audit-params
+        ssm-report ssm-remediate ssm-audit-params ssm-deploy-host
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -333,6 +333,7 @@ help:  ## Show this help message
 	@echo "$(YELLOW)Deploy Host:$(NC)"
 	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
 	@echo "  make verify-deploy-host       Show deploy host connection info"
+	@echo "  make ssm-deploy-host          Open SSM interactive shell on deploy-host"
 	@echo "  make stop-deploy-host         Stop deploy host"
 	@echo "  make start-deploy-host        Start deploy host instance"
 	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
@@ -1781,6 +1782,20 @@ deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
 		done; \
 	fi
 	@$(MAKE) verify-deploy-host
+
+ssm-deploy-host:  ## Open SSM interactive shell on deploy-host (no copy-paste)
+	@INSTANCE_ID=$$(aws ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(DEPLOY_HOST_STACK)" \
+		         "Name=instance-state-name,Values=running" \
+		--query 'Reservations[0].Instances[0].InstanceId' \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
+		echo "$(RED)Deploy host instance not found (stack: $(DEPLOY_HOST_STACK)).$(NC)"; \
+		echo "$(CYAN)Deploy first: make deploy-deploy-host$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(BLUE)Opening SSM session to deploy-host $$INSTANCE_ID...$(NC)"; \
+	aws ssm start-session --target $$INSTANCE_ID --region $(AWS_REGION)
 
 verify-deploy-host:  ## Show deploy host connection info
 	@echo "$(BLUE)Deploy Host Connection Info$(NC)"
