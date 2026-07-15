@@ -93,16 +93,45 @@ RESTORE_KEY="${RESTORE_KEY:-$S3_PREFIX/deploy-host-latest.tar.gz}"
 SKIP_SNAPSHOT="${SKIP_SNAPSHOT:-}"
 SKIP_CREDENTIALS_STUB="${SKIP_CREDENTIALS_STUB:-}"
 
-# Paths the backup tracks (used for pre-restore snapshot enumeration)
+# Paths the backup tracks (used for pre-restore snapshot enumeration).
+# Must stay in sync with BACKUP_PATHS in backup-state.sh - if a path
+# appears in the archive but not here, the pre-restore /tmp snapshot
+# won't capture it, so the undo path would be incomplete. See
+# backup-state.sh's header comment for detailed rationale on each
+# category.
 KNOWN_PATHS=(
+  # Access / identity
   "/root/.ssh"
+  "/home/ubuntu/.ssh"
+  "/home/ubuntu/.gitconfig"
+
+  # Operator env vars and custom scripts
   "/root/.env"
   "/root/bin"
-  "/root/.aws/config"
-  "/home/ubuntu/.ssh"
   "/home/ubuntu/.env"
   "/home/ubuntu/bin"
+
+  # AWS CLI config (NOT credentials)
+  "/root/.aws/config"
   "/home/ubuntu/.aws/config"
+
+  # Shell dotfiles
+  "/root/.bashrc"
+  "/root/.profile"
+  "/home/ubuntu/.bashrc"
+  "/home/ubuntu/.profile"
+
+  # Shell + tool history
+  "/root/.zsh_history"
+  "/root/.mysql_history"
+  "/home/ubuntu/.zsh_history"
+
+  # Operator-configured tools
+  "/root/.config/htop"
+  "/home/ubuntu/.config/htop"
+
+  # Quality-of-life markers
+  "/home/ubuntu/.sudo_as_admin_successful"
 )
 
 # Post-restore verification: at least one of these should be present
