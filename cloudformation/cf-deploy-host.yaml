@@ -44,6 +44,16 @@ Parameters:
     Description: Ubuntu 24.04 LTS ARM64 AMI (resolved from SSM)
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
 
+  DeployHostBackupsBucketName:
+    Type: String
+    Description: >-
+      Bucket name for deploy-host state backups (SSH keys, .env,
+      .aws/config). Used by UserData auto-restore and by the nightly
+      EventBridge Scheduler. Must match the DeployHostBackupsBucketName
+      output of the cf-deploy-host-backups stack.
+    AllowedPattern: '^[a-z0-9.-]+$'
+    Default: 'sandbox-deploy-host-backups-kv-worxco'
+
 Resources:
   # ========================================
   # Security Group (no inbound, SSM only)
@@ -233,14 +243,130 @@ Resources:
                 exit 1
               fi
 
+              # ============================================================
+              # Auto-restore operator state from sandbox S3 (if available)
+              # ============================================================
+              # After bootstrap completes, attempt to restore prior state
+              # backup: SSH keys, .env files, .aws/config, custom bin/
+              # directories for both root and ubuntu.
+              #
+              # If no backup exists in S3 (fresh migration or intentional
+              # reset), this block quietly no-ops - deploy-host boots
+              # with the pristine bootstrap state.
+              #
+              # Real .aws/credentials are NOT in the backup (secrets stay
+              # on operator's Mac). restore-state.sh writes stub files
+              # explaining this if credentials are absent post-restore.
+              BACKUPS_BUCKET="${BackupsBucket}"
+              LATEST_KEY="config/deploy-host-latest.tar.gz"
+
+              if aws s3api head-object \
+                   --bucket "$BACKUPS_BUCKET" --key "$LATEST_KEY" >/dev/null 2>&1; then
+                echo "=== Prior deploy-host state found in S3 - running restore-state.sh ==="
+                mkdir -p /opt/deploy-host/scripts/deploy-host
+                # Pull the actual restore-state.sh (not a copy embedded here)
+                # so we always run the current version from S3 - same
+                # script the operator uses via `make restore-deploy-host`.
+                aws s3 cp "s3://$BACKUPS_BUCKET/scripts/_common.sh" \
+                          /opt/deploy-host/scripts/_common.sh --quiet
+                aws s3 cp "s3://$BACKUPS_BUCKET/scripts/deploy-host/restore-state.sh" \
+                          /opt/deploy-host/scripts/deploy-host/restore-state.sh --quiet
+                chmod +x /opt/deploy-host/scripts/deploy-host/restore-state.sh
+                # CONFIRMED=yes - UserData is non-interactive
+                CONFIRMED=yes DEPLOY_HOST_BACKUPS_BUCKET="$BACKUPS_BUCKET" \
+                  /opt/deploy-host/scripts/deploy-host/restore-state.sh \
+                  || echo "restore-state.sh exited non-zero - proceeding without full restore"
+              else
+                echo "=== No prior deploy-host state in S3 - fresh instance ==="
+              fi
+
               echo "=== UserData complete $(date) ==="
             - Region: !Ref 'AWS::Region'
+              BackupsBucket: !Ref DeployHostBackupsBucketName
 
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}'
         - Key: Purpose
           Value: Infrastructure management deploy host
+
+  # ========================================
+  # EventBridge Scheduler — nightly state backup
+  # ========================================
+  # Fires at 02:00 America/Chicago every day (DST-aware, no drift).
+  # Assumes DeployHostSchedulerRole, calls ssm:SendCommand to push
+  # backup-state.sh onto the deploy-host — same pattern as
+  # `make backup-deploy-host` from the operator side.
+  #
+  # Prerequisites for the scheduled backup to succeed:
+  #   1. cf-deploy-host-backups stack must be deployed (creates the bucket)
+  #   2. scripts/_common.sh and scripts/deploy-host/backup-state.sh must
+  #      exist in the bucket (uploaded automatically the first time an
+  #      operator runs `make backup-deploy-host`)
+  # First-time bootstrap: run `make backup-deploy-host` once after deploy.
+
+  DeployHostSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-scheduler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendCommandToDeployHost
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  # Scope tightly: only THIS deploy-host instance, only the
+                  # AWS-RunShellScript document.
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${DeployHostInstance}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scheduler-role'
+        - Key: Purpose
+          Value: Deploy-host nightly backup scheduler
+
+  DeployHostNightlyBackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${AWS::StackName}-nightly-backup'
+      Description: >-
+        Nightly backup of deploy-host operator-managed state to sandbox S3.
+        Fires at 02:00 America/Chicago (DST-aware).
+      ScheduleExpression: cron(0 2 * * ? *)
+      ScheduleExpressionTimezone: America/Chicago
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        # Universal target: invoke any AWS API. Here: ssm:SendCommand.
+        Arn: 'arn:aws:scheduler:::aws-sdk:ssm:sendCommand'
+        RoleArn: !GetAtt DeployHostSchedulerRole.Arn
+        # Note: dash (default SSM shell) so `set -eu`, not `-o pipefail`.
+        Input: !Sub |
+          {
+            "DocumentName": "AWS-RunShellScript",
+            "InstanceIds": ["${DeployHostInstance}"],
+            "TimeoutSeconds": 600,
+            "Parameters": {
+              "commands": [
+                "set -eu",
+                "mkdir -p /opt/deploy-host/scripts/deploy-host",
+                "aws s3 cp \"s3://${DeployHostBackupsBucketName}/scripts/_common.sh\" /opt/deploy-host/scripts/_common.sh --quiet",
+                "aws s3 cp \"s3://${DeployHostBackupsBucketName}/scripts/deploy-host/backup-state.sh\" /opt/deploy-host/scripts/deploy-host/backup-state.sh --quiet",
+                "chmod +x /opt/deploy-host/scripts/deploy-host/backup-state.sh",
+                "DEPLOY_HOST_BACKUPS_BUCKET=${DeployHostBackupsBucketName} /opt/deploy-host/scripts/deploy-host/backup-state.sh"
+              ]
+            }
+          }
 
 Outputs:
   DeployHostPublicIP:
@@ -262,6 +388,10 @@ Outputs:
     Value: !GetAtt DeployHostSecurityGroup.GroupId
     Export:
       Name: !Sub '${AWS::StackName}-sg-id'
+
+  NightlyBackupScheduleName:
+    Description: EventBridge Scheduler name (fires nightly 02:00 America/Chicago)
+    Value: !Ref DeployHostNightlyBackupSchedule
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company

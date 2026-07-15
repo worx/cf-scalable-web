@@ -1,0 +1,6 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "BucketSuffix": "kv-worxco"
+  }
+}

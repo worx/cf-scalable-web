@@ -30,6 +30,9 @@ export
         destroy-all destroy-vpc destroy-iam destroy-storage destroy-storage-s3 destroy-storage-fsx destroy-database destroy-cache \
         destroy-compute destroy-compute-alb destroy-compute-nlb destroy-compute-nginx destroy-compute-php \
         deploy-deploy-host verify-deploy-host destroy-deploy-host ssm-deploy-host \
+        deploy-deploy-host-backups destroy-deploy-host-backups \
+        backup-deploy-host restore-deploy-host list-deploy-host-backups \
+        .deploy-host-backups-preflight \
         stop-deploy-host start-deploy-host set-deploy-host-password \
         deploy-image-builder verify-image-builder destroy-image-builder \
         deploy-all deploy-all-parallel deploy-all-linear deploy-all-no-data \
@@ -75,6 +78,9 @@ CACHE_STACK := $(STACK_PREFIX)-cache
 
 # Deploy Host (standalone, not environment-specific)
 DEPLOY_HOST_STACK := cf-deploy-host
+DEPLOY_HOST_BACKUPS_STACK := cf-deploy-host-backups
+DEPLOY_HOST_BACKUPS_TEMPLATE := cloudformation/cf-deploy-host-backups.yaml
+DEPLOY_HOST_BACKUPS_PARAMS := cloudformation/parameters/deploy-host-backups.json
 DEPLOY_HOST_TEMPLATE := cloudformation/cf-deploy-host.yaml
 DEPLOY_HOST_PARAMS := cloudformation/parameters/deploy-host.json
 DEPLOY_HOST_SECRET_PATH := worxco/deploy-host/root-password
@@ -334,6 +340,14 @@ help:  ## Show this help message
 	@echo "  make deploy-deploy-host       Deploy deploy host (standalone)"
 	@echo "  make verify-deploy-host       Show deploy host connection info"
 	@echo "  make ssm-deploy-host          Open SSM interactive shell on deploy-host"
+	@echo ""
+	@echo "$(YELLOW)Deploy-host state protection (SSH keys, .env, .aws/config; secrets stay on Mac):$(NC)"
+	@echo "  make deploy-deploy-host-backups    Create the backups S3 bucket (one-time setup)"
+	@echo "  make backup-deploy-host            Snapshot deploy-host state → sandbox S3"
+	@echo "  make restore-deploy-host           Restore state from S3 (safe: /tmp snapshot first)"
+	@echo "  make list-deploy-host-backups      List all state backups in S3"
+	@echo "  make destroy-deploy-host-backups   Delete the backups bucket (CONFIRMED=yes)"
+	@echo ""
 	@echo "  make stop-deploy-host         Stop deploy host"
 	@echo "  make start-deploy-host        Start deploy host instance"
 	@echo "  make set-deploy-host-password Set root password in Secrets Manager"
@@ -1725,7 +1739,7 @@ resume-compute:  ## Restore NGINX and PHP ASGs to pre-pause sizes
 # Deploy Host (Standalone)
 # -----------------------------------------------------------------------------
 
-deploy-deploy-host:  ## Deploy deploy host (standalone, uses default VPC)
+deploy-deploy-host: .deploy-host-backups-preflight  ## Deploy deploy host (auto-deploys backups bucket if missing)
 	@echo "$(BLUE)Deploying deploy host stack: $(DEPLOY_HOST_STACK)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@# Pre-delete the SSM-SessionManagerRunShell document only when the
@@ -1797,6 +1811,133 @@ ssm-deploy-host:  ## Open SSM interactive shell on deploy-host (no copy-paste)
 	echo "$(BLUE)Opening SSM session to deploy-host $$INSTANCE_ID...$(NC)"; \
 	aws ssm start-session --target $$INSTANCE_ID --region $(AWS_REGION)
 
+# -----------------------------------------------------------------------------
+# Deploy-host state protection - backup/restore/list targets
+# -----------------------------------------------------------------------------
+# Backups live in a separate bucket (cf-deploy-host-backups) rather than
+# the migration bucket, since deploy-host is long-lived infrastructure
+# but the migration bucket is per-client-migration ephemeral.
+#
+# What gets backed up: SSH keys, .env, .aws/config, custom bin/ dirs
+# What does NOT: .aws/credentials (secrets - kept only on Mac; restore
+# writes a stub file pointing operator back to Mac).
+# -----------------------------------------------------------------------------
+
+# Internal: pre-flight check invoked by `make deploy-deploy-host`.
+# If the backups bucket stack doesn't exist yet, deploy it first —
+# so operators never have to remember "did I deploy the backups
+# bucket before the deploy-host?". This matches the coupling: the
+# backups stack SHOULD exist alongside the deploy-host stack.
+#
+# The two stacks stay SEPARATE (backups bucket is designed to
+# outlive the deploy-host EC2 instance — surviving destroy events
+# is the whole point). Auto-deploy just handles the "did user
+# forget the first step" case without merging the stacks.
+.deploy-host-backups-preflight:
+	@if aws cloudformation describe-stacks \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) \
+		--region $(AWS_REGION) >/dev/null 2>&1; then \
+		echo "$(CYAN)Deploy-host backups stack '$(DEPLOY_HOST_BACKUPS_STACK)' present — good.$(NC)"; \
+	else \
+		echo "$(YELLOW)Deploy-host backups stack '$(DEPLOY_HOST_BACKUPS_STACK)' not found.$(NC)"; \
+		echo "$(YELLOW)Auto-deploying it first (backups bucket must exist for auto-restore + nightly scheduler)...$(NC)"; \
+		$(MAKE) deploy-deploy-host-backups; \
+	fi
+
+deploy-deploy-host-backups:  ## Create the deploy-host backups S3 bucket (sandbox)
+	@echo "$(BLUE)Deploying deploy-host backups bucket: $(DEPLOY_HOST_BACKUPS_STACK)$(NC)"
+	@aws --profile ZI-Sandbox cloudformation deploy \
+		--template-file $(DEPLOY_HOST_BACKUPS_TEMPLATE) \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(DEPLOY_HOST_BACKUPS_PARAMS)) \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ Deploy-host backups bucket deployed$(NC)"
+	@aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) \
+		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
+		--output table --region $(AWS_REGION)
+
+destroy-deploy-host-backups:  ## Delete the deploy-host backups bucket + ALL state backups. Requires escalated confirmation.
+	@# INTENTIONAL: this target has NO wrapper anywhere in the system.
+	@# It is manual-only. Never called by destroy-deploy-host or any
+	@# other target. The backups bucket exists specifically to survive
+	@# events that destroy the deploy-host EC2 - conflating those
+	@# lifecycles would defeat its whole purpose.
+	@#
+	@# Confirmation is deliberately harder than the standard CONFIRMED=yes
+	@# because the consequence is more severe: losing all backups means
+	@# any future deploy-host rebuild has NO auto-restore source and
+	@# operator has to reconstruct .ssh, .env, .aws/config by hand.
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo ""; \
+		echo "$(RED)============================================================$(NC)"; \
+		echo "$(RED)  DESTRUCTIVE: Deletes deploy-host backups S3 bucket$(NC)"; \
+		echo "$(RED)============================================================$(NC)"; \
+		echo "$(RED)Consequences:$(NC)"; \
+		echo "$(RED)  * ALL state backups will be permanently lost$(NC)"; \
+		echo "$(RED)  * Future deploy-host rebuilds will have NO auto-restore$(NC)"; \
+		echo "$(RED)  * Operator must manually re-establish SSH keys, .env,$(NC)"; \
+		echo "$(RED)    .aws/config on any freshly-built deploy-host$(NC)"; \
+		echo "$(RED)  * The running deploy-host EC2 itself is unaffected$(NC)"; \
+		echo "$(RED)    (this target does NOT touch the compute)$(NC)"; \
+		echo ""; \
+		echo "$(YELLOW)To confirm, type exactly:$(NC)"; \
+		echo "$(YELLOW)  DESTROY ALL DEPLOY-HOST BACKUPS$(NC)"; \
+		echo "$(CYAN)(Or set CONFIRMED=yes on the command line to skip prompt entirely.)$(NC)"; \
+		read -p "> " confirm; \
+		if [ "$$confirm" != "DESTROY ALL DEPLOY-HOST BACKUPS" ]; then \
+			echo "$(GREEN)Cancelled — bucket and backups preserved.$(NC)"; \
+			exit 0; \
+		fi; \
+	fi
+	@echo "$(BLUE)Emptying deploy-host backups bucket before deletion...$(NC)"
+	@BUCKET=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='DeployHostBackupsBucketName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -n "$$BUCKET" ] && [ "$$BUCKET" != "None" ]; then \
+		echo "  Emptying: $$BUCKET"; \
+		aws --profile ZI-Sandbox s3 rm "s3://$$BUCKET" --recursive --region $(AWS_REGION) 2>/dev/null || true; \
+	fi
+	@aws --profile ZI-Sandbox cloudformation delete-stack \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion...$(NC)"
+	@aws --profile ZI-Sandbox cloudformation wait stack-delete-complete \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ Deploy-host backups bucket deleted$(NC)"
+
+backup-deploy-host: .deploy-host-backups-preflight  ## Snapshot deploy-host state (SSH keys, .env, .aws/config) → sandbox S3
+	@AWS_REGION="$(AWS_REGION)" \
+	 DEPLOY_HOST_STACK="$(DEPLOY_HOST_STACK)" \
+	 DEPLOY_HOST_BACKUPS_STACK="$(DEPLOY_HOST_BACKUPS_STACK)" \
+	 ./scripts/deploy-host/_ssm-run.sh backup-state
+
+restore-deploy-host:  ## Restore deploy-host state from S3 (auto-snapshots current to /tmp first)
+	@AWS_REGION="$(AWS_REGION)" \
+	 DEPLOY_HOST_STACK="$(DEPLOY_HOST_STACK)" \
+	 DEPLOY_HOST_BACKUPS_STACK="$(DEPLOY_HOST_BACKUPS_STACK)" \
+	 ./scripts/deploy-host/_ssm-run.sh restore-state
+
+list-deploy-host-backups:  ## List all deploy-host state backups in S3
+	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(DEPLOY_HOST_BACKUPS_STACK) --region $(AWS_REGION) \
+		--query "Stacks[0].Outputs[?OutputKey=='DeployHostBackupsBucketName'].OutputValue" \
+		--output text 2>/dev/null); \
+	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+		echo "$(RED)Bucket stack '$(DEPLOY_HOST_BACKUPS_STACK)' not deployed.$(NC)"; exit 1; \
+	fi; \
+	echo "$(BLUE)=== Latest pointer (never expires) ===$(NC)"; \
+	aws --profile ZI-Sandbox s3 ls "s3://$$BUCKET_NAME/config/deploy-host-latest.tar.gz" \
+		--region $(AWS_REGION) --human-readable 2>&1 || echo "  (no latest - no backup taken yet)"; \
+	echo ""; \
+	echo "$(BLUE)=== Timestamped archives (90-day retention) ===$(NC)"; \
+	aws --profile ZI-Sandbox s3 ls "s3://$$BUCKET_NAME/config/deploy-host-archive/" \
+		--region $(AWS_REGION) --human-readable 2>&1 || echo "  (no archives yet)"; \
+	echo ""; \
+	echo "$(CYAN)Restore latest: make restore-deploy-host$(NC)"; \
+	echo "$(CYAN)Restore specific: make restore-deploy-host RESTORE_KEY=config/deploy-host-archive/deploy-host-<UTC>.tar.gz$(NC)"
+
 verify-deploy-host:  ## Show deploy host connection info
 	@echo "$(BLUE)Deploy Host Connection Info$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
@@ -1817,15 +1958,38 @@ verify-deploy-host:  ## Show deploy host connection info
 	@echo ""
 	@echo "$(GREEN)✓ Deploy host verification complete$(NC)"
 
-destroy-deploy-host:  ## Delete deploy host (pass CONFIRMED=yes to skip prompt)
+destroy-deploy-host:  ## Delete deploy host (with final backup). CONFIRMED=yes skips prompt; SKIP_FINAL_BACKUP=yes skips backup.
 	@if [ "$(CONFIRMED)" != "yes" ]; then \
 		echo "$(RED)WARNING: This will delete the deploy host!$(NC)"; \
+		echo "$(CYAN)A final backup will be taken automatically before delete$(NC)"; \
+		echo "$(CYAN)(set SKIP_FINAL_BACKUP=yes to skip that too).$(NC)"; \
 		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt for unattended runs.)$(NC)"; \
 		read -p "Type 'yes' to confirm: " confirm; \
 		if [ "$$confirm" != "yes" ]; then \
 			echo "Cancelled"; \
 			exit 0; \
 		fi; \
+	fi
+	@# Take a final state backup so the operator can restore into a
+	@# rebuilt deploy-host later without losing SSH keys or configs.
+	@# Escape hatch: SKIP_FINAL_BACKUP=yes bypasses this.
+	@if [ "$(SKIP_FINAL_BACKUP)" != "yes" ]; then \
+		if aws cloudformation describe-stacks --stack-name $(DEPLOY_HOST_BACKUPS_STACK) \
+		    --region $(AWS_REGION) >/dev/null 2>&1; then \
+			echo "$(BLUE)Taking final backup before destroy...$(NC)"; \
+			if ! $(MAKE) backup-deploy-host CONFIRMED=yes; then \
+				echo "$(YELLOW)Final backup failed. You have three choices:$(NC)"; \
+				echo "$(YELLOW)  1) Fix the backup issue and re-run 'make destroy-deploy-host'$(NC)"; \
+				echo "$(YELLOW)  2) Skip the backup: 'make destroy-deploy-host SKIP_FINAL_BACKUP=yes'$(NC)"; \
+				echo "$(YELLOW)  3) Manually copy SSH keys elsewhere before proceeding$(NC)"; \
+				exit 1; \
+			fi; \
+		else \
+			echo "$(YELLOW)Backups stack $(DEPLOY_HOST_BACKUPS_STACK) not deployed — skipping final backup.$(NC)"; \
+			echo "$(YELLOW)Deploy it once with: make deploy-deploy-host-backups$(NC)"; \
+		fi; \
+	else \
+		echo "$(YELLOW)SKIP_FINAL_BACKUP=yes — skipping final backup.$(NC)"; \
 	fi
 	@# Pre-step: any peering stack importing cf-deploy-host's exports must
 	@# be destroyed first, or CFN refuses to delete cf-deploy-host

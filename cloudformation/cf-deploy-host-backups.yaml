@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Deploy-Host State Backups Bucket
+#
+# Purpose: A dedicated S3 bucket in the SANDBOX account that holds
+#          deploy-host operator-managed state backups (SSH keys, .env,
+#          .aws/config, custom bin/ dirs). Long-lived by design:
+#          deploy-host is durable infrastructure (unlike the migration
+#          jumpbox which is per-client-migration ephemeral), so its
+#          backups must outlive any single migration project.
+#
+#          Populated by scripts/deploy-host/backup-state.sh running:
+#            - On-demand via `make backup-deploy-host`
+#            - Nightly via EventBridge Scheduler (defined in cf-deploy-host.yaml)
+#            - Pre-destroy via `make destroy-deploy-host` (unless SKIP_FINAL_BACKUP=yes)
+#
+#          Consumed by scripts/deploy-host/restore-state.sh:
+#            - Via UserData auto-restore on new deploy-host boot
+#            - On-demand via `make restore-deploy-host`
+#
+# Layout:  s3://<bucket>/
+#          ├── scripts/                    (no expiration - runtime dep)
+#          ├── logs/                       (30-day retention)
+#          └── config/
+#              ├── deploy-host-latest.tar.gz     (never expires)
+#              └── deploy-host-archive/          (90-day retention)
+#
+# Deploy:  make deploy-deploy-host-backups   [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+# Destroy: make destroy-deploy-host-backups  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Deploy-host state backups S3 bucket (SANDBOX account)'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name used in bucket naming
+    Default: sandbox
+
+  BucketSuffix:
+    Type: String
+    Description: Unique suffix for the bucket name (S3 global uniqueness)
+    AllowedPattern: '^[a-z0-9-]{4,20}$'
+    Default: kv-worxco
+
+Resources:
+  DeployHostBackupsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${EnvironmentName}-deploy-host-backups-${BucketSuffix}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Prefix-scoped lifecycle rules matching the pattern established by
+      # the migration bucket. The deploy-host-latest.tar.gz pointer at
+      # config/ root never expires - it is the auto-restore source of
+      # truth. Timestamped archives get 90 days of history.
+      LifecycleConfiguration:
+        Rules:
+          # Script execution logs from backup-state.sh and restore-state.sh
+          # runs (both scheduled and on-demand). Enough for post-mortem.
+          - Id: ExpireLogs
+            Status: Enabled
+            Prefix: logs/
+            ExpirationInDays: 30
+
+          # Scripts uploaded during SSM orchestration.
+          # NO EXPIRATION - the nightly EventBridge Scheduler and
+          # UserData auto-restore both read these scripts from S3
+          # without running a make target. Expiring them would cause
+          # silent failures for those automated triggers.
+          # Scripts are overwritten in place on every `make X`, so
+          # there is no version accumulation.
+
+          # Timestamped state backups - 90 days of history for rollback
+          # or audit purposes. The latest pointer is kept separately below.
+          - Id: ExpireArchivedDeployHostState
+            Status: Enabled
+            Prefix: config/deploy-host-archive/
+            ExpirationInDays: 90
+
+          # NOTE: config/deploy-host-latest.tar.gz has NO expiration rule.
+          # S3 lifecycle only expires objects matching a rule prefix, so
+          # a single object at the top of the config/ prefix (not under
+          # config/deploy-host-archive/) is untouched by any rule above.
+
+          # Cancel and clean up incomplete multipart uploads after 1 day.
+          - Id: AbortIncompleteMultipartUpload
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-deploy-host-backups-${BucketSuffix}'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: Deploy-host state protection - long-lived
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  DeployHostBackupsBucketName:
+    Description: Bucket name (used by scripts and CFN Scheduler in cf-deploy-host)
+    Value: !Ref DeployHostBackupsBucket
+    Export:
+      Name: cf-deploy-host-backups-bucket-name
+
+  DeployHostBackupsBucketArn:
+    Description: Bucket ARN (used by IAM policy on deploy-host instance role)
+    Value: !GetAtt DeployHostBackupsBucket.Arn
+    Export:
+      Name: cf-deploy-host-backups-bucket-arn
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
