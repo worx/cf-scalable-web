@@ -297,6 +297,28 @@ Resources:
                 echo "=== No prior deploy-host state in S3 - fresh instance ==="
               fi
 
+              # ============================================================
+              # Post-restore: re-invoke bootstrap.sh's remount step
+              # ============================================================
+              # bootstrap.sh:503-530 reads /etc/worxco/current-env and, if
+              # it's set to anything other than "NONE", runs `use-env <env>`
+              # to write the fstab entry and mount /var/www from FSx. That
+              # step ran BEFORE auto-restore above (as part of bootstrap.sh),
+              # so on a fresh instance the current-env file didn't exist yet.
+              # Now that restore-state.sh has (possibly) landed it, retry.
+              if [ -r /etc/worxco/current-env ]; then
+                RESTORED_ENV=$(< /etc/worxco/current-env)
+                if [ -n "$RESTORED_ENV" ] && [ "$RESTORED_ENV" != "NONE" ]; then
+                  echo "=== Post-restore: re-mounting /var/www for env=$RESTORED_ENV ==="
+                  if [ -x /usr/local/sbin/use-env ]; then
+                    /usr/local/sbin/use-env "$RESTORED_ENV" \
+                      || echo "WARN: use-env $RESTORED_ENV failed - run 'sudo use-env $RESTORED_ENV' manually"
+                  else
+                    echo "WARN: /usr/local/sbin/use-env not present (bootstrap.sh incomplete?) - operator must run 'sudo use-env $RESTORED_ENV'"
+                  fi
+                fi
+              fi
+
               echo "=== UserData complete $(date) ==="
             - Region: !Ref 'AWS::Region'
               BackupsBucket: !Ref DeployHostBackupsBucketName
