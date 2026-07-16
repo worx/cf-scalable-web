@@ -115,6 +115,9 @@ KNOWN_PATHS=(
   "/root/.aws/config"
   "/home/ubuntu/.aws/config"
 
+  # Active env marker (bootstrap.sh remount step reads this)
+  "/etc/worxco/current-env"
+
   # Shell dotfiles
   "/root/.bashrc"
   "/root/.profile"

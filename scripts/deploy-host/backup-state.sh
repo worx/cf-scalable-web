@@ -161,6 +161,13 @@ BACKUP_PATHS=(
   "/root/.aws/config"
   "/home/ubuntu/.aws/config"
 
+  # --- Active env marker (drives bootstrap.sh's auto-remount step) ---
+  # bootstrap.sh:503-530 reads /etc/worxco/current-env and, if it's
+  # anything other than "NONE", invokes `use-env <env>` to re-establish
+  # the /var/www FSx mount without operator intervention. Capturing
+  # this file closes the last "manual step on instance replacement" gap.
+  "/etc/worxco/current-env"
+
   # --- Shell dotfiles (default OR modified - capture either state) ---
   "/root/.bashrc"
   "/root/.profile"
