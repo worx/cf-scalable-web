@@ -65,7 +65,7 @@ NC     := \033[0m
         deploy-jumpbox destroy-jumpbox \
         ssm-jumpbox ssm-tunnel jumpbox-pubkey \
         dump-mysql dump-codebase dump-files dump-private dump-all \
-        restore-mysql \
+        restore-mysql run-pgloader \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         .preflight
 
@@ -154,6 +154,9 @@ help:  ## Show this help
 	@echo "  make restore-mysql           Fetch prod dump from S3 → local MariaDB scratch"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY LOCAL_DB_NAME LOCAL_DB_USER LOCAL_DB_PASS FORCE_DOWNLOAD$(NC)"
+	@echo "  make run-pgloader            Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader)"
+	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
+	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB$(NC)"
 	@echo ""
 
 # -----------------------------------------------------------------------------
@@ -561,6 +564,35 @@ restore-mysql:  ## Fetch prod dump from S3 → local MariaDB scratch  [FROM: dep
 	echo "$(CYAN)  DRY_RUN          = $${DRY_RUN:-no}$(NC)"; \
 	echo ""; \
 	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/restore-mysql.sh
+
+run-pgloader:  ## Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader)  [FROM: deploy-host, PROFILE: instance-role]
+	@# Same bucket-lookup pattern as restore-mysql: use MIGRATION_BUCKET from
+	@# the operator env if set, otherwise read it from CFN. On deploy-host
+	@# this uses the instance role automatically — no --profile flag needed.
+	@BUCKET_NAME="$${MIGRATION_BUCKET:-}"; \
+	if [ -z "$$BUCKET_NAME" ]; then \
+		echo "$(BLUE)Looking up bucket name from CFN stack '$(BUCKET_STACK)'...$(NC)"; \
+		BUCKET_NAME=$$(aws cloudformation describe-stacks \
+			--stack-name $(BUCKET_STACK) \
+			--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+			--output text --region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+			echo "$(RED)Could not resolve migration bucket from CFN stack '$(BUCKET_STACK)'.$(NC)"; \
+			echo "$(YELLOW)Either:$(NC)"; \
+			echo "$(YELLOW)  1) Deploy the bucket:  make deploy-bucket$(NC)"; \
+			echo "$(YELLOW)  2) Override the name:  make run-pgloader MIGRATION_BUCKET=<name>$(NC)"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "$(BLUE)Running run-pgloader.sh on this host...$(NC)"; \
+	echo "$(CYAN)  MIGRATION_BUCKET  = $$BUCKET_NAME$(NC)"; \
+	echo "$(CYAN)  ENV_FILE          = $${ENV_FILE:-/etc/worxco/envs/sandbox}$(NC)"; \
+	echo "$(CYAN)  TEMPLATE_PATH     = $${TEMPLATE_PATH:-<repo>/migration/pgloader/zinew.load.tmpl}$(NC)"; \
+	echo "$(CYAN)  PGLOADER_HEAP_MB  = $${PGLOADER_HEAP_MB:-4096}$(NC)"; \
+	echo "$(CYAN)  CONFIRMED         = $${CONFIRMED:-no}$(NC)"; \
+	echo "$(CYAN)  DRY_RUN           = $${DRY_RUN:-no}$(NC)"; \
+	echo ""; \
+	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/run-pgloader.sh
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
