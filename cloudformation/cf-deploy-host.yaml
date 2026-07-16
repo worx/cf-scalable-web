@@ -174,8 +174,13 @@ Resources:
               echo "Memory: $(free -h | awk '/^Mem:/ {print $3"/"$2}')"
               echo "Disk:   $(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')"
 
-              # 2 GB swap (helps memory-intensive composer / npm operations)
-              fallocate -l 2G /swapfile
+              # 4 GB swap — sized for pgloader migrations (SBCL
+              # --dynamic-space-size 4096) plus headroom for composer / npm.
+              # Empirical: second migration run with tuned pgloader
+              # (batch rows = 250, workers = 2, concurrency = 1) fits
+              # comfortably in this envelope. If a future migration needs
+              # more, migration scripts can attach a temporary /swapfile2.
+              fallocate -l 4G /swapfile
               chmod 600 /swapfile
               mkswap /swapfile
               swapon /swapfile

@@ -385,11 +385,13 @@ systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
 # ============================================================
-step "Drupal management apt packages (NFS, mysql/maria-cli, psql, sqlite, redis-cli, PHP 8.3 + 12 extensions)"
+step "Drupal management apt packages (NFS, mariadb server/cli, pgloader, psql, sqlite, redis-cli, PHP 8.3 + 12 extensions)"
 # ============================================================
 apt-get install -y \
   mariadb-client \
+  mariadb-server \
   nfs-common \
+  pgloader \
   postgresql-client \
   sqlite3 \
   redis-tools \
@@ -405,6 +407,32 @@ apt-get install -y \
   php8.3-intl \
   php8.3-bcmath \
   php8.3-opcache
+
+# ============================================================
+step "MariaDB server: install but do NOT start (scratch DB for test migrations only)"
+# ============================================================
+# The mariadb-server package auto-starts and auto-enables the systemd unit
+# on install. We're only using it as a scratch DB during pgloader-based
+# test migrations, so idling it costs ~100 MB RAM for no reason. Turn it
+# off here; migration/scripts/deploy-host/restore-mysql.sh starts it on
+# demand and leaves it running until an operator manually stops it.
+systemctl disable --now mariadb \
+  || echo "WARN: could not disable/stop mariadb (non-fatal — check manually)"
+
+# ============================================================
+step "AWS session-manager-plugin (SSM tunneling from deploy-host)"
+# ============================================================
+# Not in Ubuntu apt repos — pull the .deb directly from Amazon.
+# ARM64 build (deploy-host runs on Graviton).
+cd /tmp
+curl -sS \
+  "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb" \
+  -o session-manager-plugin.deb
+dpkg -i session-manager-plugin.deb || apt-get -f install -y
+rm session-manager-plugin.deb
+cd /
+session-manager-plugin --version \
+  || echo "WARN: session-manager-plugin install may have failed"
 
 # ============================================================
 step "Composer (latest stable)"

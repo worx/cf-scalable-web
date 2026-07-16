@@ -104,14 +104,21 @@ for tool in mysql aws sed grep stat; do
 done
 log_ok "All required tools available"
 
-# MariaDB must be running (systemd)
+# MariaDB must be running (systemd). Bootstrap.sh installs but disables
+# the unit to save idle RAM; auto-start it here on first use of this script.
 if ! systemctl is-active --quiet mariadb 2>/dev/null; then
-  log_error "MariaDB service is not active."
-  log_info  "Start with: sudo systemctl start mariadb"
-  log_info  "Or install: sudo apt install -y mariadb-server mariadb-client"
-  exit 1
+  log_info "MariaDB service not active — attempting to start..."
+  if systemctl start mariadb 2>/dev/null && systemctl is-active --quiet mariadb; then
+    log_ok "MariaDB service started"
+  else
+    log_error "Failed to start MariaDB service."
+    log_info  "Check: sudo systemctl status mariadb"
+    log_info  "Or install (if missing): sudo apt install -y mariadb-server mariadb-client"
+    exit 1
+  fi
+else
+  log_ok "MariaDB service is active"
 fi
-log_ok "MariaDB service is active"
 
 # MariaDB root access via socket auth (default when run as root)
 if ! mysql -e "SELECT VERSION();" >/dev/null 2>&1; then
