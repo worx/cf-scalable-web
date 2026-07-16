@@ -75,7 +75,10 @@ apt-get upgrade -y || apt-get upgrade -y --fix-missing || echo "WARN: apt upgrad
 step "Core CLI tools"
 # ============================================================
 apt-get install -y \
+  htop \
   make \
+  mlocate \
+  pv \
   screen \
   tmux \
   tree \
@@ -83,6 +86,10 @@ apt-get install -y \
   zsh \
   python3-pip \
   python3-venv
+
+# Prime locate's db so `locate <pattern>` works immediately on this boot
+# (cron.daily would do this eventually — this just avoids the first-day gap).
+updatedb || echo "WARN: updatedb failed (non-fatal — cron.daily will catch up)"
 
 # ============================================================
 step "Editor defaults + profile.d env"
@@ -378,9 +385,10 @@ systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
 # ============================================================
-step "Drupal management apt packages (NFS, psql, sqlite, redis-cli, PHP 8.3 + 12 extensions)"
+step "Drupal management apt packages (NFS, mysql/maria-cli, psql, sqlite, redis-cli, PHP 8.3 + 12 extensions)"
 # ============================================================
 apt-get install -y \
+  mariadb-client \
   nfs-common \
   postgresql-client \
   sqlite3 \

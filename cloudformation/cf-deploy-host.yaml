@@ -260,22 +260,34 @@ Resources:
               BACKUPS_BUCKET="${BackupsBucket}"
               LATEST_KEY="config/deploy-host-latest.tar.gz"
 
+              # Each fallible step is guarded with `|| { echo REASON; ...; }` so
+              # a missing S3 object (e.g. restore-state.sh not yet uploaded
+              # because the operator has only ever run backup, never restore)
+              # no longer trips `set -e` and kills the whole UserData script.
+              # --quiet is intentionally dropped so aws cli errors land in the log.
               if aws s3api head-object \
                    --bucket "$BACKUPS_BUCKET" --key "$LATEST_KEY" >/dev/null 2>&1; then
-                echo "=== Prior deploy-host state found in S3 - running restore-state.sh ==="
+                echo "=== Prior deploy-host state found in S3 - attempting restore ==="
                 mkdir -p /opt/deploy-host/scripts/deploy-host
                 # Pull the actual restore-state.sh (not a copy embedded here)
                 # so we always run the current version from S3 - same
                 # script the operator uses via `make restore-deploy-host`.
+                RESTORE_READY=1
                 aws s3 cp "s3://$BACKUPS_BUCKET/scripts/_common.sh" \
-                          /opt/deploy-host/scripts/_common.sh --quiet
-                aws s3 cp "s3://$BACKUPS_BUCKET/scripts/deploy-host/restore-state.sh" \
-                          /opt/deploy-host/scripts/deploy-host/restore-state.sh --quiet
-                chmod +x /opt/deploy-host/scripts/deploy-host/restore-state.sh
-                # CONFIRMED=yes - UserData is non-interactive
-                CONFIRMED=yes DEPLOY_HOST_BACKUPS_BUCKET="$BACKUPS_BUCKET" \
-                  /opt/deploy-host/scripts/deploy-host/restore-state.sh \
-                  || echo "restore-state.sh exited non-zero - proceeding without full restore"
+                          /opt/deploy-host/scripts/_common.sh \
+                  || { echo "WARN: could not fetch scripts/_common.sh from S3 - skipping restore"; RESTORE_READY=0; }
+                if [ "$RESTORE_READY" = "1" ]; then
+                  aws s3 cp "s3://$BACKUPS_BUCKET/scripts/deploy-host/restore-state.sh" \
+                            /opt/deploy-host/scripts/deploy-host/restore-state.sh \
+                    || { echo "WARN: could not fetch scripts/deploy-host/restore-state.sh from S3 - skipping restore (run 'make restore-deploy-host' from the operator Mac to upload it)"; RESTORE_READY=0; }
+                fi
+                if [ "$RESTORE_READY" = "1" ]; then
+                  chmod +x /opt/deploy-host/scripts/deploy-host/restore-state.sh
+                  # CONFIRMED=yes - UserData is non-interactive
+                  CONFIRMED=yes DEPLOY_HOST_BACKUPS_BUCKET="$BACKUPS_BUCKET" \
+                    /opt/deploy-host/scripts/deploy-host/restore-state.sh \
+                    || echo "WARN: restore-state.sh exited non-zero - partial or no restore"
+                fi
               else
                 echo "=== No prior deploy-host state in S3 - fresh instance ==="
               fi
