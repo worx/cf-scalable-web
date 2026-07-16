@@ -77,7 +77,7 @@ step "Core CLI tools"
 apt-get install -y \
   htop \
   make \
-  mlocate \
+  plocate \
   pv \
   screen \
   tmux \
@@ -87,9 +87,10 @@ apt-get install -y \
   python3-pip \
   python3-venv
 
-# Prime locate's db so `locate <pattern>` works immediately on this boot
-# (cron.daily would do this eventually — this just avoids the first-day gap).
-updatedb || echo "WARN: updatedb failed (non-fatal — cron.daily will catch up)"
+# Prime locate's db so `locate <pattern>` works immediately on this boot.
+# (Ubuntu 24.04 replaced mlocate with plocate — same locate/updatedb CLI,
+# faster indexer, ships its own systemd timer that runs daily.)
+updatedb || echo "WARN: updatedb failed (non-fatal — plocate.timer will catch up)"
 
 # ============================================================
 step "Editor defaults + profile.d env"
