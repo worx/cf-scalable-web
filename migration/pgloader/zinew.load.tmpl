@@ -19,8 +19,10 @@
 -- Target: postgresql://.../${DRUPAL_DB_NAME}?sslmode=require
 --   - Values come from /etc/worxco/envs/sandbox (populated by
 --     refresh-env-config from SSM).
---   - SANDBOX_PW_ENC is the URL-encoded form of the master password.
---     run-pgloader.sh computes it from SANDBOX_PW if missing.
+--   - DRUPAL_DB_PASS_ENC is the URL-encoded form of drupal_user's
+--     password. run-pgloader.sh computes it at render time from
+--     DRUPAL_DB_PASS (raw, sourced by /etc/worxco/envs/sandbox from
+--     Secrets Manager worxco/sandbox/drupal/db-password).
 --   - Schema `zinew` comes from Drupal's own settings.php, not
 --     pgloader — pgloader writes to the default (public) schema.
 --
@@ -47,7 +49,7 @@
 
 LOAD DATABASE
   FROM mysql://worxco:localscratchpass@127.0.0.1:3306/zinew
-  INTO postgresql://${DRUPAL_DB_USER}:${SANDBOX_PW_ENC}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}?sslmode=require
+  INTO postgresql://${DRUPAL_DB_USER}:${DRUPAL_DB_PASS_ENC}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}?sslmode=require
 
   WITH include drop,
        create tables,

@@ -16,8 +16,8 @@
 #   1. Preconditions    (root, tools, mariadb running, template exists,
 #                        RDS reachable via 5432)
 #   2. Env sourcing     (source /etc/worxco/envs/sandbox → DRUPAL_DB_*)
-#                        + password URL-encoding (SANDBOX_PW_ENC) if
-#                        the env only has the raw password.
+#                        + password URL-encoding (DRUPAL_DB_PASS_ENC —
+#                        computed at runtime from env's DRUPAL_DB_PASS).
 #   3. Confirmation     (`include drop` in the load file wipes the
 #                        target DB — honors CONFIRMED=yes)
 #   4. Render template  (envsubst zinew.load.tmpl → /tmp/zinew.load,
@@ -192,25 +192,24 @@ for var in DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME; do
   fi
 done
 
-# Password: env may provide SANDBOX_PW_ENC (URL-encoded, preferred) or
-# SANDBOX_PW (raw). We URL-encode via jq if only the raw form is set.
-if [ -z "${SANDBOX_PW_ENC:-}" ]; then
-  if [ -n "${SANDBOX_PW:-}" ]; then
-    SANDBOX_PW_ENC=$(jq -rn --arg s "$SANDBOX_PW" '$s|@uri')
-    log_info "SANDBOX_PW_ENC computed from SANDBOX_PW (URL-encoded via jq)"
-  else
-    log_error "Neither SANDBOX_PW_ENC nor SANDBOX_PW is set."
-    log_info  "Rebuild env file: sudo refresh-env-config sandbox"
-    exit 1
-  fi
+# DRUPAL_DB_PASS comes from the env file (refresh-env-config sources it
+# from Secrets Manager at worxco/$ENV/drupal/db-password). We URL-encode
+# it via jq for embedding in the pgloader connection URL — pgloader parses
+# the target as a URL, so passwords with @, :, /, %, etc. need to be
+# percent-encoded to survive the parse.
+if [ -z "${DRUPAL_DB_PASS:-}" ]; then
+  log_error "DRUPAL_DB_PASS not set after sourcing $ENV_FILE."
+  log_info  "Rebuild env file: sudo refresh-env-config sandbox"
+  exit 1
 fi
-export DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME SANDBOX_PW_ENC
+DRUPAL_DB_PASS_ENC=$(jq -rn --arg s "$DRUPAL_DB_PASS" '$s|@uri')
+export DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME DRUPAL_DB_PASS_ENC
 
-log_info "DRUPAL_DB_USER    = $DRUPAL_DB_USER"
-log_info "DRUPAL_DB_HOST    = $DRUPAL_DB_HOST"
-log_info "DRUPAL_DB_PORT    = $DRUPAL_DB_PORT"
-log_info "DRUPAL_DB_NAME    = $DRUPAL_DB_NAME"
-log_info "SANDBOX_PW_ENC    = $(mask_secret "$SANDBOX_PW_ENC")"
+log_info "DRUPAL_DB_USER      = $DRUPAL_DB_USER"
+log_info "DRUPAL_DB_HOST      = $DRUPAL_DB_HOST"
+log_info "DRUPAL_DB_PORT      = $DRUPAL_DB_PORT"
+log_info "DRUPAL_DB_NAME      = $DRUPAL_DB_NAME"
+log_info "DRUPAL_DB_PASS_ENC  = $(mask_secret "$DRUPAL_DB_PASS_ENC")"
 
 # RDS reachability sanity check (TCP connect only — psql auth
 # might fail for other reasons, we don't want to confuse errors).
@@ -245,7 +244,7 @@ else
   # literal ${...} that isn't in our whitelist survives untouched.
   # (Belt-and-suspenders — the template doesn't have any other
   # ${...} references today, but this guards a future edit.)
-  envsubst '${DRUPAL_DB_USER} ${SANDBOX_PW_ENC} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME}' \
+  envsubst '${DRUPAL_DB_USER} ${DRUPAL_DB_PASS_ENC} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME}' \
     < "$TEMPLATE_PATH" > "$RENDERED_PATH"
   chmod 600 "$RENDERED_PATH"
   log_ok "Rendered to $RENDERED_PATH (chmod 600)"
@@ -288,7 +287,7 @@ fi
 # password in the psql URL to keep it out of process listings.
 if [ "${DRY_RUN:-}" != "yes" ]; then
   TARGET_TABLE_COUNT=$(
-    PGPASSWORD="$SANDBOX_PW_ENC" psql \
+    PGPASSWORD="$DRUPAL_DB_PASS" psql \
       -h "$DRUPAL_DB_HOST" -p "$DRUPAL_DB_PORT" \
       -U "$DRUPAL_DB_USER" -d "$DRUPAL_DB_NAME" \
       -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" \
