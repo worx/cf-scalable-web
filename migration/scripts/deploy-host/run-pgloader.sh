@@ -16,8 +16,9 @@
 #   1. Preconditions    (root, tools, mariadb running, template exists,
 #                        RDS reachable via 5432)
 #   2. Env sourcing     (source /etc/worxco/envs/sandbox → DRUPAL_DB_*)
-#                        + password URL-encoding (DRUPAL_DB_PASS_ENC —
-#                        computed at runtime from env's DRUPAL_DB_PASS).
+#                        (password used RAW — CFN excludes URL-hostile
+#                        chars in GenerateSecretString, so no encoding needed;
+#                        encoding actually breaks pgloader's URL parser).
 #   3. Confirmation     (`include drop` in the load file wipes the
 #                        target DB — honors CONFIRMED=yes)
 #   4. Render template  (envsubst zinew.load.tmpl → /tmp/zinew.load,
@@ -193,23 +194,27 @@ for var in DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME; do
 done
 
 # DRUPAL_DB_PASS comes from the env file (refresh-env-config sources it
-# from Secrets Manager at worxco/$ENV/drupal/db-password). We URL-encode
-# it via jq for embedding in the pgloader connection URL — pgloader parses
-# the target as a URL, so passwords with @, :, /, %, etc. need to be
-# percent-encoded to survive the parse.
+# from Secrets Manager at worxco/$ENV/drupal/db-password). Embed it RAW
+# in the pgloader URL — do NOT URL-encode via jq's @uri.
+#
+# Why raw: CFN's GenerateSecretString (cf-app-drupal.yaml:141-150) already
+# excludes URL-hostile characters (@, /, %, &, +, :, ;, =, ?, [, ], #, etc.),
+# so the raw password is safe to embed unchanged. AND pgloader's URL parser
+# has known issues round-tripping certain @uri-encoded sequences (comma,
+# etc. — encoding introduces the bug rather than preventing one).
+# Discovered live during migration test 2026-07-17.
 if [ -z "${DRUPAL_DB_PASS:-}" ]; then
   log_error "DRUPAL_DB_PASS not set after sourcing $ENV_FILE."
   log_info  "Rebuild env file: sudo refresh-env-config sandbox"
   exit 1
 fi
-DRUPAL_DB_PASS_ENC=$(jq -rn --arg s "$DRUPAL_DB_PASS" '$s|@uri')
-export DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME DRUPAL_DB_PASS_ENC
+export DRUPAL_DB_USER DRUPAL_DB_HOST DRUPAL_DB_PORT DRUPAL_DB_NAME DRUPAL_DB_PASS
 
-log_info "DRUPAL_DB_USER      = $DRUPAL_DB_USER"
-log_info "DRUPAL_DB_HOST      = $DRUPAL_DB_HOST"
-log_info "DRUPAL_DB_PORT      = $DRUPAL_DB_PORT"
-log_info "DRUPAL_DB_NAME      = $DRUPAL_DB_NAME"
-log_info "DRUPAL_DB_PASS_ENC  = $(mask_secret "$DRUPAL_DB_PASS_ENC")"
+log_info "DRUPAL_DB_USER  = $DRUPAL_DB_USER"
+log_info "DRUPAL_DB_HOST  = $DRUPAL_DB_HOST"
+log_info "DRUPAL_DB_PORT  = $DRUPAL_DB_PORT"
+log_info "DRUPAL_DB_NAME  = $DRUPAL_DB_NAME"
+log_info "DRUPAL_DB_PASS  = $(mask_secret "$DRUPAL_DB_PASS")"
 
 # RDS reachability sanity check (TCP connect only — psql auth
 # might fail for other reasons, we don't want to confuse errors).
@@ -244,7 +249,7 @@ else
   # literal ${...} that isn't in our whitelist survives untouched.
   # (Belt-and-suspenders — the template doesn't have any other
   # ${...} references today, but this guards a future edit.)
-  envsubst '${DRUPAL_DB_USER} ${DRUPAL_DB_PASS_ENC} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME}' \
+  envsubst '${DRUPAL_DB_USER} ${DRUPAL_DB_PASS} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME}' \
     < "$TEMPLATE_PATH" > "$RENDERED_PATH"
   chmod 600 "$RENDERED_PATH"
   log_ok "Rendered to $RENDERED_PATH (chmod 600)"

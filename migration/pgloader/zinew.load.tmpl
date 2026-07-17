@@ -19,17 +19,19 @@
 -- Target: postgresql://.../${DRUPAL_DB_NAME}?sslmode=require
 --   - Values come from /etc/worxco/envs/sandbox (populated by
 --     refresh-env-config from SSM).
---   - DRUPAL_DB_PASS_ENC is the URL-encoded form of drupal_user's
---     password. run-pgloader.sh computes it at render time from
---     DRUPAL_DB_PASS (raw, sourced by /etc/worxco/envs/sandbox from
---     Secrets Manager worxco/sandbox/drupal/db-password).
+--   - DRUPAL_DB_PASS is drupal_user's password, embedded RAW in the URL.
+--     No URL encoding — CFN's GenerateSecretString ExcludeCharacters
+--     (cf-app-drupal.yaml:141-150) already prevents URL-hostile chars,
+--     and pgloader's URL parser has round-trip bugs with percent-encoded
+--     sequences (comma, etc.) that INTRODUCE auth failures.
 --   - Schema `zinew` comes from Drupal's own settings.php, not
 --     pgloader — pgloader writes to the default (public) schema.
 --
--- WITH clause tuning (baked in from second successful migration run):
---   - batch/prefetch = 250 (down from pgloader defaults of ~25000/1000)
---     After first-run OOM at defaults, dropping to 250 kept memory
---     pressure well below the 4 GB SBCL heap.
+-- WITH clause tuning (revised 2026-07-17):
+--   - batch/prefetch = 500 (down from pgloader defaults of ~25000/1000).
+--     Progression: defaults → 250 (safe but conservative) → 500 (this
+--     run — a middle ground once 250 proved comfortable under the
+--     4 GB SBCL heap and workers=2/concurrency=1).
 --   - workers = 2, concurrency = 1
 --     One table at a time, two worker threads. Slower than default
 --     parallelism but predictable memory footprint.
@@ -49,7 +51,7 @@
 
 LOAD DATABASE
   FROM mysql://worxco:localscratchpass@127.0.0.1:3306/zinew
-  INTO postgresql://${DRUPAL_DB_USER}:${DRUPAL_DB_PASS_ENC}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}?sslmode=require
+  INTO postgresql://${DRUPAL_DB_USER}:${DRUPAL_DB_PASS}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}?sslmode=require
 
   WITH include drop,
        create tables,
@@ -57,8 +59,8 @@ LOAD DATABASE
        reset sequences,
        foreign keys,
        downcase identifiers,
-       batch rows = 250,
-       prefetch rows = 250,
+       batch rows = 500,
+       prefetch rows = 500,
        workers = 2,
        concurrency = 1
 
