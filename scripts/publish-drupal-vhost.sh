@@ -7,8 +7,8 @@
 # /etc/nginx/shared/sites-enabled/drupal.conf to FSx via the deploy-host.
 #
 # Use this when:
-#   - install-drupal already ran successfully (.installed marker exists)
-#     but the nginx vhost is missing or out of date
+#   - Drupal is deployed on FSx (drush + settings.php present) but the
+#     nginx vhost is missing or out of date
 #   - You want to update the vhost without doing a full reinstall
 #
 # After this, run `make reload-nginx ENV=<env>` to make the live fleet

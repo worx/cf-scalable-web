@@ -96,8 +96,14 @@ if ! mountpoint -q /var/www; then
   echo "ERROR: /var/www is not mounted." >&2
   exit 1
 fi
-if [ ! -f /var/www/drupal/.installed ]; then
-  echo "ERROR: Drupal not installed for env=$ENV (no .installed marker)." >&2
+# Structural check — .installed marker is nice-to-have informational, but
+# the real gate is: can we run drush at all? For that we need drush
+# installed and a valid settings.php. See
+# docs/memory/structural-checks-over-markers.md for rationale.
+if ! [ -x /var/www/drupal/vendor/bin/drush ] \
+   || ! [ -f /var/www/drupal/web/sites/default/settings.php ]; then
+  echo "ERROR: Drupal not deployed at /var/www/drupal for env=$ENV." >&2
+  echo "       Missing drush and/or settings.php. Run: make install-drupal ENV=$ENV" >&2
   exit 1
 fi
 

@@ -92,8 +92,8 @@ sudo use-env "\$ENV"
 
 echo "=== 5. make install-drupal ENV=\$ENV ==="
 cd "\$REPO_DIR"
-if [ -f "/var/www/drupal/.installed" ]; then
-  echo "  Drupal already installed on this FSx — skipping install (idempotent)."
+if [ -x "/var/www/drupal/vendor/bin/drush" ] && [ -f "/var/www/drupal/web/sites/default/settings.php" ]; then
+  echo "  Drupal already deployed on this FSx — skipping install (idempotent)."
   echo "  To force reinstall: make reinstall-drupal ENV=\$ENV"
 else
   make install-drupal ENV="\$ENV"

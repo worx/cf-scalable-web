@@ -895,8 +895,9 @@ verify-drupal-local:  ## Run health checks on local Drupal install (drush status
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host. See: make install-drupal-local$(NC)"; exit 1; \
 	fi
-	@if [ ! -f /var/www/local/drupal/.installed ]; then \
-		echo "$(RED)Drupal not installed locally. Run: make install-drupal-local$(NC)"; exit 1; \
+	@if ! [ -x /var/www/local/drupal/vendor/bin/drush ] \
+	    || ! [ -f /var/www/local/drupal/web/sites/default/settings.php ]; then \
+		echo "$(RED)Drupal not deployed at /var/www/local/drupal (drush or settings.php missing). Run: make install-drupal-local$(NC)"; exit 1; \
 	fi
 	@echo "$(BLUE)=== drush status ==="
 	@cd /var/www/local/drupal && vendor/bin/drush status \
@@ -922,8 +923,9 @@ serve-drupal-local:  ## Start drush runserver in tmux (port 8080) — survives d
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
 	fi
-	@if [ ! -f /var/www/local/drupal/.installed ]; then \
-		echo "$(RED)Drupal not installed locally. Run: make install-drupal-local$(NC)"; exit 1; \
+	@if ! [ -x /var/www/local/drupal/vendor/bin/drush ] \
+	    || ! [ -f /var/www/local/drupal/web/sites/default/settings.php ]; then \
+		echo "$(RED)Drupal not deployed at /var/www/local/drupal (drush or settings.php missing). Run: make install-drupal-local$(NC)"; exit 1; \
 	fi
 	@if tmux has-session -t drupal-local 2>/dev/null; then \
 		echo "$(CYAN)drush runserver is already running in tmux session 'drupal-local'.$(NC)"; \
@@ -1055,8 +1057,9 @@ verify-drupal:  ## Health check on the cloud Drupal install for ENV (drush statu
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
 	fi
-	@if [ ! -f /var/www/$(ENV)/drupal/.installed ]; then \
-		echo "$(RED)Drupal not installed for $(ENV). Run: make install-drupal ENV=$(ENV)$(NC)"; \
+	@if ! [ -x /var/www/drupal/vendor/bin/drush ] \
+	    || ! [ -f /var/www/drupal/web/sites/default/settings.php ]; then \
+		echo "$(RED)Drupal not deployed at /var/www/drupal (drush or settings.php missing). Run: make install-drupal ENV=$(ENV)$(NC)"; \
 		exit 1; \
 	fi
 	@RDS_ENDPOINT=$$(aws ssm get-parameter --name "/$(ENV)/rds/endpoint" \
@@ -1071,14 +1074,14 @@ verify-drupal:  ## Health check on the cloud Drupal install for ENV (drush statu
 		DRUPAL_DB_NAME="drupal" DRUPAL_DB_USER="drupal_user" \
 		DRUPAL_DB_PASS="$$DRUPAL_DB_PW"; \
 	echo "$(BLUE)=== drush status ==="; \
-	cd /var/www/$(ENV)/drupal && vendor/bin/drush status \
+	cd /var/www/drupal && vendor/bin/drush status \
 		--fields=drupal-version,db-driver,db-status,bootstrap,uri,php-version; \
 	echo ""; \
 	echo "$(BLUE)=== admin user ==="; \
-	cd /var/www/$(ENV)/drupal && vendor/bin/drush user:information admin; \
+	cd /var/www/drupal && vendor/bin/drush user:information admin; \
 	echo ""; \
 	echo "$(BLUE)=== database row counts ==="; \
-	cd /var/www/$(ENV)/drupal && vendor/bin/drush sqlq \
+	cd /var/www/drupal && vendor/bin/drush sqlq \
 		"SELECT 'users' AS what, count(*) FROM users_field_data UNION ALL \
 		 SELECT 'nodes',           count(*) FROM node_field_data UNION ALL \
 		 SELECT 'config',          count(*) FROM config UNION ALL \
