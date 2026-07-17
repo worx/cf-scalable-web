@@ -236,8 +236,8 @@ if is_dry_run; then
   log_info "[DRY_RUN] would run:"
   log_info "  DROP DATABASE IF EXISTS \`$LOCAL_DB_NAME\`;"
   log_info "  CREATE DATABASE \`$LOCAL_DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  log_info "  CREATE USER IF NOT EXISTS '$LOCAL_DB_USER'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY ...;"
-  log_info "  ALTER USER '$LOCAL_DB_USER'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY ...;"
+  log_info "  CREATE USER IF NOT EXISTS '$LOCAL_DB_USER'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD(...);"
+  log_info "  ALTER USER '$LOCAL_DB_USER'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD(...);"
   log_info "  GRANT ALL PRIVILEGES ON \`$LOCAL_DB_NAME\`.* TO '$LOCAL_DB_USER'@'127.0.0.1'; FLUSH PRIVILEGES;"
 else
   mysql <<SQL
@@ -246,11 +246,11 @@ CREATE DATABASE \`$LOCAL_DB_NAME\`
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$LOCAL_DB_USER'@'127.0.0.1'
-  IDENTIFIED WITH mysql_native_password
-  BY '$LOCAL_DB_PASS';
+  IDENTIFIED VIA mysql_native_password
+  USING PASSWORD('$LOCAL_DB_PASS');
 ALTER USER '$LOCAL_DB_USER'@'127.0.0.1'
-  IDENTIFIED WITH mysql_native_password
-  BY '$LOCAL_DB_PASS';
+  IDENTIFIED VIA mysql_native_password
+  USING PASSWORD('$LOCAL_DB_PASS');
 GRANT ALL PRIVILEGES ON \`$LOCAL_DB_NAME\`.* TO '$LOCAL_DB_USER'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
