@@ -436,6 +436,21 @@ session-manager-plugin --version \
   || echo "WARN: session-manager-plugin install may have failed"
 
 # ============================================================
+step "AWS RDS CA bundle (for pgloader + any TLS client → RDS)"
+# ============================================================
+# Ubuntu's default CA store does NOT include the AWS RDS root CAs.
+# Tools that respect the system trust store (openssl, pgloader's cl+ssl
+# layer, some psql configurations) will reject RDS connections with
+# X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN even when --no-ssl-cert-verification
+# is passed at the CLI, because the underlying SSL library still validates
+# the chain. Installing AWS's global-bundle.pem into the system trust
+# store closes that gap for every TLS client on the box.
+curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+     -o /usr/local/share/ca-certificates/rds-ca.crt \
+  && update-ca-certificates >/dev/null 2>&1 \
+  || echo "WARN: RDS CA bundle install failed (non-fatal — pgloader may still hit TLS verify errors)"
+
+# ============================================================
 step "Composer (latest stable)"
 # ============================================================
 curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php
