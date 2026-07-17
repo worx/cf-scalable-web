@@ -41,6 +41,13 @@
 #   TEMPLATE_PATH      pgloader .load template  (<repo>/migration/pgloader/zinew.load.tmpl)
 #   RENDERED_PATH      Rendered .load path      (/tmp/zinew.load)
 #   PGLOADER_HEAP_MB   SBCL dynamic-space-size  (4096 — 4 GB)
+#   MIGRATION_DB_NAME  Name of DB being migrated (zinew)
+#                        Used for source MariaDB precondition check AND
+#                        target Postgres schema verify. Pgloader creates
+#                        a Postgres schema matching the source MySQL DB
+#                        name by default, so these are the same string.
+#                        Override this + supply a matching TEMPLATE_PATH
+#                        to migrate a different DB in the future.
 #   CONFIRMED          yes = skip interactive Y/N confirmation prompt
 #   DRY_RUN            yes = preview commands without executing
 #
@@ -74,6 +81,7 @@ ENV_FILE="${ENV_FILE:-/etc/worxco/envs/sandbox}"
 TEMPLATE_PATH="${TEMPLATE_PATH:-$REPO_MIGRATION_DIR/pgloader/zinew.load.tmpl}"
 RENDERED_PATH="${RENDERED_PATH:-/tmp/zinew.load}"
 PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-4096}"
+MIGRATION_DB_NAME="${MIGRATION_DB_NAME:-zinew}"
 
 # ============================================================
 # Set up logging + on-exit S3 upload of the log file
@@ -100,11 +108,12 @@ _cleanup() {
 trap _cleanup EXIT
 
 log_step "run-pgloader — local MariaDB scratch → sandbox RDS PostgreSQL"
-log_info "MIGRATION_BUCKET  = $MIGRATION_BUCKET"
-log_info "ENV_FILE          = $ENV_FILE"
-log_info "TEMPLATE_PATH     = $TEMPLATE_PATH"
-log_info "RENDERED_PATH     = $RENDERED_PATH"
-log_info "PGLOADER_HEAP_MB  = $PGLOADER_HEAP_MB"
+log_info "MIGRATION_BUCKET   = $MIGRATION_BUCKET"
+log_info "ENV_FILE           = $ENV_FILE"
+log_info "TEMPLATE_PATH      = $TEMPLATE_PATH"
+log_info "RENDERED_PATH      = $RENDERED_PATH"
+log_info "PGLOADER_HEAP_MB   = $PGLOADER_HEAP_MB"
+log_info "MIGRATION_DB_NAME  = $MIGRATION_DB_NAME"
 if [ "${DRY_RUN:-}" = "yes" ]; then
   log_warn "DRY_RUN=yes — commands will be previewed, not executed"
 fi
@@ -162,14 +171,14 @@ fi
 # hasn't been run yet — running pgloader against an empty source
 # would happily rebuild the target with zero tables).
 SOURCE_TABLE_COUNT=$(mysql -N -e \
-  "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='zinew';" \
+  "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$MIGRATION_DB_NAME';" \
   2>/dev/null || echo 0)
 if [ "$SOURCE_TABLE_COUNT" -lt 1 ]; then
-  log_error "Source scratch DB 'zinew' has 0 tables — nothing to migrate."
+  log_error "Source scratch DB '$MIGRATION_DB_NAME' has 0 tables — nothing to migrate."
   log_info  "Populate first: make restore-mysql"
   exit 1
 fi
-log_ok "Source 'zinew' DB has $SOURCE_TABLE_COUNT tables"
+log_ok "Source '$MIGRATION_DB_NAME' DB has $SOURCE_TABLE_COUNT tables"
 
 # ============================================================
 # Phase 2 of 6: Env sourcing + password encoding
@@ -231,8 +240,8 @@ log_ok "RDS reachable at $DRUPAL_DB_HOST:$DRUPAL_DB_PORT"
 log_step "Phase 3/6: Confirmation"
 
 confirm_or_exit "About to REBUILD the sandbox RDS PostgreSQL target from local MariaDB.
-    Source: mysql://worxco@127.0.0.1:3306/zinew ($SOURCE_TABLE_COUNT tables)
-    Target: postgresql://$DRUPAL_DB_USER@$DRUPAL_DB_HOST:$DRUPAL_DB_PORT/$DRUPAL_DB_NAME
+    Source: mysql://worxco@127.0.0.1:3306/$MIGRATION_DB_NAME ($SOURCE_TABLE_COUNT tables)
+    Target: postgresql://$DRUPAL_DB_USER@$DRUPAL_DB_HOST:$DRUPAL_DB_PORT/$DRUPAL_DB_NAME (schema '$MIGRATION_DB_NAME')
     The load file has 'include drop' — every table in the target
     schema will be dropped and recreated. Any manual PostgreSQL
     state (custom indexes, permissions, etc.) will be lost."
@@ -291,14 +300,17 @@ fi
 # Verify target has tables. Use PGPASSWORD instead of putting the
 # password in the psql URL to keep it out of process listings.
 if [ "${DRY_RUN:-}" != "yes" ]; then
+  # Pgloader's default with a MySQL source is to create/write a Postgres
+  # schema whose name matches the source MySQL DB name. So the schema we
+  # verify is $MIGRATION_DB_NAME, not 'public'.
   TARGET_TABLE_COUNT=$(
     PGPASSWORD="$DRUPAL_DB_PASS" psql \
       -h "$DRUPAL_DB_HOST" -p "$DRUPAL_DB_PORT" \
       -U "$DRUPAL_DB_USER" -d "$DRUPAL_DB_NAME" \
-      -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" \
+      -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$MIGRATION_DB_NAME';" \
       2>/dev/null || echo 0
   )
-  log_info "Target PostgreSQL 'public' schema now has $TARGET_TABLE_COUNT tables"
+  log_info "Target PostgreSQL '$MIGRATION_DB_NAME' schema now has $TARGET_TABLE_COUNT tables"
   if [ "$TARGET_TABLE_COUNT" -lt "$((SOURCE_TABLE_COUNT / 2))" ]; then
     log_warn "Target table count ($TARGET_TABLE_COUNT) is well below source ($SOURCE_TABLE_COUNT)."
     log_warn "pgloader may have skipped tables — review the log above."

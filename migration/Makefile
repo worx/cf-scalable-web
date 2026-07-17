@@ -156,7 +156,7 @@ help:  ## Show this help
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY LOCAL_DB_NAME LOCAL_DB_USER LOCAL_DB_PASS FORCE_DOWNLOAD$(NC)"
 	@echo "  make run-pgloader            Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader)"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
-	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB$(NC)"
+	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB MIGRATION_DB_NAME$(NC)"
 	@echo ""
 
 # -----------------------------------------------------------------------------
@@ -589,6 +589,7 @@ run-pgloader:  ## Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader
 	echo "$(CYAN)  ENV_FILE          = $${ENV_FILE:-/etc/worxco/envs/sandbox}$(NC)"; \
 	echo "$(CYAN)  TEMPLATE_PATH     = $${TEMPLATE_PATH:-<repo>/migration/pgloader/zinew.load.tmpl}$(NC)"; \
 	echo "$(CYAN)  PGLOADER_HEAP_MB  = $${PGLOADER_HEAP_MB:-4096}$(NC)"; \
+	echo "$(CYAN)  MIGRATION_DB_NAME = $${MIGRATION_DB_NAME:-zinew}$(NC)"; \
 	echo "$(CYAN)  CONFIRMED         = $${CONFIRMED:-no}$(NC)"; \
 	echo "$(CYAN)  DRY_RUN           = $${DRY_RUN:-no}$(NC)"; \
 	echo ""; \
