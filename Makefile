@@ -1089,6 +1089,24 @@ verify-drupal:  ## Health check on the cloud Drupal install for ENV (drush statu
 	@echo ""
 	@echo "$(GREEN)✓ Drupal install for $(ENV) looks healthy$(NC)"
 
+show-installed:  ## Show /var/www/drupal/.installed (informational deployment metadata)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ -f /var/www/drupal/.installed ]; then \
+		echo "$(BLUE)=== /var/www/drupal/.installed ===$(NC)"; \
+		cat /var/www/drupal/.installed; \
+	else \
+		echo "$(YELLOW)No install marker at /var/www/drupal/.installed$(NC)"; \
+		echo "$(CYAN)Create/refresh with: make create-installed ENV=$(ENV)$(NC)"; \
+	fi
+
+create-installed:  ## Write /var/www/drupal/.installed with current deployment metadata (idempotent)
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@sudo scripts/deploy-host/write-install-marker.sh $(ENV)
+
 stop-drupal-local-server:  ## Stop the drush runserver tmux session
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \

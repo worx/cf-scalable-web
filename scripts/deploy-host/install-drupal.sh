@@ -626,21 +626,9 @@ vendor/bin/drush status \
 # ============================================================
 step "Drop install marker"
 # ============================================================
-cat > "$MARKER" <<MARKER_EOF
-Installed at:    $(date -u +'%Y-%m-%dT%H:%M:%SZ')
-Drupal core:     $(vendor/bin/drush status --field=drupal-version 2>/dev/null || echo 'unknown')
-Mode:            cloud (RDS + FSx)
-Environment:     $ENV
-Path:            $INSTALL_DIR
-DB endpoint:     $RDS_ENDPOINT
-DB name:         $DB_NAME
-DB user:         $DB_USER
-DB password:     stored in Secrets Manager: $DRUPAL_DB_SECRET
-Site name:       $SITE_NAME
-Admin user:      $DRUPAL_ADMIN_USER
-Admin password:  stored in Secrets Manager: $DRUPAL_ADMIN_SECRET
-MARKER_EOF
-chmod 644 "$MARKER"
+# Delegate to the shared marker-writer so `make create-installed` and
+# this script produce identical content.
+"$(dirname "$(readlink -f "$0")")/write-install-marker.sh" "$ENV"
 
 log ""
 log "============================================"
