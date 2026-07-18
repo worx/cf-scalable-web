@@ -149,10 +149,26 @@ run_or_echo() {
 # ============================================================
 log_init() {
   local script_name="${1:-migration}"
+  # 2nd arg: "both" (default) tees stdout+stderr to log; "stderr" tees
+  # only stderr. Use "stderr" for scripts whose stdout carries
+  # machine-parseable output (e.g., dispatch-db-backup.sh emits the
+  # new backup DB name on stdout; the caller captures it via $(...)).
+  local mode="${2:-both}"
   local timestamp
   timestamp=$(date -u +%Y%m%d-%H%M%SZ)
 
-  LOG_DIR="/var/log/worxco-migration"
+  # Default log dir depends on OS. On macOS (dispatchers running on the
+  # operator's Mac), we can't count on /var/log being user-writable and
+  # don't want to trigger sudo prompts — use /tmp instead. On Linux
+  # (deploy-host, jumpbox), /var/log is the standard. Override with
+  # WORXCO_LOG_DIR env var to force a specific location on either OS.
+  local default_log_dir
+  if [ "$(uname -s)" = "Darwin" ]; then
+    default_log_dir="/tmp/worxco-migration"
+  else
+    default_log_dir="/var/log/worxco-migration"
+  fi
+  LOG_DIR="${WORXCO_LOG_DIR:-$default_log_dir}"
   LOG_FILE="${LOG_DIR}/${script_name}-${timestamp}.log"
   LOG_SCRIPT="$script_name"
   export LOG_DIR LOG_FILE LOG_SCRIPT
@@ -167,12 +183,25 @@ log_init() {
     fi
   fi
 
-  # Route stdout+stderr through tee for the remainder of the script.
+  # Route output through tee for the remainder of the script.
   # Note: `exec` here is fd manipulation, not process replacement —
-  # the tee runs as a background child receiving all subsequent output.
-  exec > >(tee -a "$LOG_FILE") 2>&1
-
-  printf '=== log_init: %s @ %s ===\n' "$script_name" "$timestamp"
+  # the tee runs as a background child receiving subsequent output.
+  case "$mode" in
+    stderr)
+      # Tee stderr only. Stdout stays clean for machine-parseable
+      # output (backup DB names, etc.). The log file misses whatever
+      # goes to stdout, but that's typically ONE line meant for a
+      # caller's $(...) capture — the interesting narrative is on
+      # stderr regardless.
+      exec 2> >(tee -a "$LOG_FILE" >&2)
+      printf '=== log_init: %s @ %s (stderr-only) ===\n' \
+        "$script_name" "$timestamp" >&2
+      ;;
+    both|*)
+      exec > >(tee -a "$LOG_FILE") 2>&1
+      printf '=== log_init: %s @ %s ===\n' "$script_name" "$timestamp"
+      ;;
+  esac
 }
 
 # ============================================================

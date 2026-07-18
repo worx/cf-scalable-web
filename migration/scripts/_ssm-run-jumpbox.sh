@@ -50,6 +50,11 @@ set -euo pipefail
 # since the real logs are captured on the jumpbox side.
 source "$(dirname "$(readlink -f "$0")")/_common.sh"
 
+# Local logging + on-exit S3 upload. BUCKET_NAME is resolved via CFN
+# below — trap fires with whatever's set at exit time (empty = skip upload).
+log_init "_ssm-run-jumpbox"
+trap 'log_upload_and_exit "${BUCKET_NAME:-}"' EXIT
+
 # ============================================================
 # Argument parsing
 # ============================================================

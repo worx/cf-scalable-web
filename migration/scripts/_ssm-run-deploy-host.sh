@@ -64,6 +64,13 @@ if [ $# -ne 1 ]; then
   exit 2
 fi
 SCRIPT_NAME="$1"
+
+# Local logging + on-exit S3 upload. Log lives in /var/log/worxco-migration
+# (Linux) or /tmp/worxco-migration (Mac). BUCKET_NAME is resolved via
+# CFN below — the trap fires even if resolution fails (empty bucket =
+# skip upload but keep local log).
+log_init "_ssm-run-deploy-host-$SCRIPT_NAME"
+trap 'log_upload_and_exit "${BUCKET_NAME:-}"' EXIT
 LOCAL_SCRIPT="scripts/deploy-host/${SCRIPT_NAME}.sh"
 
 if [ ! -f "$LOCAL_SCRIPT" ]; then

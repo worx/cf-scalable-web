@@ -32,11 +32,17 @@
 
 set -euo pipefail
 
+source "$(dirname "$(readlink -f "$0")")/_common.sh"
+
 ENV="${1:-}"
 if [ -z "$ENV" ]; then
   echo "Usage: $0 <env>" >&2
   exit 2
 fi
+
+# Local log — captures the ~5-10 min install progress on the deploy-host.
+log_init "install-drupal-remote"
+trap 'log_upload_and_exit ""' EXIT
 
 DEPLOY_ID=$(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=cf-deploy-host" \

@@ -23,11 +23,19 @@
 
 set -euo pipefail
 
+source "$(dirname "$(readlink -f "$0")")/_common.sh"
+
 ENV="${1:-}"
 if [ -z "$ENV" ]; then
   echo "Usage: $0 <env>" >&2
   exit 2
 fi
+
+# Local log — captures the generated URL for audit + inspection.
+# The URL itself is one-time (drush invalidates on click), so logging
+# it doesn't create a lingering credential.
+log_init "admin-login-url"
+trap 'log_upload_and_exit ""' EXIT
 
 # Resolve deploy-host instance + decide which URL prefix to embed in the
 # drush-generated login URL.

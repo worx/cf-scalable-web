@@ -29,6 +29,9 @@
 
 set -euo pipefail
 
+# Source shared logging helpers.
+source "$(dirname "$(readlink -f "$0")")/_common.sh"
+
 ENV="${1:-}"
 DB_NAME="${2:-drupal}"
 
@@ -36,6 +39,14 @@ if [ -z "$ENV" ]; then
   echo "Usage: $0 <env> [db_name]" >&2
   exit 1
 fi
+
+# Log locally so the output survives outside the caller's terminal.
+# stderr-only mode: stdout stays clean for the backup DB name that
+# callers capture via `BACKUP_DB=$(dispatch-db-backup.sh ...)`.
+# No S3 upload — logs stay operator-local (empty bucket = skip upload,
+# keep file).
+log_init "dispatch-db-backup" stderr
+trap 'log_upload_and_exit ""' EXIT
 
 DEPLOY_ID=$(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=cf-deploy-host" \
