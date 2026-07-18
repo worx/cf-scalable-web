@@ -1,480 +1,138 @@
 ---
-name: Migration runbook (prod → sandbox)
-description: Step-by-step operator runbook for migrating Drupal data + codebase from the prod account (978068244875) into sandbox. Cross-account via a small SSM-only jumpbox; pgloader does live MySQL→PostgreSQL conversion.
-audience: operator
+name: Migration overview (prod → sandbox / eventual prod cutover)
+description: High-level overview of migration capabilities and when to use them. Points to migration/README.md for the executable runbook.
+audience: operator + architect
 created: 2026-06-12
+updated: 2026-07-17
 ---
 
-# Prod → Sandbox Drupal Migration Runbook
+# Migration overview
 
-One-time procedure to copy a Drupal site from the legacy prod account
-(`978068244875`, MySQL on Aurora) into the sandbox account (PostgreSQL
-on RDS, FSx-backed Drupal). Used to rehearse the eventual production
-migration before committing.
+Two questions this doc answers:
 
-## Source details (from operator 2026-06-12)
+1. **When would you migrate vs fresh-install?**
+2. **Where does each part of the migration workflow live?**
 
-| What | Value |
-|------|-------|
-| Source EC2 (Drupal codebase) | `React2` (`i-044329095f5c3a821`) |
-| Source RDS endpoint | `d8demo-cluster.cluster-cmbywichztfj.us-east-1.rds.amazonaws.com` |
-| Source DB engine | Aurora MySQL 8.0 |
-| Source database name | `zinew` |
-| Source DB user | `worxco` |
-| Source DB password | (operator-supplied at runtime — NOT committed) |
-| Sandbox PostgreSQL target | (read from `/etc/worxco/envs/sandbox` at run time) |
-| AWS profiles required locally | `ZI-Sandbox` (sandbox account), `ZoningInfoAdmin` (prod account) |
+For the actual step-by-step runbook, see
+**[`migration/README.md`](../migration/README.md)** — this doc is
+scaffolding.
 
-## Architecture
+## When to migrate vs fresh-install
+
+| Scenario | What to do |
+|---|---|
+| Testing a new sandbox from scratch, no need to see real data | `make install-drupal ENV=sandbox` — takes ~5-10 min, clean install |
+| Rehearsing a prod-to-sandbox test with realistic data | Full migration flow (see runbook) |
+| Testing schema/config changes against real content shapes | DB-only migration (see runbook Phase 1-5) |
+| Making prod-affecting code changes and want a "does this still work?" pass | DB-only migration onto sandbox that has the new code deployed |
+| Eventual prod cutover | Migration flow with production destination — patterns are the same, targeting differs (this doc will grow when we do the actual cutover) |
+
+**Rule of thumb:** if the question is "does the app work?", fresh-install
+is enough. If the question is "does the app work with prod's data
+shapes/edge cases/scale?", migrate.
+
+## The four capabilities
+
+Migration is composed of four independent data flows. Pick what you
+need — they compose but don't require each other:
+
+| Flow | What moves | Prod-side action | Sandbox-side action |
+|---|---|---|---|
+| **Database** | prod MySQL → sandbox Postgres | `make dump-mysql` | `make restore-mysql` + `make run-pgloader` |
+| **Codebase** | React2's `/var/www/drupal/` | `make dump-codebase` | (restore not yet wired — see follow-ups) |
+| **Public files** | uploaded media, images | `make dump-files` | (restore not yet wired) |
+| **Private files** | secure downloads, backups | `make dump-private` | (restore not yet wired) |
+
+Or: `make dump-all` runs all four dumps in one call.
+
+## Where things live
 
 ```
-   PROD ACCOUNT 978068244875            SANDBOX ACCOUNT (ZI-Sandbox)
-   ┌───────────────────────┐            ┌──────────────────────────┐
-   │ React2 (Drupal code)  │            │ deploy-host              │
-   │ d8demo-cluster (MySQL)│            │  ├ pgloader              │
-   │                       │            │  ├ session-manager-plugin│
-   │      ┌────────────┐   │  SSM port  │  └ ~/.aws/credentials    │
-   │      │ jumpbox    │◀──┼─ forward ──┤      (ZoningInfoAdmin)   │
-   │      │ (t4g.micro)│   │   prod RDS │             ▲            │
-   │      └─────┬──────┘   │  to local  │             │            │
-   │            │ S3 write │   :3306    │  pgloader uses:           │
-   │            ▼          │            │   - localhost:3306        │
-   │     S3 codebase ──────┼───────────▶│     (prod MySQL via SSM)  │
-   │     ferry             │            │   - sandbox RDS:5432      │
-   └───────────────────────┘            │     (native VPC access)   │
-                                        └──────────────────────────┘
+migration/                               ← the whole migration subsystem
+├── README.md                            ← operator runbook (READ THIS FIRST)
+├── Makefile                             ← all migration targets
+├── cloudformation/                      ← per-phase CFN templates
+│   ├── cf-migration-bucket.yaml
+│   ├── cf-migration-secret.yaml
+│   └── cf-migration-jumpbox.yaml
+├── parameters/
+├── pgloader/                            ← .load templates + docs
+└── scripts/
+    ├── _common.sh                       ← shared logging helpers
+    ├── _ssm-run-jumpbox.sh              ← Mac → jumpbox dispatch
+    ├── jumpbox/                         ← runs ON prod jumpbox
+    └── deploy-host/                     ← runs ON sandbox deploy-host
 ```
 
-Two transports across the account boundary:
+Related repository areas:
 
-- **DB**: live MySQL exposed at `localhost:3306` on the deploy-host via
-  an SSM port-forwarding session through the jumpbox. **pgloader needs
-  a live MySQL connection — it has no "load from mysqldump file" mode**,
-  so this is the correct shape. Live conversion also lets you re-run
-  with tweaked casts without re-fetching from prod.
-- **Codebase**: rsync from React2 → jumpbox's local disk → tar+gzip+S3
-  (sandbox migration bucket) → deploy-host pulls and extracts onto FSx.
+- `scripts/deploy-host/` (top-level, not `migration/scripts/deploy-host/`)
+  — contains `install-drupal.sh`, `use-env`, `refresh-env-config`, and
+  friends. Migration workflow ASSUMES the deploy-host is already
+  bootstrapped and has the toolchain (pgloader, mariadb-server, etc.)
+- `docs/DEPLOY-HOST.md` — deploy-host lifecycle including how the
+  toolchain gets on the box
+- `docs/OPERATIONS.md` — day-to-day patterns (SSM, `use-env`,
+  `clear-drupal-cache`, etc.)
+- `docs/memory/db-rollback-pattern.md` — the DB rename dance used
+  as the migration's rollback safety net
+- `docs/memory/structural-checks-over-markers.md` — why the migration
+  workflow doesn't rely on `.installed` markers for correctness
 
-The migration bucket is still used **for codebase only**. No mysqldump
-intermediate file.
+## Cross-account topology
 
-## Step-by-step
+```
+   PROD account (978068244875)          SANDBOX account
+   ==============================       ==========================
 
-### 1. One-time stack setup (~5 min)
+   React2 EC2 (Drupal)                  deploy-host EC2
+     └── Aurora MySQL "zinew"             └── local MariaDB scratch
+                                              (pgloader source)
+   jumpbox EC2 (migration-only,
+     private subnet, SSM-only) ─────►  S3 migration bucket
+     ├── mysqldump                            (SANDBOX-side)
+     ├── tar codebase                         │
+     ├── tar files                            ▼
+     └── tar private                    deploy-host reads from S3
 
-Deploy the sandbox-side bucket first (it needs to exist before the
-jumpbox can write to it):
+                                        RDS PostgreSQL
+                                          └── schema "zinew"
+                                              (pgloader target)
 
-```bash
-make deploy-migration-bucket           # SANDBOX, profile ZI-Sandbox
-make deploy-migration-jumpbox          # PROD, profile ZoningInfoAdmin
+                                        FSx OpenZFS
+                                          └── /var/www/drupal
+                                              (codebase, files)
 ```
 
-The jumpbox's UserData takes ~2 min to install `mysql-client-core`,
-`pigz`, `rsync`, and AWS CLI v2. SSM Session Manager is available
-immediately though.
-
-### 2. Authorize the jumpbox to SSH into React2 (~2 min)
-
-The jumpbox needs an SSH key authorized on React2 for `rsync`. There's
-no automated way to do this without giving React2 itself an SSM-eligible
-IAM role (a bigger change to prod than warranted for this work).
-
-Generate the jumpbox pubkey:
-
-```bash
-make migration-jumpbox-pubkey
-# Output: ssh-ed25519 AAAA...== root@cf-migration-jumpbox
-```
-
-Copy that line, then SSH into React2 (using your existing access — the
-`WebSSH` SG ingress covers your IP or your Worxco prefix list) and add
-the pubkey to React2's `authorized_keys`:
-
-```bash
-# from your Mac
-ssh ubuntu@<React2-public-IP>
-sudo -i
-echo 'ssh-ed25519 AAAA...== root@cf-migration-jumpbox' \
-  >> /home/ubuntu/.ssh/authorized_keys
-chmod 600 /home/ubuntu/.ssh/authorized_keys
-exit; exit
-```
-
-### 3. Verify jumpbox connectivity (~1 min)
-
-```bash
-make ssm-migration-jumpbox
-```
-
-Inside the jumpbox shell:
-
-```bash
-# Confirm MySQL access to prod RDS
-mysql -h d8demo-cluster.cluster-cmbywichztfj.us-east-1.rds.amazonaws.com \
-      -u worxco -p -e "SELECT VERSION();" zinew
-
-# Confirm SSH to React2 (private IP; React2's WebSSH SG allows
-# everything from 172.31.16.0/20, the subnet you're sharing)
-ssh -o StrictHostKeyChecking=accept-new ubuntu@172.31.23.46 hostname
-
-# Confirm S3 write to sandbox migration bucket
-echo "test from jumpbox $(date -u)" | \
-  sudo aws s3 cp - s3://sandbox-migration-kv-worxco/health-check.txt
-```
-
-If all three succeed, the jumpbox infrastructure is good to go.
-
-### 4. Set up `ZoningInfoAdmin` credentials on the sandbox deploy-host (~2 min)
-
-The deploy-host needs to start an SSM port-forwarding session against
-the prod jumpbox — which means it needs prod credentials. We're going
-with **temporary credential ferry to the deploy-host** (Option A): the
-deploy-host is itself ephemeral (won't survive a `destroy-all` cycle),
-SSM is the only access path, and the operator is the only user. Risk
-is low.
-
-From your Mac, SSM into the sandbox deploy-host:
-
-```bash
-DEPLOY_ID=$(aws --profile ZI-Sandbox ec2 describe-instances \
-  --filters "Name=tag:Name,Values=cf-deploy-host" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].InstanceId' --output text)
-aws --profile ZI-Sandbox ssm start-session --target $DEPLOY_ID
-```
-
-Inside the deploy-host:
-
-```bash
-# Install the SSM Session Manager plugin (needed to ORIGINATE SSM
-# sessions, not just to receive them — Ubuntu ARM64 build):
-sudo curl -sSL \
-  "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_arm64/session-manager-plugin.deb" \
-  -o /tmp/session-manager-plugin.deb
-sudo dpkg -i /tmp/session-manager-plugin.deb
-rm /tmp/session-manager-plugin.deb
-
-# Verify
-session-manager-plugin --version
-
-# Create the .aws config (as the ubuntu user, not root)
-mkdir -p ~/.aws
-chmod 700 ~/.aws
-
-# Add the ZoningInfoAdmin profile config + credentials
-# (paste the exact lines from your local ~/.aws/config and
-#  ~/.aws/credentials for the [ZoningInfoAdmin] profile)
-nano ~/.aws/config
-nano ~/.aws/credentials
-chmod 600 ~/.aws/config ~/.aws/credentials
-
-# Sanity check that the credentials work cross-account:
-aws --profile ZoningInfoAdmin sts get-caller-identity
-# Should show account 978068244875
-```
-
-**Cleanup at end of migration:** `rm ~/.aws/credentials` (or remove just
-the `[ZoningInfoAdmin]` block). Also note in the followups list to
-restore from the latest known-good state if a `destroy-all` /
-`deploy-allXX` cycle happens before cleanup — the deploy-host gets
-rebuilt and the credentials disappear naturally.
-
-### 5. Open the SSM port-forwarding tunnel (background) (~10 sec to open)
-
-In one deploy-host shell, foreground the tunnel:
-
-```bash
-JUMPBOX_ID=$(aws --profile ZoningInfoAdmin cloudformation describe-stacks \
-  --stack-name cf-migration-jumpbox \
-  --query "Stacks[0].Outputs[?OutputKey=='JumpboxInstanceId'].OutputValue" \
-  --output text)
-echo "Jumpbox: $JUMPBOX_ID"
-
-aws --profile ZoningInfoAdmin ssm start-session \
-  --target "$JUMPBOX_ID" \
-  --document-name AWS-StartPortForwardingSessionToRemoteHost \
-  --parameters '{"host":["d8demo-cluster.cluster-cmbywichztfj.us-east-1.rds.amazonaws.com"],"portNumber":["3306"],"localPortNumber":["3306"]}'
-```
-
-This blocks — leave it running. Output looks like:
-```
-Starting session with SessionId: ...
-Port 3306 opened for sessionId ...
-Waiting for connections...
-```
-
-**Run pgloader inside a tmux session** (the one we set up on the
-deploy-host) so the tunnel and the pgloader window can both stay alive
-while you work. Or use two separate SSM sessions to the deploy-host —
-sessions don't share state but they share the host.
-
-Verify the tunnel works (from a second deploy-host shell):
-
-```bash
-# IMPORTANT: use 127.0.0.1, NOT localhost. The mysql CLI treats "localhost"
-# as a special token meaning "skip TCP, use UNIX domain socket" — which
-# fails with ERROR 2002 (HY000) "Can't connect to local MySQL server
-# through socket /var/run/mysqld/mysqld.sock" regardless of whether the
-# tunnel is up. Use the IP literal to force TCP.
-mysql -h 127.0.0.1 -P 3306 -u worxco -p -e "SHOW DATABASES;" zinew
-# Should print the same DB list as if you ran it on the jumpbox in step 3.
-```
-
-If you get "ERROR 2003 Can't connect to MySQL server on '127.0.0.1'" —
-the tunnel isn't actually established. Check the first shell for the
-"Waiting for connections..." line; if the SSM session died, restart it.
-
-If you get "ERROR 2002 ... socket /var/run/mysqld/mysqld.sock" — you
-typed `localhost` instead of `127.0.0.1`. Same error every time, has
-nothing to do with the tunnel. Use the IP.
-
-### 6. Run pgloader: MySQL (localhost via tunnel) → PostgreSQL (sandbox RDS) (~depends on DB size)
-
-**Prerequisite — `drupal_user` must exist in PostgreSQL first.** The
-sandbox RDS instance is created with a *master* user (`dbadmin`) by
-CloudFormation, but the application user (`drupal_user`) that pgloader
-connects as is created later, by `install-drupal.sh`. If you haven't
-run `install-drupal-remote` against this sandbox yet, pgloader will
-fail at the connection step with "password authentication failed for
-user drupal_user."
-
-Quickest fix — bootstrap PostgreSQL and `settings.php`/`salt.txt` by
-running a one-shot Drupal install:
-
-```bash
-# From your Mac, in the cf-scalable-drupal repo:
-make install-drupal-remote ENV=sandbox
-# ~5 min. Creates drupal_user in PG, drops a fresh Drupal 11 install
-# onto FSx. The fresh install's schema/data are exactly what pgloader's
-# `include drop` clause will discard in the next step — so this is
-# wasted work in that sense, but the drupal_user + settings.php +
-# salt.txt it creates are what we need to keep.
-```
-
-(There isn't a dedicated "create the DB user only" make target. If
-this prep is something we end up doing repeatedly, we'd split it out.
-For one-off migration work, the install-drupal-remote shortcut is the
-path of least resistance.)
-
-Then in the second deploy-host shell:
-
-```bash
-# Pull sandbox PG connection details from the env file
-source /etc/worxco/envs/sandbox     # provides DRUPAL_DB_HOST, _PORT, _NAME, _USER, _PASS
-
-# Write the pgloader load file. The CASTs handle Drupal-specific
-# MySQL→PostgreSQL type translations that the default pgloader
-# inference gets wrong:
-#   - TINYINT(1) → BOOLEAN (Drupal uses these for true/false flags)
-#   - zero dates ('0000-00-00') → NULL (MySQL allows, PostgreSQL doesn't)
-#   - DATETIME → TIMESTAMPTZ (PostgreSQL's timezone-aware variant)
-# Password is embedded in the file — chmod 600 immediately, delete
-# after the run.
-read -s -p "Prod MySQL password for user 'worxco': " PROD_PW
-echo
-# URL-encode the password — required if it contains any URL-reserved chars
-# (* $ @ / # ? % & + ' " etc). RFC 3986 allows some of these in userinfo
-# unencoded, but pgloader's URL parser is happier with everything escaped.
-# Same for any DRUPAL_DB_PASS containing special chars (the SSM-sourced
-# value from /etc/worxco/envs/sandbox might have any of these).
-PROD_PW_ENC=$(printf '%s' "$PROD_PW" | jq -sRr @uri)
-SANDBOX_PW_ENC=$(printf '%s' "$DRUPAL_DB_PASS" | jq -sRr @uri)
-
-cat > /tmp/zinew.load <<EOF
-LOAD DATABASE
-  FROM      mysql://worxco:${PROD_PW_ENC}@127.0.0.1:3306/zinew
-  INTO      postgresql://${DRUPAL_DB_USER}:${SANDBOX_PW_ENC}@${DRUPAL_DB_HOST}:${DRUPAL_DB_PORT}/${DRUPAL_DB_NAME}
-
-WITH include drop, create tables, create indexes, reset sequences, foreign keys,
-     downcase identifiers, batch rows = 1000, prefetch rows = 1000
-
-CAST type tinyint when (= 1 precision) to boolean drop typemod using tinyint-to-boolean,
-     type datetime to timestamptz drop default drop not null using zero-dates-to-null,
-     type date drop not null drop default using zero-dates-to-null,
-     type timestamp drop default drop not null using zero-dates-to-null
-;
-EOF
-chmod 600 /tmp/zinew.load
-unset PROD_PW
-
-# Run it
-pgloader /tmp/zinew.load 2>&1 | tee /tmp/zinew-pgloader.log
-
-# Cleanup the password file + shell variables IMMEDIATELY after the run
-shred -u /tmp/zinew.load
-unset PROD_PW_ENC SANDBOX_PW_ENC
-```
-
-pgloader prints a summary at the end: tables read, rows loaded,
-errors, total time. Save the log (`/tmp/zinew-pgloader.log`) — you'll
-want to inspect it after the first run for cast warnings.
-
-### 7. Codebase rsync from React2 → S3 (~few min, depends on size)
-
-This step still uses the S3 ferry. Switch to a jumpbox shell (open a
-new `make ssm-migration-jumpbox` from your Mac, or use a second tmux
-window in the existing session):
-
-```bash
-# rsync to local /tmp first (lets rsync resume cleanly on transient blips)
-sudo rsync -av --delete \
-  ubuntu@172.31.23.46:/var/www/zinew/ \
-  /tmp/zinew-codebase/
-
-# Tar + gzip + ship to sandbox S3 in one streaming pipe
-sudo tar -C /tmp -cf - zinew-codebase \
-  | pigz \
-  | sudo aws s3 cp - s3://sandbox-migration-kv-worxco/zinew-codebase-$(date -u +%Y%m%d-%H%M%S).tar.gz
-
-# Optional: clean up local copy on the jumpbox
-sudo rm -rf /tmp/zinew-codebase
-```
-
-Adjust the source path (`/var/www/zinew/`) to wherever Drupal actually
-lives on React2.
-
-### 8. Pull codebase tarball to deploy-host and extract onto FSx (~few min)
-
-Back on the deploy-host (any shell):
-
-```bash
-# List what's in the migration bucket
-aws s3 ls s3://sandbox-migration-kv-worxco/
-
-# Pull the most recent codebase tarball (substitute the timestamp)
-aws s3 cp s3://sandbox-migration-kv-worxco/zinew-codebase-YYYYMMDD-HHMMSS.tar.gz /tmp/
-
-# FSx should already be mounted (use-env did this for the env)
-sudo use-env sandbox    # idempotent; ensures /var/www and /etc/nginx/shared mounted
-
-# Extract into Drupal's location on FSx
-sudo tar -xzf /tmp/zinew-codebase-YYYYMMDD-HHMMSS.tar.gz -C /tmp/
-sudo rsync -av --delete /tmp/zinew-codebase/ /var/www/drupal/
-
-# Re-apply Drupal-writable directory perms (see install-drupal.sh for
-# the canonical set; the key ones are:)
-sudo chown -R root:www-data /var/www/drupal/web/sites/default/files
-sudo chmod -R u=rwX,g=rwX,o= /var/www/drupal/web/sites/default/files
-```
-
-### 9. Verify the migrated site (~2 min)
-
-```bash
-# drush status against the migrated DB
-cd /var/www/drupal
-sudo -E HOME=/root vendor/bin/drush status
-
-# Then the standard smoke tests, from your Mac in the cf-scalable-drupal repo:
-make smoke-test-drupal ENV=sandbox
-make smoke-test-public ENV=sandbox
-```
-
-### 10. Cleanup when migration testing is done
-
-```bash
-# Order matters: destroy the prod jumpbox FIRST (so the bucket policy's
-# referenced Principal is gone), THEN the bucket.
-make destroy-migration-jumpbox CONFIRMED=yes
-make destroy-migration-bucket CONFIRMED=yes
-```
-
-On the deploy-host:
-```bash
-# Remove the ZoningInfoAdmin profile credentials
-rm ~/.aws/credentials
-# (or open it and delete just the [ZoningInfoAdmin] block)
-
-# Remove session-manager-plugin (optional — it's harmless to leave installed)
-sudo dpkg -r session-manager-plugin
-```
-
-On React2 (via your existing SSH):
-```bash
-# Remove the jumpbox pubkey from authorized_keys
-sed -i '/root@cf-migration-jumpbox/d' /home/ubuntu/.ssh/authorized_keys
-```
-
-## Things to watch for
-
-- **pgloader memory pressure on large tables.** pgloader buffers
-  `batch rows` rows per table at a time (1000 in the load file above).
-  If you see OOM kills on the deploy-host during pgloader runs, drop
-  `batch rows = 500` or `250`. Trade-off is slower load.
-- **SSM session timeouts.** A port-forwarding session that's idle for
-  >30 min may be terminated by AWS. If the pgloader run pauses (e.g.,
-  index build on a huge table), monitor the tunnel shell — if it
-  exits, re-run step 5. pgloader will pick up cleanly on a re-run
-  since `include drop` recreates tables from scratch.
-- **Drupal version drift.** If React2's Drupal core differs from what
-  we install in sandbox (we currently bake Drupal 11), the imported
-  schema won't match the codebase. Confirm core version on React2 via
-  `drush status` BEFORE the migration. If mismatch: either downgrade
-  sandbox to match (php74 ASG, older Drupal), or plan a
-  schema-upgrade step after import.
-- **Charset / collation surprises.** Aurora MySQL 8.0's default
-  charset may emit warnings from pgloader. Most common fix is adding
-  `--from-encoding utf8mb4` or specifying the collation in the load
-  file's `WITH` clause. Inspect `/tmp/zinew-pgloader.log` after the
-  first run.
-- **`localhost` vs `127.0.0.1`.** The MySQL command-line client
-  treats `-h localhost` as "use the UNIX socket at
-  `/var/run/mysqld/mysqld.sock`" regardless of TCP listeners. With
-  no local mysqld running, that fails with ERROR 2002 every time.
-  Always use the IP literal (`127.0.0.1`) for the MySQL CLI when
-  hitting the tunnel. pgloader URLs are TCP-by-default but we use
-  the IP there too for consistency.
-- **URL-encode passwords.** RFC 3986 allows `* $ ! ' ( )` in URL
-  userinfo unencoded, but pgloader's URL parser is more reliable
-  when everything is percent-encoded. The runbook uses `jq -sRr @uri`
-  to encode both the prod MySQL password and the sandbox PostgreSQL
-  password before they go into the load file. Skipping this step
-  produces obscure connection errors for passwords containing
-  `@ / # ? &` and is a real time-sink to diagnose otherwise.
-- **Password in the load file.** It's there for the duration of the
-  pgloader run only. `chmod 600` immediately after writing it,
-  `shred -u` immediately after the run. Don't `cat /tmp/zinew.load`
-  to inspect — it has the password.
-- **S3 codebase tarball lifecycle.** The bucket expires objects after
-  30 days. For longer retention, pull them out before then.
-
-## Why this design
-
-- **Cross-account via SSM, not VPC peering.** Peering would require
-  routing-table + SG changes that persist beyond the migration. SSM
-  tunnel is established and torn down per session.
-- **Jumpbox in same subnet as React2 (subnet-85e938dc).** Free SSH
-  and free RDS access via existing SG rules; zero modifications to
-  prod SGs.
-- **Live pgloader instead of mysqldump-to-file.** pgloader has no
-  mysqldump-file mode; spinning up a transient MySQL on the
-  deploy-host to feed it from a dump file is more moving parts than
-  the SSM tunnel.
-- **Bucket policy restricts to a role-name PATTERN.** Even though
-  the policy's Principal is the prod account, the
-  `aws:PrincipalArn` condition means only the jumpbox role can
-  actually write. If the jumpbox is destroyed and someone tries to
-  write from a different prod role, the bucket rejects it.
-- **Credentials on the deploy-host instead of cross-account
-  assume-role.** Practical trade-off for one-time migration work.
-  The deploy-host is itself ephemeral and SSM-only-access; risk
-  envelope of static creds living on it is acceptable. For
-  recurring migration work, switch to assume-role.
-
-## Open questions to resolve on first run
-
-- [ ] Drupal core version on React2 → drives whether we land in
-      sandbox as the same version (php74 ASG) and upgrade after, or
-      stage the schema upgrade as part of the migration.
-- [ ] PHP version on React2 → confirms or refutes the Drupal-version
-      inference.
-- [ ] DB size + table count → sets expectations for pgloader
-      runtime + memory pressure.
-- [ ] Whether site-specific config files reference absolute paths
-      that need translation when moving from React2's filesystem to
-      FSx (`/var/www/drupal` is canonical in sandbox).
-
-These need human judgment after first inspection; captured here so
-they're not forgotten.
+**AWS profiles used:**
+- `ZoningInfoAdmin` — prod actions (jumpbox lifecycle, dumps from
+  React2)
+- `ZI-Sandbox` — sandbox actions (bucket, restore, RDS, FSx)
+
+The deploy-host uses its IAM instance role for all sandbox-side
+operations — no `--profile` flag on scripts that run there.
+
+## Historical note
+
+An earlier version of this doc (2026-06-12) described the migration
+workflow as a live SSM-tunneled pgloader run against React2's Aurora
+MySQL directly. That approach was superseded during the July 2026
+consolidation with the current dump-to-S3 + restore-locally pattern.
+Rationale:
+
+- **Reproducibility** — a dump captured to S3 can be re-loaded any
+  number of times without re-touching prod
+- **Isolation** — the pgloader source is now a local MariaDB scratch
+  DB, not a live prod cluster. Bugs in pgloader can't degrade prod
+  performance
+- **Log durability** — dump-to-S3 provides an audit trail (what
+  data was actually pulled and when) that live-tunneling didn't
+- **Retry cost** — re-running pgloader against the local scratch DB
+  is instant and free; re-running against prod would compete for
+  prod's I/O every time
+
+If you're reading this doc looking for the old live-tunnel workflow,
+see the git history for the pre-consolidation version.
 
 ---
 
