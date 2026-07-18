@@ -1107,6 +1107,30 @@ create-installed:  ## Write /var/www/drupal/.installed with current deployment m
 	fi
 	@sudo scripts/deploy-host/write-install-marker.sh $(ENV)
 
+db-backup:  ## Snapshot ENV's DB via logical-rename (DB defaults to 'drupal'). CONFIRMED=yes to skip prompt.
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@# Prints the new backup DB name on stdout; capture it if scripting.
+	@sudo scripts/deploy-host/db-backup.sh $(ENV) $(if $(DB),$(DB),drupal)
+
+db-restore:  ## Restore ENV's DB from a prior backup. Required: FROM=<backup_db>. CONFIRMED=yes to skip prompt.
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ -z "$(FROM)" ]; then \
+		echo "$(RED)FROM=<backup_db_name> is required.$(NC)"; \
+		echo "$(CYAN)List backups: make list-db-backups ENV=$(ENV)$(NC)"; \
+		exit 1; \
+	fi
+	@sudo scripts/deploy-host/db-restore.sh $(ENV) $(FROM) $(if $(DB),$(DB),drupal)
+
+list-db-backups:  ## List existing logical-rename backups (DB defaults to 'drupal')
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@scripts/deploy-host/db-list-backups.sh $(ENV) $(if $(DB),$(DB),drupal)
+
 stop-drupal-local-server:  ## Stop the drush runserver tmux session
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
