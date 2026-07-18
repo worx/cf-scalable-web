@@ -156,6 +156,34 @@ aws --profile ZI-Sandbox s3 cp "$LOCAL_SCRIPT" \
 log_ok "Uploaded ${SCRIPT_NAME}.sh"
 
 # ============================================================
+# Step 3b: Upload script-specific auxiliary files
+# ============================================================
+# Some remote scripts need companion files:
+#   run-pgloader → migration/pgloader/zinew.load.tmpl (envsubst template)
+# Extend this block if future scripts pick up other deps.
+EXTRA_DOWNLOAD_CMDS=""
+case "$SCRIPT_NAME" in
+  run-pgloader)
+    if [ ! -f "pgloader/zinew.load.tmpl" ]; then
+      log_error "pgloader/zinew.load.tmpl not found (cwd: $(pwd))"
+      log_error "  Are you running from the migration/ directory?"
+      exit 1
+    fi
+    aws --profile ZI-Sandbox s3 cp pgloader/zinew.load.tmpl \
+        "s3://$BUCKET_NAME/scripts/pgloader/zinew.load.tmpl" \
+        --region "$AWS_REGION" --quiet
+    log_ok "Uploaded pgloader/zinew.load.tmpl"
+    # Build the extra download commands to inject into the SSM
+    # inner script. These land the template at the exact path
+    # run-pgloader.sh's default TEMPLATE_PATH lookup expects:
+    # /opt/migration/pgloader/zinew.load.tmpl
+    # (from REPO_MIGRATION_DIR="$(readlink -f $SCRIPT_DIR/../..)"
+    # in run-pgloader.sh:69, which resolves to /opt/migration).
+    EXTRA_DOWNLOAD_CMDS='mkdir -p /opt/migration/pgloader && aws s3 cp "s3://'"$BUCKET_NAME"'/scripts/pgloader/zinew.load.tmpl" /opt/migration/pgloader/zinew.load.tmpl --quiet'
+    ;;
+esac
+
+# ============================================================
 # Step 4: Build SSM send-command parameters
 # ============================================================
 log_step "Step 4: Build SSM command parameters"
@@ -182,6 +210,7 @@ jq -n \
     --arg dryrun "$DRY_RUN" \
     --arg db "$MIGRATION_DB_NAME" \
     --arg heap "$PGLOADER_HEAP_MB" \
+    --arg extra "$EXTRA_DOWNLOAD_CMDS" \
     '{
       commands: [
         "set -eu",
@@ -189,6 +218,7 @@ jq -n \
         ("aws s3 cp \"s3://" + $bucket + "/scripts/_common.sh\" /opt/migration/scripts/_common.sh --quiet"),
         ("aws s3 cp \"s3://" + $bucket + "/scripts/deploy-host/" + $script + ".sh\" /opt/migration/scripts/deploy-host/" + $script + ".sh --quiet"),
         ("chmod +x /opt/migration/scripts/deploy-host/" + $script + ".sh"),
+        (if $extra != "" then $extra else "true" end),
         ("env CONFIRMED=\"" + $confirmed + "\" DRY_RUN=\"" + $dryrun + "\" MIGRATION_BUCKET=\"" + $bucket + "\" MIGRATION_DB_NAME=\"" + $db + "\" PGLOADER_HEAP_MB=\"" + $heap + "\" /opt/migration/scripts/deploy-host/" + $script + ".sh")
       ]
     }' > "$PARAMS_FILE"
