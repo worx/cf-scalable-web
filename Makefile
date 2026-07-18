@@ -1131,6 +1131,20 @@ list-db-backups:  ## List existing logical-rename backups (DB defaults to 'drupa
 	fi
 	@scripts/deploy-host/db-list-backups.sh $(ENV) $(if $(DB),$(DB),drupal)
 
+delete-db-backup:  ## Delete backup DB(s). SELECT="1 3 5" (indexes from list-db-backups) or SELECT="drupal_backup_XXX". CONFIRMED=yes to skip prompt.
+	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \
+	fi
+	@if [ -z "$(SELECT)" ]; then \
+		echo "$(RED)SELECT is required.$(NC)"; \
+		echo "$(CYAN)  make delete-db-backup ENV=$(ENV) SELECT=\"1\"$(NC)"; \
+		echo "$(CYAN)  make delete-db-backup ENV=$(ENV) SELECT=\"1 3 5\"$(NC)"; \
+		echo "$(CYAN)  make delete-db-backup ENV=$(ENV) SELECT=drupal_backup_20260717_201352$(NC)"; \
+		echo "$(CYAN)List backups: make list-db-backups ENV=$(ENV)$(NC)"; \
+		exit 1; \
+	fi
+	@DB=$(if $(DB),$(DB),drupal) sudo -E scripts/deploy-host/db-delete-backup.sh $(ENV) $(SELECT)
+
 stop-drupal-local-server:  ## Stop the drush runserver tmux session
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host.$(NC)"; exit 1; \

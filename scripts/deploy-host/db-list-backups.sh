@@ -27,10 +27,15 @@ if [ -z "$ENV" ]; then
 fi
 
 psql-env "$ENV" -d postgres <<SQL
-SELECT datname                                    AS backup_name,
+SELECT ROW_NUMBER() OVER (ORDER BY datname DESC)  AS "#",
+       datname                                    AS backup_name,
        pg_get_userbyid(datdba)                    AS owner,
        pg_size_pretty(pg_database_size(datname))  AS size
 FROM pg_database
 WHERE datname LIKE '${DB_PREFIX}_backup_%'
 ORDER BY datname DESC;
 SQL
+
+# Numbers above match what `db-delete-backup.sh <env> <#> [<#> ...]`
+# expects — same ORDER BY produces the same mapping as long as no
+# backups are created/deleted between listing and deletion.
