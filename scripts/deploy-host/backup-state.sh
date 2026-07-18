@@ -168,6 +168,14 @@ BACKUP_PATHS=(
   # this file closes the last "manual step on instance replacement" gap.
   "/etc/worxco/current-env"
 
+  # NOTE: /var/www/drupal/.installed is deliberately NOT captured here.
+  # It lives on FSx (network-attached, durable across deploy-host
+  # replacements), and restore-state.sh runs BEFORE the post-restore
+  # remount step brings /var/www online — so extracting it would write
+  # to local disk under an unmounted directory, which then gets hidden
+  # once FSx mounts on top. Marker is durable via FSx already; refresh
+  # with `make create-installed ENV=<env>` any time.
+
   # --- Shell dotfiles (default OR modified - capture either state) ---
   "/root/.bashrc"
   "/root/.profile"
