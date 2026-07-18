@@ -173,14 +173,29 @@ log_init() {
   LOG_SCRIPT="$script_name"
   export LOG_DIR LOG_FILE LOG_SCRIPT
 
-  # Create the log directory, escalating to sudo only if needed.
-  # Chmod 1777 (sticky world-writable, like /tmp) so any user in
-  # the migration workflow can drop logs here.
+  # Create the log directory (escalating to sudo if we can't), then
+  # make sure it's world-writable (sticky, like /tmp) so any user in
+  # the migration workflow can drop logs here — root-created scripts
+  # AND ubuntu-invoked dispatchers alike.
+  #
+  # The historical bug: earlier versions only chmod'd if the sudo path
+  # was taken. A root caller would `mkdir` successfully as root, leave
+  # the dir 755 root:root, and every subsequent ubuntu-side dispatcher
+  # would `tee -a` fail with Permission denied. Discovered 2026-07-17
+  # when migrate-full-all Phase 1 emitted the tee error from the
+  # ubuntu-side ssm-run-deploy-host dispatcher.
   if [ ! -d "$LOG_DIR" ]; then
-    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-      sudo mkdir -p "$LOG_DIR"
-      sudo chmod 1777 "$LOG_DIR"
-    fi
+    mkdir -p "$LOG_DIR" 2>/dev/null || sudo mkdir -p "$LOG_DIR"
+  fi
+  # Ensure writability. Try our own chmod first (works if we own the
+  # dir), then sudo (works if we have NOPASSWD sudo, which bootstrap
+  # sets up for ubuntu). Best-effort: if we can't chmod, the tee
+  # append below will still print output to stdout — the log file
+  # part just gets skipped with a shell-visible error.
+  if [ ! -w "$LOG_DIR" ]; then
+    chmod 1777 "$LOG_DIR" 2>/dev/null \
+      || sudo chmod 1777 "$LOG_DIR" 2>/dev/null \
+      || echo "WARN: could not make $LOG_DIR writable — tee may fail" >&2
   fi
 
   # Route output through tee for the remainder of the script.
