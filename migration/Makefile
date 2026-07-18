@@ -66,6 +66,7 @@ NC     := \033[0m
         ssm-jumpbox ssm-tunnel jumpbox-pubkey \
         dump-mysql dump-codebase dump-files dump-private dump-all \
         restore-mysql run-pgloader \
+        dispatch-restore-mysql dispatch-run-pgloader \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         .preflight
 
@@ -157,6 +158,12 @@ help:  ## Show this help
 	@echo "  make run-pgloader            Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader)"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB MIGRATION_DB_NAME$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Walk-away dispatch (Mac-side; kicks off on deploy-host via SSM, survives session timeout):$(NC)"
+	@echo "  make dispatch-restore-mysql  Kick restore-mysql on deploy-host, poll from Mac"
+	@echo "  make dispatch-run-pgloader   Kick run-pgloader on deploy-host, poll from Mac"
+	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
+	@echo "                                 $(CYAN)Env overrides: CONFIRMED DRY_RUN MIGRATION_DB_NAME PGLOADER_HEAP_MB POLL_TIMEOUT$(NC)"
 	@echo ""
 
 # -----------------------------------------------------------------------------
@@ -594,6 +601,18 @@ run-pgloader:  ## Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader
 	echo "$(CYAN)  DRY_RUN           = $${DRY_RUN:-no}$(NC)"; \
 	echo ""; \
 	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/run-pgloader.sh
+
+dispatch-restore-mysql:  ## Fire restore-mysql on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@# Uses `aws ssm send-command`, survives Mac-side interrupts (session
+	@# timeout, sleep, lid close). Poll timeout defaults to 2h — override
+	@# with POLL_TIMEOUT=<seconds> if you're on the moon.
+	@./scripts/_ssm-run-deploy-host.sh restore-mysql
+
+dispatch-run-pgloader:  ## Fire run-pgloader on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@# 2-hour default POLL_TIMEOUT matches the observed pgloader wall time
+	@# for a full 12M-row load with index build. Override with
+	@# POLL_TIMEOUT=<seconds> for smaller/larger datasets.
+	@./scripts/_ssm-run-deploy-host.sh run-pgloader
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
