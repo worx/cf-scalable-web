@@ -2718,6 +2718,9 @@ publish-drupal-vhost:  ## SSM-write /etc/nginx/shared/sites-enabled/drupal.conf 
 clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tables (via deploy-host)
 	@scripts/clear-drupal-cache.sh $(ENV)
 
+dispatch-db-backup:  ## Fire db-backup on deploy-host via SSM (walk-away safe; prints new backup DB name on stdout)
+	@scripts/dispatch-db-backup.sh $(ENV) $(if $(DB),$(DB),drupal)
+
 install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
 	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
 	@# environment and turns it into a working, publicly-reachable, smoke-

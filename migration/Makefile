@@ -66,7 +66,7 @@ NC     := \033[0m
         ssm-jumpbox ssm-tunnel jumpbox-pubkey \
         dump-mysql dump-codebase dump-files dump-private dump-all \
         restore-mysql run-pgloader \
-        dispatch-restore-mysql dispatch-run-pgloader \
+        dispatch-restore-mysql dispatch-run-pgloader migrate-db-all \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         .preflight
 
@@ -164,6 +164,9 @@ help:  ## Show this help
 	@echo "  make dispatch-run-pgloader   Kick run-pgloader on deploy-host, poll from Mac"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
 	@echo "                                 $(CYAN)Env overrides: CONFIRMED DRY_RUN MIGRATION_DB_NAME PGLOADER_HEAP_MB POLL_TIMEOUT$(NC)"
+	@echo "  make migrate-db-all          FULL migration in one call: db-backup → restore-mysql → pgloader → cache-clear"
+	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
+	@echo "                                 $(CYAN)Env: SKIP_BACKUP=yes (skip Phase 0) POLL_TIMEOUT=<s>$(NC)"
 	@echo ""
 
 # -----------------------------------------------------------------------------
@@ -613,6 +616,64 @@ dispatch-run-pgloader:  ## Fire run-pgloader on deploy-host via SSM (walk-away s
 	@# for a full 12M-row load with index build. Override with
 	@# POLL_TIMEOUT=<seconds> for smaller/larger datasets.
 	@./scripts/_ssm-run-deploy-host.sh run-pgloader
+
+migrate-db-all:  ## Full DB migration walk-away safe: db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit
+	@# — no auto-cleanup; operator drops it manually when satisfied).
+	@# Environment:
+	@#   SKIP_BACKUP=yes   Skip Phase 0. Use when the sandbox DB is already
+	@#                      empty/scratch and there's no state worth preserving.
+	@#   POLL_TIMEOUT      Override the per-dispatch poll timeout (default 2h).
+	@#
+	@if [ "$(SKIP_BACKUP)" != "yes" ]; then \
+		echo ""; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		echo "$(YELLOW)  Phase 0: safety-net logical-DB backup$(NC)"; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		BACKUP_DB=$$($(MAKE) --no-print-directory -C .. dispatch-db-backup ENV=sandbox); \
+		if [ -z "$$BACKUP_DB" ]; then \
+			echo "$(RED)Phase 0 (dispatch-db-backup) FAILED. Aborting.$(NC)"; \
+			exit 1; \
+		fi; \
+		echo ""; \
+		echo "$(GREEN)Safety backup created: $$BACKUP_DB$(NC)"; \
+		echo "$(CYAN)If migration fails and you want to rollback:$(NC)"; \
+		echo "$(CYAN)  make ssm-deploy-host$(NC)"; \
+		echo "$(CYAN)  make db-restore ENV=sandbox FROM=$$BACKUP_DB$(NC)"; \
+	else \
+		echo "$(YELLOW)============================================$(NC)"; \
+		echo "$(YELLOW)  Phase 0: SKIPPED (SKIP_BACKUP=yes)$(NC)"; \
+		echo "$(YELLOW)============================================$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 1: dispatch-restore-mysql$(NC)"
+	@echo "$(YELLOW)  (S3 dump → local MariaDB scratch)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory dispatch-restore-mysql CONFIRMED=yes
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 2: dispatch-run-pgloader$(NC)"
+	@echo "$(YELLOW)  (MariaDB scratch → sandbox RDS Postgres)$(NC)"
+	@echo "$(YELLOW)  This is the long one — up to 2 hours for a full 12M-row load$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory dispatch-run-pgloader CONFIRMED=yes
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 3: clear-drupal-cache$(NC)"
+	@echo "$(YELLOW)  (invalidate Valkey + on-disk compiled containers)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory -C .. clear-drupal-cache ENV=sandbox
+	@echo ""
+	@echo "$(GREEN)============================================$(NC)"
+	@echo "$(GREEN)  migrate-db-all COMPLETE$(NC)"
+	@echo "$(GREEN)============================================$(NC)"
+	@echo "$(CYAN)Sandbox Drupal is now serving prod data.$(NC)"
+	@echo "$(CYAN)Smoke test: make admin-login-url ENV=sandbox$(NC)"
+	@echo "$(CYAN)Cleanup backup when satisfied:$(NC)"
+	@echo "$(CYAN)  make ssm-deploy-host$(NC)"
+	@echo "$(CYAN)  make list-db-backups ENV=sandbox$(NC)"
+	@echo "$(CYAN)  make delete-db-backup ENV=sandbox SELECT=<N>$(NC)"
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
