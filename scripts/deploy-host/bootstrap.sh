@@ -451,6 +451,24 @@ curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
   || echo "WARN: RDS CA bundle install failed (non-fatal — pgloader may still hit TLS verify errors)"
 
 # ============================================================
+step "Git safe.directory for cross-user repo access (SSM runs as root, repo owned by ubuntu)"
+# ============================================================
+# Git 2.35+ refuses to operate on repos whose directory is owned by a
+# different user than the one running git — this is a security feature
+# to prevent hostile config injection. But we legitimately want root
+# (running via SSM send-command) to be able to `git pull` on the
+# ubuntu-owned checkout at /home/ubuntu/projects/cf-scalable-web.
+# Adding an explicit safe.directory entry to root's global git config
+# whitelists that specific path.
+# Discovered 2026-07-17: dispatch-db-backup.sh's `git pull` failed with
+# `fatal: detected dubious ownership` after the auto-logging follow-up
+# landed. Inline `-c safe.directory=...` in that script fixes the
+# immediate call; this step makes ALL root git operations on that repo
+# work without per-command config.
+git config --global --add safe.directory /home/ubuntu/projects/cf-scalable-web \
+  || echo "WARN: could not set git safe.directory (non-fatal — inline -c flag still works)"
+
+# ============================================================
 step "Composer (latest stable)"
 # ============================================================
 curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php

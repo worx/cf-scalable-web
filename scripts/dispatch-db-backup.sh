@@ -63,11 +63,22 @@ echo "Dispatching db-backup for env=$ENV DB=$DB_NAME..." >&2
 # Inner script. Pulls latest git first so any local edits to db-backup.sh
 # take effect without a separate deploy step. CONFIRMED=yes because SSM
 # is non-interactive.
+#
+# git safe.directory: SSM runs commands as root, but the repo is owned
+# by ubuntu — git 2.35+ refuses to operate on repos owned by a different
+# user unless the path is whitelisted. `-c safe.directory=<path>` is
+# the one-shot inline whitelist (equivalent to `git config --global
+# --add safe.directory <path>` but scoped to this one invocation).
+#
+# Pull is best-effort: if it fails (network glitch, merge conflict,
+# whatever), we continue with whatever's already on disk rather than
+# blocking the whole flow.
 INNER_SCRIPT=$(cat <<EOF_INNER
 #!/bin/bash
 set -e
 cd /home/ubuntu/projects/cf-scalable-web
-git pull --quiet
+git -c safe.directory=/home/ubuntu/projects/cf-scalable-web pull --quiet \\
+  || echo "WARN: git pull failed — using existing checkout"
 CONFIRMED=yes DB="$DB_NAME" sudo -E scripts/deploy-host/db-backup.sh "$ENV" "$DB_NAME"
 EOF_INNER
 )
