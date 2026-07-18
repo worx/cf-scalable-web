@@ -67,6 +67,8 @@ NC     := \033[0m
         dump-mysql dump-codebase dump-files dump-private dump-all \
         restore-mysql run-pgloader \
         dispatch-restore-mysql dispatch-run-pgloader migrate-db-all \
+        restore-files restore-private \
+        dispatch-restore-files dispatch-restore-private migrate-full-all \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         .preflight
 
@@ -158,13 +160,21 @@ help:  ## Show this help
 	@echo "  make run-pgloader            Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader)"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB MIGRATION_DB_NAME$(NC)"
+	@echo "  make restore-files           Fetch drupal-files.tar.gz → atomic-swap onto sandbox FSx"
+	@echo "  make restore-private         Fetch drupal-private.tar.gz → atomic-swap onto sandbox FSx"
+	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
+	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY TARGET_DIR KEEP_BAK FORCE_DOWNLOAD$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Walk-away dispatch (Mac-side; kicks off on deploy-host via SSM, survives session timeout):$(NC)"
 	@echo "  make dispatch-restore-mysql  Kick restore-mysql on deploy-host, poll from Mac"
 	@echo "  make dispatch-run-pgloader   Kick run-pgloader on deploy-host, poll from Mac"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
 	@echo "                                 $(CYAN)Env overrides: CONFIRMED DRY_RUN MIGRATION_DB_NAME PGLOADER_HEAP_MB POLL_TIMEOUT$(NC)"
-	@echo "  make migrate-db-all          FULL migration in one call: db-backup → restore-mysql → pgloader → cache-clear"
+	@echo "  make dispatch-restore-files  Kick restore-files on deploy-host, poll from Mac"
+	@echo "  make dispatch-restore-private Kick restore-private on deploy-host, poll from Mac"
+	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
+	@echo "  make migrate-db-all          FULL DB migration: db-backup → restore-mysql → pgloader → cache-clear"
+	@echo "  make migrate-full-all        FULL migration: migrate-db-all + files + private + cache-clear"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
 	@echo "                                 $(CYAN)Env: SKIP_BACKUP=yes (skip Phase 0) POLL_TIMEOUT=<s>$(NC)"
 	@echo ""
@@ -605,6 +615,46 @@ run-pgloader:  ## Local MariaDB scratch → sandbox RDS PostgreSQL (via pgloader
 	echo ""; \
 	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/run-pgloader.sh
 
+restore-files:  ## Fetch drupal-files.tar.gz from S3 → atomic-swap onto sandbox FSx  [FROM: deploy-host, PROFILE: instance-role]
+	@BUCKET_NAME="$${MIGRATION_BUCKET:-}"; \
+	if [ -z "$$BUCKET_NAME" ]; then \
+		BUCKET_NAME=$$(aws cloudformation describe-stacks \
+			--stack-name $(BUCKET_STACK) \
+			--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+			--output text --region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+			echo "$(RED)Could not resolve migration bucket from CFN stack.$(NC)"; exit 1; \
+		fi; \
+	fi; \
+	echo "$(BLUE)Running restore-files.sh on this host...$(NC)"; \
+	echo "$(CYAN)  MIGRATION_BUCKET = $$BUCKET_NAME$(NC)"; \
+	echo "$(CYAN)  DUMP_S3_KEY      = $${DUMP_S3_KEY:-dumps/drupal-files.tar.gz}$(NC)"; \
+	echo "$(CYAN)  TARGET_DIR       = $${TARGET_DIR:-/var/www/drupal/web/sites/default/files}$(NC)"; \
+	echo "$(CYAN)  KEEP_BAK         = $${KEEP_BAK:-yes}$(NC)"; \
+	echo "$(CYAN)  CONFIRMED        = $${CONFIRMED:-no}$(NC)"; \
+	echo ""; \
+	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/restore-files.sh
+
+restore-private:  ## Fetch drupal-private.tar.gz from S3 → atomic-swap onto sandbox FSx  [FROM: deploy-host, PROFILE: instance-role]
+	@BUCKET_NAME="$${MIGRATION_BUCKET:-}"; \
+	if [ -z "$$BUCKET_NAME" ]; then \
+		BUCKET_NAME=$$(aws cloudformation describe-stacks \
+			--stack-name $(BUCKET_STACK) \
+			--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+			--output text --region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+			echo "$(RED)Could not resolve migration bucket from CFN stack.$(NC)"; exit 1; \
+		fi; \
+	fi; \
+	echo "$(BLUE)Running restore-private.sh on this host...$(NC)"; \
+	echo "$(CYAN)  MIGRATION_BUCKET = $$BUCKET_NAME$(NC)"; \
+	echo "$(CYAN)  DUMP_S3_KEY      = $${DUMP_S3_KEY:-dumps/drupal-private.tar.gz}$(NC)"; \
+	echo "$(CYAN)  TARGET_DIR       = $${TARGET_DIR:-/var/www/drupal-private}$(NC)"; \
+	echo "$(CYAN)  KEEP_BAK         = $${KEEP_BAK:-yes}$(NC)"; \
+	echo "$(CYAN)  CONFIRMED        = $${CONFIRMED:-no}$(NC)"; \
+	echo ""; \
+	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/restore-private.sh
+
 dispatch-restore-mysql:  ## Fire restore-mysql on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@# Uses `aws ssm send-command`, survives Mac-side interrupts (session
 	@# timeout, sleep, lid close). Poll timeout defaults to 2h — override
@@ -616,6 +666,12 @@ dispatch-run-pgloader:  ## Fire run-pgloader on deploy-host via SSM (walk-away s
 	@# for a full 12M-row load with index build. Override with
 	@# POLL_TIMEOUT=<seconds> for smaller/larger datasets.
 	@./scripts/_ssm-run-deploy-host.sh run-pgloader
+
+dispatch-restore-files:  ## Fire restore-files on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@./scripts/_ssm-run-deploy-host.sh restore-files
+
+dispatch-restore-private:  ## Fire restore-private on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@./scripts/_ssm-run-deploy-host.sh restore-private
 
 migrate-db-all:  ## Full DB migration walk-away safe: db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit
@@ -674,6 +730,34 @@ migrate-db-all:  ## Full DB migration walk-away safe: db-backup → dispatch-res
 	@echo "$(CYAN)  make ssm-deploy-host$(NC)"
 	@echo "$(CYAN)  make list-db-backups ENV=sandbox$(NC)"
 	@echo "$(CYAN)  make delete-db-backup ENV=sandbox SELECT=<N>$(NC)"
+
+migrate-full-all:  ## FULL migration: migrate-db-all + dispatch-restore-files + dispatch-restore-private  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@# Sequences migrate-db-all's four phases + files + private into one call.
+	@# Same walk-away safety semantics. See migrate-db-all for env-var docs.
+	@$(MAKE) --no-print-directory migrate-db-all
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 4: dispatch-restore-files$(NC)"
+	@echo "$(YELLOW)  (S3 tarball → /var/www/drupal/web/sites/default/files/)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory dispatch-restore-files CONFIRMED=yes
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 5: dispatch-restore-private$(NC)"
+	@echo "$(YELLOW)  (S3 tarball → /var/www/drupal-private/)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory dispatch-restore-private CONFIRMED=yes
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 6: clear-drupal-cache (again, for image-style caches)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory -C .. clear-drupal-cache ENV=sandbox
+	@echo ""
+	@echo "$(GREEN)============================================$(NC)"
+	@echo "$(GREEN)  migrate-full-all COMPLETE$(NC)"
+	@echo "$(GREEN)============================================$(NC)"
+	@echo "$(CYAN)Sandbox Drupal now serves prod DB + files + private.$(NC)"
+	@echo "$(CYAN)Smoke test: make admin-login-url ENV=sandbox$(NC)"
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
