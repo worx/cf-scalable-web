@@ -173,10 +173,11 @@ help:  ## Show this help
 	@echo "  make dispatch-restore-files  Kick restore-files on deploy-host, poll from Mac"
 	@echo "  make dispatch-restore-private Kick restore-private on deploy-host, poll from Mac"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
-	@echo "  make migrate-db-all          FULL DB migration: db-backup → restore-mysql → pgloader → cache-clear"
+	@echo "  make migrate-db-all          FULL DB migration: preflight → db-backup → restore-mysql → pgloader → cache-clear"
 	@echo "  make migrate-full-all        FULL migration: migrate-db-all + files + private + cache-clear"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
-	@echo "                                 $(CYAN)Env: SKIP_BACKUP=yes (skip Phase 0) POLL_TIMEOUT=<s>$(NC)"
+	@echo "                                 $(CYAN)Env: AUTO=yes (auto-install-drupal on preflight fail — for overnight runs)$(NC)"
+	@echo "                                 $(CYAN)     SKIP_BACKUP=yes (skip Phase 0) SKIP_PREFLIGHT=yes POLL_TIMEOUT=<s>$(NC)"
 	@echo ""
 
 # -----------------------------------------------------------------------------
@@ -683,22 +684,48 @@ migrate-db-all:  ## Full DB migration walk-away safe: preflight → db-backup �
 	@#                       installed but the check has a false-negative bug.
 	@#                       Default: preflight fails fast if Drupal isn't
 	@#                       structurally present on sandbox.
+	@#   AUTO=yes           If Phase -1 fails (Drupal not installed), auto-
+	@#                       invoke install-drupal ENV=sandbox instead of
+	@#                       bailing. Intended for overnight/fire-and-forget
+	@#                       runs where "come back to a failed job because
+	@#                       install-drupal wasn't run" is worse than the
+	@#                       ~10 min autonomy cost. Default is off: operator
+	@#                       is expected to run install-drupal explicitly.
 	@#   POLL_TIMEOUT       Override the per-dispatch poll timeout (default 2h).
 	@#
 	@# Phase -1: preflight — verify Drupal is installed on the target
 	@# env's deploy-host. Migration is a "swap contents" workflow; it
 	@# requires the structural foundation (codebase, settings.php, salt.txt,
-	@# drupal DB in RDS) that install-drupal.sh produces. Fails fast with
-	@# actionable "run make install-drupal ENV=<env>" hint if the check
-	@# doesn't pass — prevents the class of "why did Phase 6 leave the site
-	@# WSOD'd" surprises.
+	@# drupal DB in RDS) that install-drupal.sh produces.
+	@#
+	@# Behavior on preflight FAIL:
+	@#   AUTO not set → bail with "run make install-drupal" hint (fail-fast)
+	@#   AUTO=yes     → run install-drupal, re-verify, continue (walk-away)
 	@if [ "$(SKIP_PREFLIGHT)" != "yes" ]; then \
 		echo ""; \
 		echo "$(YELLOW)============================================$(NC)"; \
 		echo "$(YELLOW)  Phase -1: preflight (Drupal installed?)$(NC)"; \
 		echo "$(YELLOW)============================================$(NC)"; \
-		$(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox \
-			|| { echo "$(RED)Preflight failed. Fix and retry, or set SKIP_PREFLIGHT=yes to bypass.$(NC)"; exit 1; }; \
+		if $(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox; then \
+			echo "$(GREEN)Preflight OK.$(NC)"; \
+		elif [ "$(AUTO)" = "yes" ]; then \
+			echo ""; \
+			echo "$(YELLOW)AUTO=yes — preflight failed, running install-drupal ENV=sandbox...$(NC)"; \
+			$(MAKE) --no-print-directory -C .. install-drupal ENV=sandbox \
+				|| { echo "$(RED)AUTO install-drupal failed. Check its output above; probably need manual intervention.$(NC)"; exit 1; }; \
+			echo ""; \
+			echo "$(BLUE)install-drupal complete — re-running preflight...$(NC)"; \
+			$(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox \
+				|| { echo "$(RED)Preflight STILL failing after install-drupal. Something's off — bailing.$(NC)"; exit 1; }; \
+			echo "$(GREEN)Preflight OK after AUTO install-drupal.$(NC)"; \
+		else \
+			echo ""; \
+			echo "$(RED)Preflight failed.$(NC)"; \
+			echo "$(CYAN)Fix by running: make install-drupal ENV=sandbox$(NC)"; \
+			echo "$(CYAN)Or retry with:  make migrate-db-all AUTO=yes$(NC)  (auto-install on preflight fail)"; \
+			echo "$(CYAN)Or bypass:     make migrate-db-all SKIP_PREFLIGHT=yes$(NC)  (only if the check has a false negative)"; \
+			exit 1; \
+		fi; \
 	else \
 		echo "$(YELLOW)  Phase -1: SKIPPED (SKIP_PREFLIGHT=yes)$(NC)"; \
 	fi
