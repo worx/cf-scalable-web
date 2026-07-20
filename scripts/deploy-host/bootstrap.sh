@@ -234,6 +234,14 @@ HISTSIZE=100000
 SAVEHIST=100000
 setopt INC_APPEND_HISTORY SHARE_HISTORY
 
+# Treat # as a comment character in interactive shells. Zsh's default
+# is NO (unlike bash), which causes operator confusion whenever a
+# copy-pasted block that includes `# ...` comments produces "command
+# not found: #" errors. Enabling this makes the shell behave like
+# bash's interactive commenting. Discovered as recurring pain during
+# migration testing 2026-07-17..20.
+setopt INTERACTIVE_COMMENTS
+
 # Wrap /usr/local/sbin/use-env so the env's DB/cache exports flow into
 # the current shell. The binary itself can't propagate variables up to
 # its caller (process boundaries), so the shell sources the env file
