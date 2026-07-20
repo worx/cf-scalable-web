@@ -2724,6 +2724,9 @@ dispatch-db-backup:  ## Fire db-backup on deploy-host via SSM (walk-away safe; p
 verify-drupal-installed:  ## Preflight for migration: SSM to deploy-host, verify Drupal is structurally present
 	@scripts/verify-drupal-installed.sh $(ENV)
 
+refresh-deploy-host-scripts:  ## Re-install /usr/local/sbin/{use-env,refresh-env-config} + sudoers on deploy-host after a git pull (no full bootstrap)
+	@scripts/refresh-deploy-host-scripts.sh
+
 install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
 	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
 	@# environment and turns it into a working, publicly-reachable, smoke-
