@@ -71,6 +71,7 @@ SITE_NAME_DEFAULT="drupal-${ENV}.test"
 # when deployed. install-drupal auto-creates as a fallback if absent.
 DRUPAL_DB_SECRET="worxco/$ENV/drupal/db-password"
 DRUPAL_ADMIN_SECRET="worxco/$ENV/drupal/admin-password"
+DRUPAL_SALT_SECRET="worxco/$ENV/drupal/hash-salt"
 
 # Resolve config from SSM parameters if cf-app-drupal is deployed.
 # Each lookup falls back to the local default on failure (parameter
@@ -331,22 +332,64 @@ cd "$INSTALL_DIR"
 composer require drush/drush --no-interaction --no-progress
 
 # ============================================================
-step "Generate (or reuse) hash_salt — persists across reinstalls"
+step "Resolve hash_salt (Secrets Manager primary; salt.txt kept for transition)"
 # ============================================================
-if [ ! -f "$SALT_FILE" ]; then
-  log "Generating new hash_salt at $SALT_FILE"
-  php -r "echo bin2hex(random_bytes(32));" > "$SALT_FILE"
-  # Mode 0640 with group www-data — settings.php reads this at request
-  # time from PHP-FPM workers, which run as www-data. The earlier
-  # `chmod 600` shut PHP-FPM out (root-only), caused Drupal to log
-  # "Missing $settings['hash_salt']" and return HTTP 500 on every
-  # request. Spec lives in docs/FSX-LAYOUT.md "File ownership and
-  # permissions" — keep this in sync with that doc.
-  chown root:www-data "$SALT_FILE"
-  chmod 0640 "$SALT_FILE"
+# Salt is being migrated from /var/www/drupal-private/salt.txt (per-FSx
+# file, at risk during restore-private atomic swap) to Secrets Manager
+# (per-env, IAM-scoped, immune to file-system operations). See
+# docs/memory/salt-persistence-design.md for the design rationale.
+#
+# Three cases handled here:
+#   1. SSM secret exists → use it as the source of truth. Write file
+#      to match (backward compat: PHP-FPM instances not yet updated
+#      to read the env-var version of settings.php will still see it).
+#   2. SSM secret missing, file exists → migrate file content into SSM
+#      (one-time transition for existing sandboxes). File stays.
+#   3. Neither exists → generate new, write to BOTH (fresh install).
+#
+# Once every environment has migrated (SSM populated + settings.php
+# using env var + configure-php exposing env[]), the file writes here
+# can be dropped along with restore-private.sh's PRESERVE_FROM_BAK
+# default. Tracked as follow-up.
+DRUPAL_SALT=""
+if DRUPAL_SALT_RAW=$(aws secretsmanager get-secret-value \
+    --secret-id "$DRUPAL_SALT_SECRET" \
+    --query SecretString --output text 2>/dev/null); then
+  # Case 1: SSM is authoritative
+  DRUPAL_SALT="$DRUPAL_SALT_RAW"
+  unset DRUPAL_SALT_RAW
+  log "Using hash_salt from Secrets Manager: $DRUPAL_SALT_SECRET"
+elif [ -f "$SALT_FILE" ]; then
+  # Case 2: migrate existing file into SSM
+  DRUPAL_SALT=$(cat "$SALT_FILE")
+  aws secretsmanager create-secret \
+    --name "$DRUPAL_SALT_SECRET" \
+    --description "Drupal hash_salt for env $ENV (migrated from $SALT_FILE)" \
+    --secret-string "$DRUPAL_SALT" \
+    --tags Key=Environment,Value="$ENV" Key=Application,Value=drupal \
+    >/dev/null
+  log "Migrated existing hash_salt from $SALT_FILE to $DRUPAL_SALT_SECRET"
 else
-  log "Reusing existing hash_salt at $SALT_FILE"
+  # Case 3: generate fresh
+  DRUPAL_SALT=$(php -r "echo bin2hex(random_bytes(32));")
+  aws secretsmanager create-secret \
+    --name "$DRUPAL_SALT_SECRET" \
+    --description "Drupal hash_salt for env $ENV (generated at first install)" \
+    --secret-string "$DRUPAL_SALT" \
+    --tags Key=Environment,Value="$ENV" Key=Application,Value=drupal \
+    >/dev/null
+  log "Generated new hash_salt and stored at $DRUPAL_SALT_SECRET"
 fi
+
+# Write/rewrite the file to match SSM. Kept during transition so
+# PHP-FPM instances that haven't yet picked up env-var-based
+# settings.php continue to work.
+printf '%s' "$DRUPAL_SALT" > "$SALT_FILE"
+# Mode 0640 with group www-data — PHP-FPM workers run as www-data and
+# need read access via file fallback during transition. Spec in
+# docs/FSX-LAYOUT.md "File ownership and permissions".
+chown root:www-data "$SALT_FILE"
+chmod 0640 "$SALT_FILE"
 
 # ============================================================
 step "drush site:install standard (~1 min)"
@@ -404,8 +447,19 @@ $databases['default']['default'] = [
 // Paths on FSx — no env prefix (post-cutover commit ee319d5; the env's
 // FSx is mounted at /var/www on every host that needs it, so the env name
 // isn't in the path).
-$_salt = '/var/www/drupal-private/salt.txt';
-$settings['hash_salt'] = is_readable($_salt) ? trim(file_get_contents($_salt)) : '';
+
+// hash_salt: prefer env var (Secrets Manager → refresh-env-config →
+// /etc/worxco/envs/<env> → PHP-FPM env[] via configure-php.sh). Fall
+// back to file on FSx for backward compatibility during the file→SSM
+// transition. Once every env is verified running on env-var-based
+// salt, the file fallback (and salt.txt itself) can be dropped.
+$_salt_env = getenv('DRUPAL_HASH_SALT');
+if ($_salt_env !== false && $_salt_env !== '') {
+  $settings['hash_salt'] = $_salt_env;
+} else {
+  $_salt_file = '/var/www/drupal-private/salt.txt';
+  $settings['hash_salt'] = is_readable($_salt_file) ? trim(file_get_contents($_salt_file)) : '';
+}
 
 // Files
 $settings['file_public_path']      = 'sites/default/files';

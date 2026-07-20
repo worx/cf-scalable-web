@@ -104,6 +104,17 @@ DRUPAL_DB_PASS=$(echo "$DRUPAL_DB_RAW" | jq -r '.password // empty' 2>/dev/null 
 [ -z "$DRUPAL_DB_PASS" ] && DRUPAL_DB_PASS="$DRUPAL_DB_RAW"
 unset DRUPAL_DB_RAW
 
+# hash_salt — env-var-based per docs/memory/salt-persistence-design.md.
+# install-drupal.sh creates the secret on first install (and migrates
+# from existing salt.txt on re-run for existing envs). If the secret
+# doesn't exist yet, leave DRUPAL_HASH_SALT empty — settings.php falls
+# back to file_get_contents('/var/www/drupal-private/salt.txt') during
+# the file→SSM transition. Once every env has been migrated + verified,
+# the file fallback (and this "if empty" tolerance) can go away.
+DRUPAL_HASH_SALT=$(aws secretsmanager get-secret-value \
+  --secret-id "worxco/$ENV/drupal/hash-salt" --region "$REGION" \
+  --query 'SecretString' --output text 2>/dev/null || echo "")
+
 # ============================================================
 # Rewrite the BEGIN/END worxco-boot block inside www.conf.
 # Idempotent: any prior block is stripped, the fresh one
@@ -137,6 +148,7 @@ if [ -n "$DRUPAL_DB_HOST" ] && [ "$DRUPAL_DB_HOST" != "None" ]; then
     printf 'env[DRUPAL_DB_NAME]   = "%s"\n' "${DRUPAL_DB_NAME//\"/}"
     printf 'env[DRUPAL_DB_USER]   = "%s"\n' "${DRUPAL_DB_USER//\"/}"
     printf 'env[DRUPAL_DB_PASS]   = "%s"\n' "${DRUPAL_DB_PASS//\"/}"
+    printf 'env[DRUPAL_HASH_SALT] = "%s"\n' "${DRUPAL_HASH_SALT//\"/}"
     printf 'env[DRUPAL_SITE_NAME] = "%s"\n' "${DRUPAL_SITE_NAME//\"/}"
     if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ] && [ -n "$CACHE_AUTH" ]; then
       echo ";"

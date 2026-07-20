@@ -1,17 +1,31 @@
 ---
-name: Drupal hash_salt persistence — needs to move to SSM SecureString
-description: Why salt.txt on FSx is the wrong place long-term, the proposed SSM SecureString design, and what breaks every time we destroy/redeploy if we don't fix it
+name: Drupal hash_salt persistence — migrated to Secrets Manager (transition in progress)
+description: hash_salt now lives in Secrets Manager (worxco/$ENV/drupal/hash-salt) with a file fallback during transition. Historical context on why salt.txt was the wrong place, and the migration steps.
 type: project
 created: 2026-05-20
+updated: 2026-07-20
 ---
 # Drupal hash_salt persistence
 
-## TL;DR
+## Status: PARTIALLY IMPLEMENTED (2026-07-20)
 
-Drupal's `hash_salt` currently lives only on FSx at
+**Salt is now stored in Secrets Manager** at
+`worxco/${ENV}/drupal/hash-salt`. The file at
+`/var/www/drupal-private/salt.txt` is kept in sync during the
+transition as a fallback for PHP-FPM instances that haven't yet
+picked up the env-var-based config path.
+
+Once all environments have been verified running with env-var-based
+salt, the file (and its fallbacks in settings.php +
+restore-private.sh's PRESERVE_FROM_BAK default) can be removed. That's
+a follow-up commit.
+
+## Historical context (why we moved)
+
+Drupal's `hash_salt` originally lived only on FSx at
 `/var/www/drupal-private/salt.txt`. FSx is part of `cf-storage`, which
 gets destroyed by `make destroy-all`. **Every destroy/redeploy cycle
-generates a new salt**, which invalidates every active Drupal session,
+generated a new salt**, which invalidated every active Drupal session,
 every pending password-reset link, every form-token-bearing in-flight
 request, and every "remember me" cookie across the user base.
 
