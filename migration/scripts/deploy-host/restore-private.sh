@@ -35,6 +35,11 @@
 #   DUMP_LOCAL_PATH    Local staging path             (/var/www/mysql/drupal-private.tar.gz)
 #   TARGET_DIR         Where private files live       (/var/www/drupal-private)
 #   KEEP_BAK           yes = keep .BAK on success     (yes)
+#   PRESERVE_FROM_BAK  Space-separated filenames to  (salt.txt)
+#                       copy from .BAK back into the
+#                       new dir after swap. Default is
+#                       Drupal's hash_salt. Set to ""
+#                       to disable preservation entirely.
 #   FORCE_DOWNLOAD     yes = re-download from S3
 #   CONFIRMED          yes = skip Y/N confirm
 #   DRY_RUN            yes = preview commands
@@ -55,6 +60,19 @@ DUMP_S3_KEY="${DUMP_S3_KEY:-dumps/drupal-private.tar.gz}"
 DUMP_LOCAL_PATH="${DUMP_LOCAL_PATH:-/var/www/mysql/drupal-private.tar.gz}"
 TARGET_DIR="${TARGET_DIR:-/var/www/drupal-private}"
 KEEP_BAK="${KEEP_BAK:-yes}"
+
+# Files that are SANDBOX-managed (not prod-managed) and must survive the
+# restore swap. Space-separated list of paths relative to $TARGET_DIR.
+#
+# Default: salt.txt — Drupal's hash_salt (per install-drupal.sh:60,336-346
+# and docs/memory/salt-persistence-design.md). Prod has its own salt in its
+# private dir; sandbox's must not be overwritten because settings.php reads
+# from /var/www/drupal-private/salt.txt (line 407 of install-drupal.sh),
+# and cross-env salts would invalidate every sandbox session/token and
+# potentially break Drupal boot (missing $settings['hash_salt']).
+#
+# If future sandbox-managed files land in drupal-private, add them here.
+PRESERVE_FROM_BAK="${PRESERVE_FROM_BAK:-salt.txt}"
 
 log_init "restore-private"
 trap 'log_upload_and_exit "$MIGRATION_BUCKET"' EXIT
@@ -217,6 +235,26 @@ else
 
   mv "$NEW_DIR" "$TARGET_DIR"
   log_ok "Promoted: $NEW_DIR → $TARGET_DIR"
+
+  # Preserve sandbox-managed files across the swap. Whether or not the
+  # tarball contained these, sandbox's version is authoritative — prod's
+  # values are wrong (or absent) for sandbox. Copy from BAK, overwriting
+  # anything from the tarball. This is what closes the migration-time
+  # "hash_salt missing after restore-private" WSOD gap discovered
+  # 2026-07-19: sandbox's salt.txt lived in drupal-private, the atomic
+  # swap replaced the whole dir with prod's tarball (which lacked salt),
+  # Drupal booted without $settings['hash_salt'] and threw.
+  if [ -n "$BAK_DIR" ] && [ -d "$BAK_DIR" ] && [ -n "$PRESERVE_FROM_BAK" ]; then
+    for f in $PRESERVE_FROM_BAK; do
+      if [ -f "$BAK_DIR/$f" ]; then
+        cp -p "$BAK_DIR/$f" "$TARGET_DIR/$f"
+        chown root:www-data "$TARGET_DIR/$f"
+        log_ok "Preserved sandbox file across swap: $f"
+      else
+        log_warn "$f not in $BAK_DIR — nothing to preserve. If Drupal complains about hash_salt or similar, run install-drupal.sh to generate a fresh one."
+      fi
+    done
+  fi
 
   NEW_COUNT=$(find "$TARGET_DIR" -type f 2>/dev/null | wc -l)
   NEW_SIZE=$(du -sh "$TARGET_DIR" 2>/dev/null | cut -f1)

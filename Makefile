@@ -2721,6 +2721,9 @@ clear-drupal-cache:  ## Wipe FSx compiled-container cache + TRUNCATE cache_* tab
 dispatch-db-backup:  ## Fire db-backup on deploy-host via SSM (walk-away safe; prints new backup DB name on stdout)
 	@scripts/dispatch-db-backup.sh $(ENV) $(if $(DB),$(DB),drupal)
 
+verify-drupal-installed:  ## Preflight for migration: SSM to deploy-host, verify Drupal is structurally present
+	@scripts/verify-drupal-installed.sh $(ENV)
+
 install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
 	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
 	@# environment and turns it into a working, publicly-reachable, smoke-

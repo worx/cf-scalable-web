@@ -673,14 +673,35 @@ dispatch-restore-files:  ## Fire restore-files on deploy-host via SSM (walk-away
 dispatch-restore-private:  ## Fire restore-private on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@./scripts/_ssm-run-deploy-host.sh restore-private
 
-migrate-db-all:  ## Full DB migration walk-away safe: db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+migrate-db-all:  ## Full DB migration walk-away safe: preflight → db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit
 	@# — no auto-cleanup; operator drops it manually when satisfied).
 	@# Environment:
-	@#   SKIP_BACKUP=yes   Skip Phase 0. Use when the sandbox DB is already
-	@#                      empty/scratch and there's no state worth preserving.
-	@#   POLL_TIMEOUT      Override the per-dispatch poll timeout (default 2h).
+	@#   SKIP_BACKUP=yes    Skip Phase 0. Use when the sandbox DB is already
+	@#                       empty/scratch and there's no state worth preserving.
+	@#   SKIP_PREFLIGHT=yes Skip Phase -1. Only use if you KNOW Drupal is
+	@#                       installed but the check has a false-negative bug.
+	@#                       Default: preflight fails fast if Drupal isn't
+	@#                       structurally present on sandbox.
+	@#   POLL_TIMEOUT       Override the per-dispatch poll timeout (default 2h).
 	@#
+	@# Phase -1: preflight — verify Drupal is installed on the target
+	@# env's deploy-host. Migration is a "swap contents" workflow; it
+	@# requires the structural foundation (codebase, settings.php, salt.txt,
+	@# drupal DB in RDS) that install-drupal.sh produces. Fails fast with
+	@# actionable "run make install-drupal ENV=<env>" hint if the check
+	@# doesn't pass — prevents the class of "why did Phase 6 leave the site
+	@# WSOD'd" surprises.
+	@if [ "$(SKIP_PREFLIGHT)" != "yes" ]; then \
+		echo ""; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		echo "$(YELLOW)  Phase -1: preflight (Drupal installed?)$(NC)"; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		$(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox \
+			|| { echo "$(RED)Preflight failed. Fix and retry, or set SKIP_PREFLIGHT=yes to bypass.$(NC)"; exit 1; }; \
+	else \
+		echo "$(YELLOW)  Phase -1: SKIPPED (SKIP_PREFLIGHT=yes)$(NC)"; \
+	fi
 	@if [ "$(SKIP_BACKUP)" != "yes" ]; then \
 		echo ""; \
 		echo "$(YELLOW)============================================$(NC)"; \
