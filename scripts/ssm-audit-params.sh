@@ -91,17 +91,37 @@ fi
 # -----------------------------------------------------------------------------
 TOTAL=0
 FOUND=0
-MISSING=0
+MISSING=0            # only REQUIRED missing; drives exit code
+MISSING_OPTIONAL=0   # missing-but-optional; informational only
 MISSING_LIST=""
+MISSING_OPTIONAL_LIST=""
 
+# check_param            — REQUIRED (missing → exit 1)
+# check_param_optional   — OPTIONAL (missing → WARN, exit 0)
+#
+# Distinction matters for partial deployments: on a fresh env where
+# cf-database and cf-cache haven't been deployed yet, /rds/* and
+# /cache/* params are legitimately absent. Failing the whole audit
+# on those masks the real problem (missing FSx / NLB / AMIs = truly
+# broken deploy). Kurt hit this 2026-04-24 — sandbox audit exited 1
+# every run because RDS wasn't there yet.
 check_param() {
+  _check_param_impl "$1" "$2" "$3" required
+}
+
+check_param_optional() {
+  _check_param_impl "$1" "$2" "$3" optional
+}
+
+_check_param_impl() {
   local param_path="$1"
   local category="$2"
   local remediation="$3"
+  local kind="$4"   # required | optional
   TOTAL=$((TOTAL + 1))
 
   if [[ "${DRY_RUN}" == "1" ]]; then
-    echo -e "  ${CYAN}[dry-run]${NC} Would check: ${param_path}"
+    echo -e "  ${CYAN}[dry-run]${NC} Would check: ${param_path} (${kind})"
     return 0
   fi
 
@@ -118,6 +138,10 @@ check_param() {
       --output text 2>/dev/null)
     echo -e "  ${GREEN}OK${NC}  ${param_path}  =  ${CYAN}${value}${NC}"
     FOUND=$((FOUND + 1))
+  elif [[ "${kind}" == "optional" ]]; then
+    echo -e "  ${YELLOW}OPTIONAL${NC}  ${param_path}  ${YELLOW}(not deployed — OK)${NC}"
+    MISSING_OPTIONAL=$((MISSING_OPTIONAL + 1))
+    MISSING_OPTIONAL_LIST="${MISSING_OPTIONAL_LIST}\n  ${YELLOW}${param_path}${NC}  ->  ${YELLOW}${remediation}${NC}"
   else
     echo -e "  ${RED}MISSING${NC}  ${param_path}"
     MISSING=$((MISSING + 1))
@@ -162,19 +186,24 @@ check_param "/${ENV_NAME}/nlb/endpoint" "NLB" \
   "make deploy-compute-nlb ENV=${ENV_NAME}"
 
 # --- RDS Parameters ---
-section_header "RDS (Database)" "cf-database.yaml"
-check_param "/${ENV_NAME}/rds/endpoint" "RDS" \
+# Optional: absent during pre-database-deploy phases (fresh env,
+# infra-only smoke). Present iff cf-database has been deployed.
+section_header "RDS (Database) — optional" "cf-database.yaml"
+check_param_optional "/${ENV_NAME}/rds/endpoint" "RDS" \
   "make deploy-database ENV=${ENV_NAME}"
-check_param "/${ENV_NAME}/rds/port" "RDS" \
+check_param_optional "/${ENV_NAME}/rds/port" "RDS" \
   "make deploy-database ENV=${ENV_NAME}"
-check_param "/${ENV_NAME}/rds/database" "RDS" \
+check_param_optional "/${ENV_NAME}/rds/database" "RDS" \
   "make deploy-database ENV=${ENV_NAME}"
 
 # --- Cache Parameters ---
-section_header "Cache (ElastiCache Valkey)" "cf-cache.yaml"
-check_param "/${ENV_NAME}/cache/endpoint" "Cache" \
+# Optional: absent during pre-cache-deploy phases. Present iff cf-cache
+# has been deployed. Drupal degrades gracefully to DB-backed cache
+# without a Valkey endpoint.
+section_header "Cache (ElastiCache Valkey) — optional" "cf-cache.yaml"
+check_param_optional "/${ENV_NAME}/cache/endpoint" "Cache" \
   "make deploy-cache ENV=${ENV_NAME}"
-check_param "/${ENV_NAME}/cache/port" "Cache" \
+check_param_optional "/${ENV_NAME}/cache/port" "Cache" \
   "make deploy-cache ENV=${ENV_NAME}"
 
 # --- FSx Parameters ---
@@ -218,16 +247,27 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 echo -e "  Found:              ${GREEN}${FOUND}${NC}"
-if [[ "${MISSING}" -eq 0 ]]; then
-  echo -e "  Missing:            ${GREEN}0${NC}"
-  echo
+echo -e "  Missing (required): ${MISSING:+${RED}}${MISSING}${NC}"
+echo -e "  Missing (optional): ${MISSING_OPTIONAL:+${YELLOW}}${MISSING_OPTIONAL}${NC}"
+echo
+
+if [[ "${MISSING}" -eq 0 && "${MISSING_OPTIONAL}" -eq 0 ]]; then
   echo -e "${GREEN}All expected SSM parameters are present.${NC}"
   exit 0
 fi
 
-echo -e "  Missing:            ${RED}${MISSING}${NC}"
-echo
-echo -e "${YELLOW}Remediation (deploy the source stack to create missing params):${NC}"
+if [[ "${MISSING_OPTIONAL}" -gt 0 ]]; then
+  echo -e "${YELLOW}Optional params not present (fine — deploy the source stack when ready):${NC}"
+  echo -e "${MISSING_OPTIONAL_LIST}"
+  echo
+fi
+
+if [[ "${MISSING}" -eq 0 ]]; then
+  echo -e "${GREEN}All required SSM parameters are present.${NC}"
+  exit 0
+fi
+
+echo -e "${RED}Required params missing:${NC}"
 echo -e "${MISSING_LIST}"
 echo
 exit 1

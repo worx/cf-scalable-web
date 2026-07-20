@@ -2948,8 +2948,11 @@ ssm-audit-params:  ## Audit SSM Parameter Store completeness for ENV
 
 ssm-report:  ## Report EC2 instances missing from SSM
 	@echo "$(BLUE)Running SSM Agent report for $(ENV)...$(NC)"
+	@# Pass --profile only if AWS_PROFILE is set. On deploy-host (no
+	@# ~/.aws profiles configured), the empty case makes ssm-bootstrap
+	@# fall through to the IAM instance-role credential chain.
 	@./scripts/ssm-bootstrap.sh \
-		--profile $${AWS_PROFILE:-default} \
+		$${AWS_PROFILE:+--profile $$AWS_PROFILE} \
 		--region $(AWS_REGION) \
 		--instance-profile $(INSTANCE_PROFILE) \
 		report
@@ -2961,7 +2964,7 @@ ssm-remediate:  ## Attach IAM profile + install SSM Agent via SSH (SSM_SSH_KEY r
 	fi
 	@echo "$(BLUE)Remediating SSM Agent for $(ENV)...$(NC)"
 	@./scripts/ssm-bootstrap.sh \
-		--profile $${AWS_PROFILE:-default} \
+		$${AWS_PROFILE:+--profile $$AWS_PROFILE} \
 		--region $(AWS_REGION) \
 		--instance-profile $(INSTANCE_PROFILE) \
 		--ssh-user $(SSM_SSH_USER) \

@@ -97,9 +97,16 @@ run_test "FSx configuration present" \
   "grep -q 'FSxFileSystem:' cloudformation/cf-storage.yaml && \
    grep -q 'OpenZFSConfiguration:' cloudformation/cf-storage.yaml"
 
-# Test 12: Database template has Multi-AZ enabled
-run_test "RDS Multi-AZ configured" \
-  "grep -q 'MultiAZ: true' cloudformation/cf-database.yaml"
+# Test 12: Database template supports Multi-AZ (parameterized, not hardcoded).
+# Template's actual line is:
+#   MultiAZ: !If [MultiAZEnabled, true, false]
+# where MultiAZEnabled is a Condition tied to the EnableMultiAZ parameter.
+# The old assertion `grep 'MultiAZ: true'` failed because the value is
+# never a literal — it's the CloudFormation conditional expression.
+# Check for both the parameter and its wiring into MultiAZ.
+run_test "RDS Multi-AZ configured (parameterized via EnableMultiAZ)" \
+  "grep -q 'EnableMultiAZ:' cloudformation/cf-database.yaml && \
+   grep -qE 'MultiAZ:\s*!If \[MultiAZEnabled' cloudformation/cf-database.yaml"
 
 # Test 13: Cache template has encryption
 run_test "Cache encryption configured" \

@@ -86,10 +86,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${ACTION}" || -z "${PROFILE}" || -z "${REGION}" || -z "${INSTANCE_PROFILE_NAME}" ]]; then
+if [[ -z "${ACTION}" || -z "${REGION}" || -z "${INSTANCE_PROFILE_NAME}" ]]; then
   usage
   exit 2
 fi
+# --profile is OPTIONAL: when running on the deploy-host (IAM instance
+# role, no ~/.aws profiles), we shouldn't force `--profile default`
+# because there IS no default profile — aws would error out. Leaving
+# PROFILE empty makes every aws call below omit `--profile` and fall
+# through to the SDK credential chain (instance-role → env vars → ~/.aws).
 
 if ! command -v aws >/dev/null 2>&1; then
   echo -e "${RED}ERROR: aws CLI not found${NC}"
@@ -137,19 +142,19 @@ aws_cmd() {
     echo -e "${CYAN}[dry-run]${NC} aws $*"
     return 0
   fi
-  aws --profile "${PROFILE}" --region "${REGION}" "$@"
+  aws ${PROFILE:+--profile "${PROFILE}"} --region "${REGION}" "$@"
 }
 
 # -----------------------------------------------------------------------------
 # Gather data
 # -----------------------------------------------------------------------------
 echo -e "${BLUE}==> Fetching EC2 running instances...${NC}"
-aws --profile "${PROFILE}" --region "${REGION}" ec2 describe-instances \
+aws ${PROFILE:+--profile "${PROFILE}"} --region "${REGION}" ec2 describe-instances \
   --filters Name=instance-state-name,Values=running \
   > "${EC2_JSON}"
 
 echo -e "${BLUE}==> Fetching SSM managed instances...${NC}"
-aws --profile "${PROFILE}" --region "${REGION}" ssm describe-instance-information \
+aws ${PROFILE:+--profile "${PROFILE}"} --region "${REGION}" ssm describe-instance-information \
   > "${SSM_JSON}"
 
 # Flatten EC2 instances into a compact array of objects
@@ -302,7 +307,7 @@ done
 echo
 echo -e "${BLUE}==> Step 3: Verify SSM registration...${NC}"
 sleep 10
-aws --profile "${PROFILE}" --region "${REGION}" ssm describe-instance-information > "${SSM_JSON}"
+aws ${PROFILE:+--profile "${PROFILE}"} --region "${REGION}" ssm describe-instance-information > "${SSM_JSON}"
 jq -r '.InstanceInformationList[].InstanceId' "${SSM_JSON}" | sort -u > "${SSM_IDS}"
 
 jq -c --slurpfile ssm_ids <(jq -R -s -c 'split("\n")|map(select(length>0))' "${SSM_IDS}") '
