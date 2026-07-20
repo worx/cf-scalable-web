@@ -3,416 +3,300 @@
 **Scope:** copy production Drupal state into a sandbox environment for
 testing without touching prod. Structured as four independent flows —
 database, codebase, public files, private files — each dumped to S3
-independently, restored/transformed independently, and composable
-depending on what you're testing.
+independently. Restore/transform runs on the sandbox side against the
+S3-staged artifacts, and composes at three levels:
 
-**Not scope:** production-to-production migrations, live cutover, or
-one-way conversions (this repo has a separate playbook for that).
+- **Individual** — one phase at a time (`make restore-mysql`, etc.)
+- **DB-only chain** — `make migrate-db-all` (backup → restore-mysql → pgloader → cache-clear)
+- **Full chain** — `make migrate-full-all` (migrate-db-all + files + private + second cache-clear)
+
+All chains are walk-away safe: individual phases dispatch via SSM
+send-command, which runs on the target host in SSM's own runner — Mac
+sleep, terminal close, or session timeout doesn't kill in-flight work.
 
 ## Directory layout
 
 ```
 migration/
-├── Makefile                       # phase-organized targets, see below
+├── Makefile                       # phase-organized targets (see help)
 ├── README.md                      # this file
 ├── cloudformation/                # per-phase CFN templates
 │   ├── cf-migration-bucket.yaml   # sandbox S3 bucket for dumps + logs
 │   ├── cf-migration-secret.yaml   # Secrets Manager entry (prod DB pw)
 │   └── cf-migration-jumpbox.yaml  # jumpbox EC2 in prod VPC
 ├── parameters/
-│   ├── migration-bucket-sandbox.json
-│   ├── migration-secret.json
-│   └── migration-jumpbox.json
 ├── pgloader/
 │   └── zinew.load.tmpl            # pgloader spec (envsubst template)
-├── scripts/
-│   ├── _common.sh                 # shared logging + confirm helpers
-│   ├── _ssm-run-jumpbox.sh        # Mac → jumpbox dispatch via SSM
-│   ├── jumpbox/                   # runs ON the prod jumpbox
-│   │   ├── dump-mysql.sh
-│   │   ├── dump-codebase.sh
-│   │   ├── dump-files.sh
-│   │   ├── dump-private.sh
-│   │   ├── backup-state.sh
-│   │   └── restore-state.sh
-│   └── deploy-host/               # runs ON the sandbox deploy-host
-│       ├── restore-mysql.sh
-│       └── run-pgloader.sh
+└── scripts/
+    ├── _common.sh                 # shared logging + confirm helpers
+    ├── _ssm-run-jumpbox.sh        # Mac → prod jumpbox dispatch
+    ├── _ssm-run-deploy-host.sh    # Mac → sandbox deploy-host dispatch
+    ├── jumpbox/                   # runs ON the prod jumpbox
+    │   ├── dump-mysql.sh
+    │   ├── dump-codebase.sh
+    │   ├── dump-files.sh
+    │   ├── dump-private.sh
+    │   ├── backup-state.sh
+    │   └── restore-state.sh
+    └── deploy-host/               # runs ON the sandbox deploy-host
+        ├── restore-mysql.sh
+        ├── run-pgloader.sh
+        ├── restore-files.sh
+        └── restore-private.sh
 ```
 
 ## Prerequisites
 
-**AWS profiles**: two profiles configured in `~/.aws/credentials`:
-- `ZI-Sandbox` — sandbox account (where the RDS + FSx + compute lives)
-- `ZoningInfoAdmin` — prod account (where the jumpbox is deployed)
+**AWS profiles** on the invoking host:
+- `ZI-Sandbox` — sandbox account
+- `ZoningInfoAdmin` — prod account
 
-**On the sandbox deploy-host** (created via top-level Makefile's
-`make deploy-deploy-host`):
-- pgloader + mariadb-server installed (bootstrap.sh handles this)
-- 4 GB swap for pgloader's SBCL heap (bootstrap.sh handles this)
-- AWS RDS CA bundle installed (bootstrap.sh handles this — pgloader's
-  TLS layer needs it)
-- `use-env sandbox` invoked so `/var/www` is mounted from FSx
+**Sandbox side** (top-level Makefile, one-time):
+- `make deploy-deploy-host` — provisions the deploy-host with all
+  migration tooling baked in (pgloader, mariadb-server disabled, RDS
+  CA bundle, session-manager-plugin, 4G swap, etc.)
+- **`make install-drupal ENV=sandbox`** — bootstraps Drupal (codebase,
+  settings.php, salt in Secrets Manager, `drupal` DB in RDS, secrets).
+  **Required before any migrate-*-all run.** Or use `AUTO=yes` on
+  migrate-full-all to have it invoked automatically on preflight fail.
 
-**In prod** (one-time setup):
-- Secrets Manager entry with prod DB password (`make deploy-secret` +
-  `make set-secret-password`)
-- Jumpbox EC2 deployed with its SSH pubkey pasted into React2's
-  `authorized_keys` (`make deploy-jumpbox` + `make jumpbox-pubkey`)
+**Prod side** (one-time):
+- `make deploy-secret` + `make set-secret-password` — Secrets Manager
+  entry with prod DB password
+- `make deploy-jumpbox` — EC2 in prod VPC (SSM-only, no inbound)
+- `make jumpbox-pubkey` — display key to paste into React2's
+  `authorized_keys`
 
 ## The migration flow
 
 ```
-   PROD                    S3 (sandbox)              SANDBOX
-   -----                   -----------                --------
-   React2 origin ──ssh──►  s3://…/dumps/
-   (via jumpbox)              zinew.sql
-                              drupal-codebase.tar.gz
-                              drupal-files.tar.gz
-                              drupal-private.tar.gz
-
-                                     │
-                                     ▼
-                       ┌── deploy-host operations ──┐
-                       │                            │
-                       │  restore-mysql.sh          │
-                       │    → local MariaDB scratch │
-                       │                            │
-                       │  run-pgloader.sh           │
-                       │    → sandbox RDS Postgres  │
-                       │                            │
-                       │  (files restore: TODO)     │
-                       │    → sandbox FSx           │
-                       └────────────────────────────┘
+   PROD (jumpbox)                   S3 (sandbox bucket)              SANDBOX (deploy-host)
+   ------                           -------                          --------
+   React2 origin ──ssh──►  s3://…/dumps/                    ┌── deploy-host operations ──┐
+   (via jumpbox)              zinew.sql                     │                            │
+                              drupal-codebase.tar.gz         │  restore-mysql.sh          │
+                              drupal-files.tar.gz            │    → MariaDB scratch DB    │
+                              drupal-private.tar.gz          │                            │
+                                                             │  run-pgloader.sh           │
+                                                             │    → sandbox RDS Postgres  │
+                                                             │                            │
+                                                             │  restore-files.sh          │
+                                                             │    → sandbox FSx (public)  │
+                                                             │                            │
+                                                             │  restore-private.sh        │
+                                                             │    → sandbox FSx (private) │
+                                                             └────────────────────────────┘
 ```
 
-### 1. Dump: prod → S3
+## The three ways to run
 
-Runs on the prod jumpbox via `aws ssm send-command` (deploy-host or
-Mac orchestrates, jumpbox executes). Each dump is independent —
-choose what you need:
+### Recommended: `make migrate-full-all` (single command, walk-away)
 
-| Target | Source | Destination |
+Runs the entire pipeline as SSM-dispatched phases. Kick from Mac, close
+the lid, come back to a fully-migrated sandbox.
+
+```bash
+cd migration
+make migrate-full-all
+# Or, if sandbox Drupal isn't installed yet, let it auto-install:
+make migrate-full-all AUTO=yes
+```
+
+Runtime: **~2.5 hours** (pgloader is ~1h50m of that; index build
+dominates). All phases self-log to `/var/log/worxco-migration/` and
+`s3://.../logs/YYYY-MM-DD/`.
+
+**Phases:**
+| # | Phase | What it does | Time |
+|---|-------|--------------|------|
+| -1 | Preflight | Verify sandbox Drupal is installed (structural check on deploy-host) | seconds |
+| 0 | Safety DB backup | Rename current `drupal` DB → `drupal_backup_<UTC>` (metadata-only) | seconds |
+| 1 | restore-mysql | Fetch prod dump from S3 → load into local MariaDB scratch | ~5-10 min |
+| 2 | run-pgloader | MariaDB scratch → sandbox RDS Postgres (12M+ rows, indexes) | ~1h 50m |
+| 3 | clear-drupal-cache | Wipe Valkey + on-disk compiled containers | seconds |
+| 4 | restore-files | S3 tarball → atomic-swap onto `/var/www/drupal/web/sites/default/files/` | ~5-10 min |
+| 5 | restore-private | S3 tarball → atomic-swap onto `/var/www/drupal-private/` (preserving salt.txt) | seconds |
+| 6 | clear-drupal-cache | Second cache clear (invalidates image-style caches referencing new files) | seconds |
+
+**Env overrides:**
+- `AUTO=yes` — auto-invoke `install-drupal` if preflight fails
+- `SKIP_PREFLIGHT=yes` — bypass Phase -1 (only if the check has a false negative)
+- `SKIP_BACKUP=yes` — bypass Phase 0 (only if sandbox DB is already scratch)
+- `POLL_TIMEOUT=<seconds>` — override per-dispatch poll timeout (default 7200 = 2h)
+
+### DB-only: `make migrate-db-all`
+
+Same as `migrate-full-all` but stops after Phase 3 (cache-clear).
+Useful when testing DB schema/config changes without disturbing files.
+
+### Piecewise: `make dispatch-<phase>` (or non-dispatch variants)
+
+Each phase individually:
+
+**Walk-away (SSM-dispatched, run from Mac):**
+- `make dispatch-db-backup` — Phase 0
+- `make dispatch-restore-mysql` — Phase 1
+- `make dispatch-run-pgloader` — Phase 2
+- `make dispatch-restore-files` — Phase 4
+- `make dispatch-restore-private` — Phase 5
+
+**Interactive (deploy-host-only, no SSM overhead):**
+- `make restore-mysql` — Phase 1
+- `make run-pgloader` — Phase 2
+- `make restore-files` — Phase 4
+- `make restore-private` — Phase 5
+
+Same underlying scripts either way. Choose based on run context.
+
+## The four dump capabilities (prod → S3)
+
+All dispatched via `_ssm-run-jumpbox.sh` from Mac to the prod jumpbox.
+Each is independent — run what you need, skip what you don't.
+
+| Target | Source (React2) | S3 destination |
 |---|---|---|
-| `make dump-mysql` | React2's live MySQL via SSH tunnel from jumpbox | `s3://sandbox-migration-kv-worxco/dumps/zinew.sql` |
-| `make dump-codebase` | React2's `/var/www/drupal/` | `s3://…/dumps/drupal-codebase.tar.gz` |
-| `make dump-files` | React2's `sites/default/files/` | `s3://…/dumps/drupal-files.tar.gz` |
-| `make dump-private` | React2's private files dir | `s3://…/dumps/drupal-private.tar.gz` |
+| `make dump-mysql` | live MySQL via SSH tunnel from jumpbox | `dumps/zinew.sql` |
+| `make dump-codebase` | `/var/www/html/zoning_info_platform/` | `dumps/drupal-codebase.tar.gz` |
+| `make dump-files` | `sites/default/files/` | `dumps/drupal-files.tar.gz` |
+| `make dump-private` | private files dir | `dumps/drupal-private.tar.gz` |
 | `make dump-all` | all four sequentially | (all four keys above) |
 
-All four are dispatched via `scripts/_ssm-run-jumpbox.sh` which uses
-`aws ssm send-command`, then polls until the command finishes. Full
-logs land in `s3://…/logs/YYYY-MM-DD/`. Fire-and-forget safe —
-disconnecting the operator terminal doesn't kill the jumpbox-side work.
+Cadence: run once per test cycle. Prod dumps aren't part of
+`migrate-full-all` — they happen on a separate schedule (before
+sandbox tests, or when prod state has meaningfully changed).
 
-**Dump timing** (from 2026-07 data):
-- `dump-mysql`: 5-15 min for a 2.3 GB dump
-- `dump-codebase`: 2-5 min for ~700 MB tarball
-- `dump-files`: 5-15 min for ~1.8 GB tarball
-- `dump-private`: seconds (usually a few hundred bytes)
+## DB safety net — logical rename pattern
 
-### 2. Restore DB: S3 → local MariaDB scratch
+Phase 0 uses the "logical-DB rename" pattern (see
+`docs/memory/db-rollback-pattern.md`) — metadata-only, sub-second:
 
-`make restore-mysql CONFIRMED=yes` — runs on the deploy-host, uses
-its IAM instance role for S3 access. Behavior:
-
-1. Fetch `s3://…/dumps/zinew.sql` → `/var/www/mysql/zinew.sql`
-   (cached; re-uses local file unless `FORCE_DOWNLOAD=yes`)
-2. Sanitize `utf8mb4_0900_ai_ci` → `utf8mb4_unicode_ci` (MariaDB
-   compatibility fixup — no-op if the source dump is already
-   MariaDB-friendly)
-3. Auto-start mariadb (bootstrap installs it disabled to save idle RAM)
-4. DROP + CREATE the `zinew` scratch database
-5. Create/rotate `worxco@127.0.0.1` with `mysql_native_password`
-   (required by pgloader's qmynd MySQL driver)
-6. `mysql < dump`
-7. Verify table count is non-zero
-
-Env overrides: `MIGRATION_BUCKET DUMP_S3_KEY DUMP_LOCAL_PATH
-LOCAL_DB_NAME LOCAL_DB_USER LOCAL_DB_PASS FORCE_DOWNLOAD CONFIRMED DRY_RUN`.
-
-### 3. Transform DB: MariaDB scratch → sandbox RDS Postgres
-
-`make run-pgloader CONFIRMED=yes` — runs on the deploy-host. Behavior:
-
-1. Auto-starts mariadb if not already running
-2. Sources `/etc/worxco/envs/sandbox` for RDS connection info
-3. Renders `pgloader/zinew.load.tmpl` (envsubst) → `/tmp/zinew.load`
-   with `chmod 600` (contains the RDS drupal_user password)
-4. Runs `pgloader --dynamic-space-size 4096 --no-ssl-cert-verification /tmp/zinew.load`
-5. **Shreds** `/tmp/zinew.load` on exit — password never persists to disk
-6. Verifies target schema has tables
-
-The load-file template does:
-- `include drop` — every table in the target schema gets dropped and
-  recreated (destructive — the sandbox `zinew` schema is fully rebuilt)
-- `create tables, create indexes, reset sequences, foreign keys`
-- `downcase identifiers` (MySQL is case-insensitive; postgres isn't —
-  downcase makes Drupal's PDO queries happy)
-- `batch rows = 500, prefetch rows = 500, workers = 2, concurrency = 1`
-  (tuned envelope: predictable memory, ~2 hours for 12M rows / 2.3 GB)
-- Type casts for MySQL→Postgres quirks: `tinyint(1)→boolean`, zero-date
-  sanitization for datetime/date/timestamp
-
-Env overrides: `MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH RENDERED_PATH
-PGLOADER_HEAP_MB MIGRATION_DB_NAME CONFIRMED DRY_RUN`.
-
-### 4. Restore files (planned, not yet wired)
-
-`dump-files` and `dump-private` push tarballs to S3, but the sandbox
-side doesn't have restore-files / restore-private targets yet. See
-"Follow-ups" section below. Without file restore, migrated Drupal
-serves broken images (`file_managed` rows point to `public://` paths
-that sandbox FSx doesn't have).
-
-## DB-only test migration runbook
-
-This is the runbook validated end-to-end on 2026-07-17. Assumes prod
-is stable during the test (nobody actively editing during the ~2-hour
-window) and sandbox is the only environment being disturbed.
-
-### Phase 0 — Baseline
-
-```bash
-# From Mac: confirm S3 has a dump (dump-mysql already ran)
-aws --profile ZI-Sandbox s3 ls s3://sandbox-migration-kv-worxco/dumps/ \
-  --human-readable
-
-# On deploy-host (via `make ssm-deploy-host` from Mac):
-psql-env sandbox -d drupal -c '\l+ drupal'
-psql-env sandbox -d drupal -c '\dn'
-psql-env sandbox -d drupal -c \
-  "SELECT schemaname, COUNT(*) FROM pg_tables GROUP BY schemaname ORDER BY 1;"
+```
+ALTER DATABASE drupal RENAME TO drupal_backup_<UTC>
+CREATE DATABASE drupal OWNER drupal_user
 ```
 
-Record baseline schema/table counts — informs Phase 1 (what
-we're preserving) and Phase 6 (what we compare against).
-
-### Phase 1 — Snapshot: rename current `drupal` DB, create fresh
-
-The rename pattern (see `docs/memory/db-rollback-pattern.md`) is our
-rollback safety net — metadata-only, sub-second, application-transparent
-once repopulated.
+Prints the new backup DB name on stdout so the migrate-full-all
+recipe can capture it and echo it prominently. To roll back after a
+failed test:
 
 ```bash
-# On deploy-host:
-STAMP=$(date -u +%Y%m%d_%H%M%S)
-BACKUP_DB="drupal_backup_$STAMP"
-psql-env sandbox -d postgres <<SQL
-GRANT drupal_user TO dbadmin;
-ALTER DATABASE drupal OWNER TO dbadmin;
-REVOKE CONNECT ON DATABASE drupal FROM PUBLIC, drupal_user;
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-  WHERE datname='drupal' AND pid<>pg_backend_pid();
-ALTER DATABASE drupal RENAME TO $BACKUP_DB;
-CREATE DATABASE drupal OWNER drupal_user;
-ALTER DATABASE $BACKUP_DB OWNER TO drupal_user;
-GRANT CONNECT ON DATABASE drupal TO drupal_user;
-GRANT CONNECT ON DATABASE $BACKUP_DB TO drupal_user;
-REVOKE drupal_user FROM dbadmin;
-\l
-SQL
-```
-
-The `GRANT/REVOKE drupal_user TO dbadmin` bookends give dbadmin
-transient ownership rights for the rename — after the block, the
-role graph is exactly as it was pre-run. No permanent state.
-
-At this point sandbox Drupal starts 500'ing (its DB is gone) — that's
-expected and continues until Phase 3 finishes.
-
-### Phase 2 — Restore MariaDB scratch (~5 min)
-
-```bash
-# On deploy-host (in the same SSM session, or start tmux for
-# long-running work — see "Ergonomics" below):
-cd ~/projects/cf-scalable-web/migration
-sudo make restore-mysql CONFIRMED=yes
-```
-
-Verify:
-```bash
-sudo mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='zinew';"
-# expect: prod-scale count (2026-07-17 baseline: 413 tables)
-```
-
-### Phase 3 — pgloader → sandbox RDS (10-30 min baseline; index build extends this to ~2 hours for 12M rows)
-
-**Run this under tmux** — 2-hour operations vs SSM's ~15 min idle
-timeout means an unwrapped run will get killed:
-
-```bash
-# On deploy-host in SSM shell:
-sudo tmux new -s pgloader
-# Inside tmux (you're now root):
-cd /home/ubuntu/projects/cf-scalable-web/migration
-make run-pgloader CONFIRMED=yes
-# Detach: Ctrl+B, then D
-# Reattach later: sudo tmux attach -t pgloader
-```
-
-Progress lands in `/var/log/worxco-migration/run-pgloader-<UTC>.log`
-locally AND `s3://…/logs/YYYY-MM-DD/run-pgloader-<UTC>.log` on exit.
-Zero rows in the summary is a red flag; anything nonzero is real data
-moved.
-
-Verify:
-```bash
-psql-env sandbox -d drupal -c \
-  "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='zinew';"
-# expect: matches MariaDB source count from Phase 2
-```
-
-### Phase 4 — Clear caches
-
-```bash
-# From Mac:
+make ssm-deploy-host
+make db-restore ENV=sandbox FROM=drupal_backup_20260718_020115
+exit
 make clear-drupal-cache ENV=sandbox
 ```
 
-Wipes Drupal's on-disk compiled container AND TRUNCATEs every
-`cache_%` table. Necessary — Valkey/on-disk caches still reference
-the sandbox pre-swap DB state.
+That's the complete rollback — Drupal is back exactly as it was
+before Phase 0.
 
-### Phase 5 — Smoke test
+## DB primitive targets (used by chains, also usable standalone)
 
-```bash
-# From Mac:
-make admin-login-url ENV=sandbox
-```
+Deploy-host-only. All support numeric selectors for batch operations.
 
-Open the URL in a browser. Success criteria:
-- Front page returns 200 (broken images / file 404s ARE expected —
-  file_managed rows point to `public://` paths that FSx doesn't have)
-- Admin UI loads without WSOD
-- Site's real content (nodes, custom entities) is present
-- Login works
-- `drush status` on deploy-host reports the migrated state
-
-### Rollback
-
-Fast, cheap, complete — see `docs/memory/db-rollback-pattern.md`:
-
-```bash
-psql-env sandbox -d postgres -c "
-  SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-  WHERE datname = 'drupal' AND pid <> pg_backend_pid();
-"
-psql-env sandbox -d postgres -c "DROP DATABASE drupal;"
-psql-env sandbox -d postgres -c "ALTER DATABASE $BACKUP_DB RENAME TO drupal;"
-make clear-drupal-cache ENV=sandbox
-```
-
-Sub-second metadata operations — Drupal is back exactly as it was
-before Phase 1 within about 30 seconds of the block.
-
-### Cleanup
-
-Once you've confirmed the test worked and don't need the pre-test state:
-
-```bash
-psql-env sandbox -d postgres -c "DROP DATABASE $BACKUP_DB;"
-```
-
-Or keep it around for comparison. RDS has a minimum disk size regardless
-of DB count, so extra empty-ish DBs don't change billing.
+- `make db-backup ENV=<env>` — snapshot current DB via logical rename
+- `make db-restore ENV=<env> FROM=<backup_db>` — rename backup back
+- `make list-db-backups ENV=<env>` — numbered listing, newest first
+- `make delete-db-backup ENV=<env> SELECT="1 3 5"` — batch delete
+  (index numbers from list, or full DB names)
 
 ## Ergonomics
 
-### Long-running commands need tmux
+### Auto-logging (no operator memory required)
 
-SSM Session Manager has ~15-20 min idle timeout. Any operation that
-takes longer than that (notably `run-pgloader` with its full index
-build) must run under tmux, or the session termination kills the work:
+Every dispatch script + every remote script self-logs on both ends:
 
-```bash
-sudo tmux new -s <name>       # start
-# Ctrl+B D                     # detach (session keeps running)
-sudo tmux ls                   # list living sessions
-sudo tmux attach -t <name>     # reattach
-```
+- **Deploy-host / jumpbox (Linux)**: `/var/log/worxco-migration/<script>-<UTC>.log`
+- **Mac (Darwin)**: `/tmp/worxco-migration/<script>-<UTC>.log`
+- **S3 archive**: `s3://<migration-bucket>/logs/YYYY-MM-DD/<script>-<UTC>.log`
+  (remote scripts upload their log on exit via trap)
 
-**Future automation goal**: Mac-side dispatch targets that use
-`aws ssm send-command` instead of interactive Session Manager,
-mirroring the jumpbox side's `_ssm-run-jumpbox.sh` pattern. That will
-make the whole migration a single `make dispatch-migrate-db` call from
-Mac, walk-away safe, no tmux ceremony. See "Follow-ups."
+You don't need `... 2>&1 | tee logfile` on migrate-full-all. Everything
+that matters is captured. Post-mortem after a failed run: `aws s3 ls
+s3://<bucket>/logs/$(date -u +%Y-%m-%d)/` and fetch what you need.
 
-### Log locations
+### Long-running commands under tmux
 
-- **Runtime**: `/var/log/worxco-migration/<script>-<UTC>.log` on
-  whichever host ran the script
-- **Archived**: `s3://<migration-bucket>/logs/YYYY-MM-DD/<script>-<UTC>.log`
-  uploaded automatically on script exit (success OR failure)
-
-Every migration script uses `log_init` + `trap log_upload_and_exit` for
-this pattern (see `scripts/_common.sh` for the shared helpers).
-
-### Diagnosing what's in the S3 dump
-
-The MySQL dump is human-readable SQL — you can `zcat` (or `cat`) a
-subset locally to check what prod had at dump time:
+If you use the interactive (non-dispatch) targets on deploy-host and
+they take longer than SSM Session Manager's ~15 min idle timeout,
+wrap in tmux:
 
 ```bash
-# Grep for enabled modules in the config table
-grep -a "^INSERT INTO \`config\` VALUES" /var/www/mysql/zinew.sql \
-  | head -5
+sudo tmux new -s <name>
+# Ctrl+B D to detach
+sudo tmux attach -t <name>
 ```
 
-Rough, but useful when a smoke test surfaces a "why is X missing?"
-question.
+The `dispatch-*` targets don't need this — SSM send-command runs
+independently of the calling terminal.
 
-## Known limitations
+## Known limitations (expected, not bugs)
 
-- **File / codebase restore not wired** — see follow-ups. Migrated
-  Drupal will 404 on images and downloads until this is built.
-- **Single-site assumption** — currently the deploy-host has one
-  `/var/www/drupal` per env's FSx mount. Multi-site is on the
-  roadmap; when it lands, every path in this doc that mentions
-  `/var/www/drupal` will need a per-site variant.
-- **pgloader public-schema verify was misleading** (fixed in commit
-  d9cdb59) — old versions of `run-pgloader.sh` reported "0 tables in
-  public schema" post-run even on a successful load. Actual tables
-  are in the `zinew` schema (or whatever `MIGRATION_DB_NAME` is set
-  to). Current code queries the right schema.
-- **`.installed` marker is informational only** (commit 308bdd5) —
-  no operation gates on its existence. Refresh with `make create-installed
-  ENV=<env>` if the file goes missing or is stale.
+- **S3-hosted PDF media (flysystem_s3)**: Prod's Drupal references
+  files via `s3://YYYY-MM/*.pdf` URIs that resolve against prod's S3
+  bucket. Sandbox has its own bucket (`sandbox-drupal-media-kv-worxco`)
+  that's empty by default. Migrated Drupal PDF/download links 404 until
+  the sandbox bucket is populated. Fix: (a) add flysystem config to
+  sandbox settings.php pointing at its own bucket, and optionally (b)
+  one-time cross-account sync from prod bucket to sandbox bucket.
+- **Public / private file references to non-existent files**: For
+  files that never made it into the tarballs (edge cases like symlinks,
+  files above the DRUPAL_ROOT dump prefix), Drupal shows broken image
+  icons. Rare.
+- **Session invalidation**: Every existing sandbox session is
+  invalidated on Phase 0's DB rename (that's the whole session table
+  going away). Log back in via `make admin-login-url ENV=sandbox`.
+- **Site name shows prod's**: `system.site.name` config value is
+  migrated. Cosmetic.
 
-## Follow-ups
+## In-progress transitions
 
-Tracked separately (project TODO + this session's plan file), listed
-here so operators reading this doc know what's coming:
+### Salt file → Secrets Manager (partially implemented)
 
-1. **`restore-files` / `restore-private` targets** — untar the S3
-   tarballs onto sandbox FSx atomically (with rollback path). Closes
-   the "images 404" gap.
-2. **`_ssm-run-deploy-host.sh` + Mac-side dispatch targets** — mirror
-   of `_ssm-run-jumpbox.sh` for the sandbox side. Removes the tmux
-   ceremony requirement and lets a full migration run overnight from
-   a laptop that goes to sleep.
-3. **`make db-backup` / `make db-restore` wrappers** — encapsulate
-   Phase 1's rename dance behind two make targets.
-4. **`make migrate-db-all`** — chains `dispatch-restore-mysql` →
-   `dispatch-run-pgloader` → `dispatch-clear-drupal-cache` in one
-   Mac-side invocation. Depends on #2 and #3.
-5. **`docs/MIGRATION.md` rewrite** — that file is pre-consolidation
-   stale (references target names that no longer exist). This README
-   covers the current flow; the doc-side file gets folded in.
-6. **Multi-site path variance** — every `/var/www/drupal` reference
-   above becomes `/var/www/<site>/drupal` (or similar) when the
-   multi-site rework lands.
+`docs/memory/salt-persistence-design.md` details the migration.
+Current state:
+- Salt is in Secrets Manager (`worxco/<env>/drupal/hash-salt`).
+- `refresh-env-config` exports `DRUPAL_HASH_SALT` from Secrets Manager.
+- `settings.php` (rewritten by `install-drupal.sh`) prefers env var,
+  falls back to file for backward compat.
+- `configure-php.sh` exposes `env[DRUPAL_HASH_SALT]` in PHP-FPM pool
+  config (needs re-run on existing compute instances).
+- `restore-private.sh` still keeps `salt.txt` in `PRESERVE_FROM_BAK`
+  default as belt+suspenders.
+
+Follow-up commit drops the file fallbacks once every env is verified
+running on the env-var path.
+
+## Follow-ups (open work)
+
+Migration workflow:
+- **`restore-codebase`** — dump-codebase exists but no sandbox-side
+  restore. Would round out full-parity migration (rare need — sandbox
+  usually runs newer or diverged code from prod).
+- **S3-hosted media sync** — one-time cross-account sync from prod
+  drupal-media bucket to sandbox's, plus flysystem config in
+  settings.php. Closes the "PDFs 404" gap for realistic testing.
+- **Salt→SSM cleanup** — remove file fallback once transition is
+  verified across all envs (see above).
+- **`make check-drift`** — warn when local CFN template is newer than
+  deployed stack. From `docs/memory/gotchas.md`.
+- **Generalize `_ssm-run-deploy-host.sh`** — currently scoped to
+  migration/scripts/ only; extending to top-level scripts/ would let
+  more dispatchers reuse the pattern.
+- **`make refresh-deploy-host-scripts`** — reinstalls copied scripts
+  (`refresh-env-config`, `use-env`, etc.) to `/usr/local/sbin/`
+  without a full bootstrap re-run.
 
 ## Related docs
 
+- `docs/MIGRATION.md` — cross-account overview / when-to-migrate
 - `docs/memory/db-rollback-pattern.md` — why we rename databases
-  instead of taking RDS snapshots for test-rollback scenarios
+  instead of RDS snapshots for test rollback
 - `docs/memory/structural-checks-over-markers.md` — why `.installed`
   is informational and not a gate
-- `docs/DEPLOY-HOST.md` — deploy-host lifecycle, backup/restore of
-  operator state
-- `docs/OPERATIONS.md` — operational patterns (SSM sessions, use-env,
-  etc.)
+- `docs/memory/salt-persistence-design.md` — hash_salt storage design
+- `docs/memory/gotchas.md` — cross-cutting operational lessons
+- `docs/DEPLOY-HOST.md` — deploy-host lifecycle
+- `docs/OPERATIONS.md` — day-to-day operational patterns
 
 ---
 

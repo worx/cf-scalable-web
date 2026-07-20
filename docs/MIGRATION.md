@@ -3,7 +3,7 @@ name: Migration overview (prod → sandbox / eventual prod cutover)
 description: High-level overview of migration capabilities and when to use them. Points to migration/README.md for the executable runbook.
 audience: operator + architect
 created: 2026-06-12
-updated: 2026-07-17
+updated: 2026-07-20
 ---
 
 # Migration overview
@@ -40,10 +40,26 @@ need — they compose but don't require each other:
 |---|---|---|---|
 | **Database** | prod MySQL → sandbox Postgres | `make dump-mysql` | `make restore-mysql` + `make run-pgloader` |
 | **Codebase** | React2's `/var/www/drupal/` | `make dump-codebase` | (restore not yet wired — see follow-ups) |
-| **Public files** | uploaded media, images | `make dump-files` | (restore not yet wired) |
-| **Private files** | secure downloads, backups | `make dump-private` | (restore not yet wired) |
+| **Public files** | uploaded media, images | `make dump-files` | `make restore-files` |
+| **Private files** | secure downloads, backups | `make dump-private` | `make restore-private` (preserves sandbox's salt.txt across atomic swap) |
 
 Or: `make dump-all` runs all four dumps in one call.
+
+**Composed pipelines** (the "usual" way to run migration):
+- `make migrate-db-all` — DB-only chain (Phase -1 preflight → backup → restore-mysql → pgloader → cache-clear)
+- `make migrate-full-all` — everything (migrate-db-all + files + private + second cache-clear)
+
+Both walk-away safe (each phase dispatches via SSM; Mac sleep / terminal
+close doesn't kill in-flight work). Both self-log to `/var/log/worxco-migration/`
+on the deploy-host AND to `s3://<migration-bucket>/logs/YYYY-MM-DD/`.
+
+`AUTO=yes` on either chain auto-invokes `install-drupal` if preflight
+fails — for overnight runs where "wait, sandbox wasn't installed" is
+worse than the 10 min autonomy cost of running install-drupal automatically.
+
+See `migration/README.md` for the full runbook, env-var overrides, and
+DB primitive targets (`db-backup` / `db-restore` / `list-db-backups`
+/ `delete-db-backup`).
 
 ## Where things live
 
