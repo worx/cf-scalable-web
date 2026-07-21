@@ -67,8 +67,8 @@ NC     := \033[0m
         dump-mysql dump-codebase dump-files dump-private dump-all \
         restore-mysql run-pgloader \
         dispatch-restore-mysql dispatch-run-pgloader migrate-db-all \
-        restore-files restore-private \
-        dispatch-restore-files dispatch-restore-private migrate-full-all \
+        restore-files restore-private restore-codebase \
+        dispatch-restore-files dispatch-restore-private dispatch-restore-codebase migrate-full-all \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         .preflight
 
@@ -162,8 +162,9 @@ help:  ## Show this help
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET ENV_FILE TEMPLATE_PATH PGLOADER_HEAP_MB MIGRATION_DB_NAME$(NC)"
 	@echo "  make restore-files           Fetch drupal-files.tar.gz → atomic-swap onto sandbox FSx"
 	@echo "  make restore-private         Fetch drupal-private.tar.gz → atomic-swap onto sandbox FSx"
+	@echo "  make restore-codebase        Fetch drupal-codebase.tar.gz → atomic-swap (preserves sandbox settings.php)"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
-	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY TARGET_DIR KEEP_BAK FORCE_DOWNLOAD$(NC)"
+	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY TARGET_DIR KEEP_BAK PRESERVE_FROM_BAK FORCE_DOWNLOAD$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Walk-away dispatch (Mac-side; kicks off on deploy-host via SSM, survives session timeout):$(NC)"
 	@echo "  make dispatch-restore-mysql  Kick restore-mysql on deploy-host, poll from Mac"
@@ -172,6 +173,7 @@ help:  ## Show this help
 	@echo "                                 $(CYAN)Env overrides: CONFIRMED DRY_RUN MIGRATION_DB_NAME PGLOADER_HEAP_MB POLL_TIMEOUT$(NC)"
 	@echo "  make dispatch-restore-files  Kick restore-files on deploy-host, poll from Mac"
 	@echo "  make dispatch-restore-private Kick restore-private on deploy-host, poll from Mac"
+	@echo "  make dispatch-restore-codebase Kick restore-codebase on deploy-host, poll from Mac (unusual — sandbox usually runs diverged code)"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
 	@echo "  make migrate-db-all          FULL DB migration: preflight → db-backup → restore-mysql → pgloader → cache-clear"
 	@echo "  make migrate-full-all        FULL migration: migrate-db-all + files + private + cache-clear"
@@ -636,6 +638,27 @@ restore-files:  ## Fetch drupal-files.tar.gz from S3 → atomic-swap onto sandbo
 	echo ""; \
 	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/restore-files.sh
 
+restore-codebase:  ## Fetch drupal-codebase.tar.gz from S3 → atomic-swap onto sandbox FSx (preserves sandbox settings.php)  [FROM: deploy-host, PROFILE: instance-role]
+	@BUCKET_NAME="$${MIGRATION_BUCKET:-}"; \
+	if [ -z "$$BUCKET_NAME" ]; then \
+		BUCKET_NAME=$$(aws cloudformation describe-stacks \
+			--stack-name $(BUCKET_STACK) \
+			--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+			--output text --region $(AWS_REGION) 2>/dev/null); \
+		if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+			echo "$(RED)Could not resolve migration bucket from CFN stack.$(NC)"; exit 1; \
+		fi; \
+	fi; \
+	echo "$(BLUE)Running restore-codebase.sh on this host...$(NC)"; \
+	echo "$(CYAN)  MIGRATION_BUCKET  = $$BUCKET_NAME$(NC)"; \
+	echo "$(CYAN)  DUMP_S3_KEY       = $${DUMP_S3_KEY:-dumps/drupal-codebase.tar.gz}$(NC)"; \
+	echo "$(CYAN)  TARGET_DIR        = $${TARGET_DIR:-/var/www/drupal}$(NC)"; \
+	echo "$(CYAN)  PRESERVE_FROM_BAK = $${PRESERVE_FROM_BAK:-web/sites/default/settings.php .installed}$(NC)"; \
+	echo "$(CYAN)  KEEP_BAK          = $${KEEP_BAK:-yes}$(NC)"; \
+	echo "$(CYAN)  CONFIRMED         = $${CONFIRMED:-no}$(NC)"; \
+	echo ""; \
+	MIGRATION_BUCKET=$$BUCKET_NAME sudo -E ./scripts/deploy-host/restore-codebase.sh
+
 restore-private:  ## Fetch drupal-private.tar.gz from S3 → atomic-swap onto sandbox FSx  [FROM: deploy-host, PROFILE: instance-role]
 	@BUCKET_NAME="$${MIGRATION_BUCKET:-}"; \
 	if [ -z "$$BUCKET_NAME" ]; then \
@@ -673,6 +696,11 @@ dispatch-restore-files:  ## Fire restore-files on deploy-host via SSM (walk-away
 
 dispatch-restore-private:  ## Fire restore-private on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@./scripts/_ssm-run-deploy-host.sh restore-private
+
+dispatch-restore-codebase:  ## Fire restore-codebase on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+	@# Unusual — usually sandbox runs newer or diverged code from prod.
+	@# Reach for this only when full prod-parity in the code path matters.
+	@./scripts/_ssm-run-deploy-host.sh restore-codebase
 
 migrate-db-all:  ## Full DB migration walk-away safe: preflight → db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit
