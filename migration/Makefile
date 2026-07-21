@@ -64,7 +64,7 @@ NC     := \033[0m
         deploy-secret destroy-secret set-secret-password \
         deploy-jumpbox destroy-jumpbox \
         ssm-jumpbox ssm-tunnel jumpbox-pubkey \
-        dump-mysql dump-codebase dump-files dump-private dump-all \
+        dump-mysql dump-codebase dump-files dump-private dump-all sync-s3-media \
         restore-mysql run-pgloader \
         dispatch-restore-mysql dispatch-run-pgloader migrate-db-all \
         restore-files restore-private restore-codebase \
@@ -148,6 +148,7 @@ help:  ## Show this help
 	@echo ""
 	@echo "$(YELLOW)Data operations (execute the actual migration after infrastructure is up):$(NC)"
 	@echo "  make dump-all                Run all 4 dumps sequentially. Fire-and-forget (~30-45 min)."
+	@echo "  make sync-s3-media           Sync prod flysystem media bucket → sandbox drupal-media bucket (incremental)."
 	@echo "  make dump-mysql              Push script to jumpbox → mysqldump prod → sandbox S3"
 	@echo "  make dump-codebase           Push script to jumpbox → tar Drupal codebase → sandbox S3"
 	@echo "  make dump-files              Push script to jumpbox → tar public files/ → sandbox S3"
@@ -475,6 +476,25 @@ dump-private:  ## Push script to jumpbox → tar React2 private files → sandbo
 	 JUMPBOX_STACK="$(JUMPBOX_STACK)" \
 	 SECRET_NAME="$(SECRET_NAME)" \
 	 ./scripts/_ssm-run-jumpbox.sh dump-private
+
+sync-s3-media:  ## Push script to jumpbox → aws s3 sync prod media bucket → sandbox media bucket (incremental, direct — no intermediate hop)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
+	@# Prereq: cf-storage-s3 stack on sandbox has been deployed WITH the
+	@# MigrationSourceAccountId + MigrationSourceRoleArnPattern parameters
+	@# set (as in cloudformation/parameters/sandbox.json). Otherwise the
+	@# jumpbox lacks cross-account write to sandbox-drupal-media-kv-worxco
+	@# and sync fails with AccessDenied. Redeploy with:
+	@#   make deploy-storage-s3 ENV=sandbox
+	@# Env overrides (all optional):
+	@#   PROD_BUCKET       zi-documents (prod's flysystem bucket)
+	@#   SANDBOX_BUCKET    sandbox-drupal-media-kv-worxco
+	@#   DELETE_ORPHANED   yes = pass --delete (strict mirror; risky)
+	@#   DRY_RUN           yes = preview transfers, don't touch anything
+	@#   CONFIRMED         yes = skip Y/N prompt
+	@AWS_REGION="$(AWS_REGION)" \
+	 BUCKET_STACK="$(BUCKET_STACK)" \
+	 JUMPBOX_STACK="$(JUMPBOX_STACK)" \
+	 SECRET_NAME="$(SECRET_NAME)" \
+	 ./scripts/_ssm-run-jumpbox.sh sync-s3-media
 
 dump-all:  ## Run all 4 dumps sequentially: mysql → codebase → files → private. Fire-and-forget (~30-45 min).  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
 	@# Outer confirmation prompt. If CONFIRMED=yes at invocation, skip
