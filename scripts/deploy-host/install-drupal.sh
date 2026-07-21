@@ -466,6 +466,38 @@ $settings['file_public_path']      = 'sites/default/files';
 $settings['file_private_path']     = '/var/www/drupal-private';
 $settings['config_sync_directory'] = '/var/www/drupal-config';
 
+// ============================================================
+// flysystem_s3 — S3-backed file scheme (registers s3:// wrapper).
+// ============================================================
+// Matches prod's convention: bucket name comes from AWS_S3_BUCKET env
+// var, populated by refresh-env-config (deploy-host) and configure-php.sh
+// (PHP-FPM compute instances). Fallback is derived from ENVIRONMENT_NAME
+// via the project bucket-naming convention — so even if the env var
+// hasn't propagated yet (e.g., fresh install-drupal on a PHP-FPM box
+// that hasn't rebooted), Drupal still points at the correct per-env
+// bucket rather than a hardcoded one that could be wrong across envs.
+//
+// No 'key' / 'secret' set — the AWS SDK uses the IAM instance role
+// (compute instances have S3 read/write on this bucket via cf-iam).
+//
+// s3:// URIs in file_managed rows resolve against this config. Migrated
+// prod content references s3://YYYY-MM/*.pdf; after the sandbox media
+// bucket is populated (make sync-s3-media), those references serve the
+// migrated files from sandbox's own bucket — no cross-account access
+// needed at request time.
+$_media_bucket = getenv('AWS_S3_BUCKET')
+  ?: (getenv('ENVIRONMENT_NAME') . '-drupal-media-kv-worxco');
+$settings['flysystem'] = [
+  's3' => [
+    'driver' => 's3',
+    'config' => [
+      'region' => getenv('AWS_S3_REGION') ?: 'us-east-1',
+      'bucket' => $_media_bucket,
+    ],
+    'cache' => TRUE,
+  ],
+];
+
 // Trusted hosts. ALB DNS pattern is permissive for sandbox/staging;
 // production should tighten this to a specific ALB DNS or domain.
 $settings['trusted_host_patterns'] = [

@@ -115,6 +115,17 @@ DRUPAL_HASH_SALT=$(aws secretsmanager get-secret-value \
   --secret-id "worxco/$ENV/drupal/hash-salt" --region "$REGION" \
   --query 'SecretString' --output text 2>/dev/null || echo "")
 
+# AWS_S3_BUCKET — this env's drupal-media bucket for flysystem_s3
+# (see settings.php's $settings['flysystem'] block written by
+# install-drupal.sh). Matches prod's convention: prod's Drupal reads
+# getenv('AWS_S3_BUCKET') for the same purpose. Empty is tolerated
+# — settings.php falls back to `${ENVIRONMENT_NAME}-drupal-media-kv-worxco`
+# by naming convention, so a missing SSM param produces the right
+# bucket name anyway.
+AWS_S3_BUCKET=$(aws ssm get-parameter --name "/$ENV/s3/media-bucket" \
+  --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null \
+  || echo "")
+
 # ============================================================
 # Rewrite the BEGIN/END worxco-boot block inside www.conf.
 # Idempotent: any prior block is stripped, the fresh one
@@ -149,6 +160,7 @@ if [ -n "$DRUPAL_DB_HOST" ] && [ "$DRUPAL_DB_HOST" != "None" ]; then
     printf 'env[DRUPAL_DB_USER]   = "%s"\n' "${DRUPAL_DB_USER//\"/}"
     printf 'env[DRUPAL_DB_PASS]   = "%s"\n' "${DRUPAL_DB_PASS//\"/}"
     printf 'env[DRUPAL_HASH_SALT] = "%s"\n' "${DRUPAL_HASH_SALT//\"/}"
+    printf 'env[AWS_S3_BUCKET]    = "%s"\n' "${AWS_S3_BUCKET//\"/}"
     printf 'env[DRUPAL_SITE_NAME] = "%s"\n' "${DRUPAL_SITE_NAME//\"/}"
     if [ -n "$CACHE_ENDPOINT" ] && [ "$CACHE_ENDPOINT" != "None" ] && [ -n "$CACHE_AUTH" ]; then
       echo ";"
