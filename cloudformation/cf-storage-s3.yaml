@@ -48,8 +48,43 @@ Parameters:
     ConstraintDescription: Must be 4-12 lowercase letters, numbers, or hyphens
     Default: change-me
 
+  # ============================================================
+  # Cross-account media sync (sandbox only — leave empty on prod)
+  # ============================================================
+  # When set, adds a BucketPolicy to MediaBucket allowing a specific
+  # cross-account role to write. Used for prod → sandbox media sync
+  # so PDFs/downloads referenced by migrated Drupal actually resolve.
+  # See migration/scripts/jumpbox/sync-s3-media.sh — jumpbox runs
+  # `aws s3 sync` directly from prod's media bucket into sandbox's,
+  # bypassing the intermediate migration bucket.
+  #
+  # PROD deployments MUST leave both parameters empty (the default) —
+  # we don't want prod's media bucket accepting writes from any
+  # cross-account principal.
+  MigrationSourceAccountId:
+    Type: String
+    Description: |
+      Optional. AWS account ID of the cross-account jumpbox that
+      may sync INTO this env's MediaBucket. Empty = no policy attached.
+    Default: ''
+    AllowedPattern: '^([0-9]{12})?$'
+    ConstraintDescription: Must be 12 digits (account ID) or empty.
+
+  MigrationSourceRoleArnPattern:
+    Type: String
+    Description: |
+      Optional. IAM role ARN pattern (wildcard OK) of the cross-account
+      principal allowed to write into this env's MediaBucket. Scopes
+      the policy tighter than the account root — only THIS role can
+      write, even if other roles in the source account grant themselves
+      S3 permissions. Empty disables the policy entirely.
+    Default: ''
+
 Conditions:
   S3VersioningEnabled: !Equals [!Ref EnableS3Versioning, true]
+  EnableMigrationSourceWrite: !And
+    - !Not [!Equals [!Ref MigrationSourceAccountId, '']]
+    - !Not [!Equals [!Ref MigrationSourceRoleArnPattern, '']]
 
 Resources:
   # ========================================
@@ -84,6 +119,45 @@ Resources:
           Value: !Sub '${EnvironmentName}-drupal-media-${BucketSuffix}'
         - Key: Environment
           Value: !Ref EnvironmentName
+
+  # ============================================================
+  # MediaBucket cross-account write (optional; sandbox-only)
+  # ============================================================
+  # Present only when MigrationSourceAccountId and *RoleArnPattern
+  # are both set. Grants a specific cross-account jumpbox role
+  # write access into this env's MediaBucket so `aws s3 sync` from
+  # prod's media bucket lands directly here — no intermediate hop
+  # through the migration bucket. Same principal-scoping pattern
+  # used by cf-migration-bucket.yaml:129.
+  #
+  # PublicAccessBlockConfiguration.BlockPublicPolicy=true on the
+  # bucket does NOT block cross-account policies scoped to a specific
+  # principal ARN. That guard is only for policies that would grant
+  # public (unauthenticated) access.
+  MediaBucketMigrationSourcePolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: EnableMigrationSourceWrite
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCrossAccountMigrationSync
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${MigrationSourceAccountId}:root'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:DeleteObject'
+            Resource:
+              - !GetAtt MediaBucket.Arn
+              - !Sub '${MediaBucket.Arn}/*'
+            Condition:
+              StringLike:
+                'aws:PrincipalArn': !Ref MigrationSourceRoleArnPattern
 
   # ========================================
   # Backups and Logs

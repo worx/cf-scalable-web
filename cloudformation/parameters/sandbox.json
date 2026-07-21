@@ -14,6 +14,8 @@
     "FSxAutomaticBackupRetentionDays": "1",
     "EnableS3Versioning": "false",
     "BucketSuffix": "kv-worxco",
+    "MigrationSourceAccountId": "978068244875",
+    "MigrationSourceRoleArnPattern": "arn:aws:iam::978068244875:role/cf-migration-jumpbox-*",
     "DBInstanceClass": "db.t4g.micro",
     "DBAllocatedStorage": "20",
     "DBMaxAllocatedStorage": "100",
