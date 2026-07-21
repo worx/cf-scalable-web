@@ -104,28 +104,41 @@ for tool in aws stat; do
 done
 log_ok "All required tools available"
 
-# Source bucket read check — should succeed via jumpbox's IAM role
-if ! aws s3 ls "s3://$PROD_BUCKET/" --region "$PROD_REGION" \
-     --max-items 1 >/dev/null 2>&1; then
+# Source bucket read check — should succeed via jumpbox's IAM role.
+# Use head-bucket (canonical "does this bucket exist and can I access it"
+# check — requires s3:ListBucket). Capture stderr and surface it in the
+# error, so IAM/network/region issues report themselves instead of getting
+# masked as generic "cannot read." (Prior version used `aws s3 ls
+# --max-items 1`, which is a param-validation error — that flag belongs
+# to `aws s3api list-objects-v2`, not `aws s3 ls`. Silent stderr made
+# the misconfig look like a permission problem.)
+ERR=$(aws s3api head-bucket --bucket "$PROD_BUCKET" \
+        --region "$PROD_REGION" 2>&1) || {
   log_error "Cannot read from source bucket s3://$PROD_BUCKET/ in $PROD_REGION."
+  log_error "  AWS error: $ERR"
   log_info  "Check jumpbox IAM role has s3:ListBucket + s3:GetObject on $PROD_BUCKET."
   exit 1
-fi
+}
 log_ok "Source bucket readable: s3://$PROD_BUCKET/"
 
-# Target bucket write check — should succeed via cross-account bucket policy
-# Try a HEAD on the bucket (ListBucket permission). Full write test is
-# expensive; we trust the sync's error output if the bucket policy is
-# misconfigured.
-if ! aws s3 ls "s3://$SANDBOX_BUCKET/" --region "$SANDBOX_REGION" \
-     --max-items 1 >/dev/null 2>&1; then
+# Target bucket read check — succeeds via cross-account bucket policy on
+# MediaBucket (cf-storage-s3.yaml) + jumpbox role's identity policy
+# (cf-migration-jumpbox.yaml SandboxMediaTargetBucket param). BOTH sides
+# required — head-bucket surfaces AccessDenied clearly if either is missing.
+ERR=$(aws s3api head-bucket --bucket "$SANDBOX_BUCKET" \
+        --region "$SANDBOX_REGION" 2>&1) || {
   log_error "Cannot list target bucket s3://$SANDBOX_BUCKET/ in $SANDBOX_REGION."
-  log_info  "Check sandbox's cf-storage-s3 stack has the cross-account bucket policy."
-  log_info  "Redeploy with: make deploy-storage-s3 ENV=sandbox"
-  log_info  "Verify:        aws --profile ZI-Sandbox s3api get-bucket-policy \\"
-  log_info  "                 --bucket $SANDBOX_BUCKET --query Policy --output text | jq"
+  log_error "  AWS error: $ERR"
+  log_info  "Verify BOTH sides of the cross-account grant:"
+  log_info  "  1. Sandbox — cf-storage-s3 MigrationSource* params set:"
+  log_info  "       aws --profile ZI-Sandbox s3api get-bucket-policy \\"
+  log_info  "         --bucket $SANDBOX_BUCKET --query Policy --output text | jq"
+  log_info  "  2. Prod   — cf-migration-jumpbox SandboxMediaTargetBucket set:"
+  log_info  "       aws --profile ZoningInfoAdmin iam get-role-policy \\"
+  log_info  "         --role-name cf-migration-jumpbox-role \\"
+  log_info  "         --policy-name WriteSandboxMediaTarget"
   exit 1
-fi
+}
 log_ok "Target bucket accessible: s3://$SANDBOX_BUCKET/"
 
 # ============================================================
