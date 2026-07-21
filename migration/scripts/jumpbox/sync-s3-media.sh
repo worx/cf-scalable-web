@@ -171,6 +171,16 @@ SYNC_ARGS=(
   "s3://$SANDBOX_BUCKET/"
   --source-region "$PROD_REGION"
   --region "$SANDBOX_REGION"
+  # AWS CLI v2's default (--copy-props default) preserves source tags,
+  # which invokes s3:GetObjectTagging on every copy — regardless of
+  # whether the object actually has any tags (auth check happens before
+  # tag lookup). Client confirmed no S3 tags in use, so switch to
+  # 'metadata-directive' which preserves user metadata (Content-Type,
+  # Cache-Control, Content-Disposition — needed so Drupal-served PDFs
+  # and images render inline in browsers) but skips the tag call.
+  # Jumpbox role therefore doesn't need s3:GetObjectTagging on prod
+  # or s3:PutObjectTagging on sandbox.
+  --copy-props metadata-directive
 )
 [ "${DELETE_ORPHANED:-}" = "yes" ] && SYNC_ARGS+=(--delete)
 [ "${DRY_RUN:-}" = "yes" ]         && SYNC_ARGS+=(--dryrun)
