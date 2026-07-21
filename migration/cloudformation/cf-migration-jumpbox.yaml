@@ -102,6 +102,21 @@ Parameters:
       GetSecretValue scoped to this ARN only.
     AllowedPattern: '^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
 
+  ProdMediaSourceBucket:
+    Type: String
+    Description: >-
+      OPTIONAL prod-account S3 bucket the jumpbox is allowed to READ
+      (s3:ListBucket + s3:GetObject). Used by sync-s3-media.sh to ferry
+      Drupal-managed media (PDFs, images) to the sandbox media bucket
+      cross-account. Empty (default) → no policy attached, jumpbox has
+      no prod-side S3 read grant. Bare bucket name (no arn: prefix).
+    AllowedPattern: '^([a-z0-9.-]+)?$'
+    Default: ''
+
+Conditions:
+  HasProdMediaSource:
+    !Not [!Equals [!Ref ProdMediaSourceBucket, '']]
+
 Resources:
   # ========================================
   # IAM role + instance profile
@@ -152,6 +167,32 @@ Resources:
           Value: cf-migration-jumpbox-role
         - Key: Purpose
           Value: Cross-account migration ferry - temporary
+
+  # Optional standalone policy — only created when ProdMediaSourceBucket
+  # is set. Kept separate from JumpboxRole.Policies because the Policies
+  # array can't be conditionally omitted. Attaches to the same role.
+  # Read-only: jumpbox lists + gets objects, never writes.
+  JumpboxProdMediaReadPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasProdMediaSource
+    Properties:
+      PolicyName: ReadProdMediaSource
+      Roles:
+        - !Ref JumpboxRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListProdMediaBucket
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: !Sub 'arn:aws:s3:::${ProdMediaSourceBucket}'
+          - Sid: ReadProdMediaObjects
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${ProdMediaSourceBucket}/*'
 
   JumpboxInstanceProfile:
     Type: AWS::IAM::InstanceProfile
