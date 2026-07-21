@@ -113,9 +113,25 @@ Parameters:
     AllowedPattern: '^([a-z0-9.-]+)?$'
     Default: ''
 
+  SandboxMediaTargetBucket:
+    Type: String
+    Description: >-
+      OPTIONAL cross-account (sandbox) S3 bucket the jumpbox is
+      allowed to WRITE (s3:PutObject/PutObjectAcl/GetObject/ListBucket
+      /DeleteObject). Paired with the bucket-side BucketPolicy created
+      by cf-storage-s3.yaml when its MigrationSource* params are set —
+      cross-account S3 requires the grant on BOTH sides (identity
+      policy on the source-account principal AND resource policy on
+      the target bucket). Empty (default) → no policy attached. Bare
+      bucket name (no arn: prefix).
+    AllowedPattern: '^([a-z0-9.-]+)?$'
+    Default: ''
+
 Conditions:
   HasProdMediaSource:
     !Not [!Equals [!Ref ProdMediaSourceBucket, '']]
+  HasSandboxMediaTarget:
+    !Not [!Equals [!Ref SandboxMediaTargetBucket, '']]
 
 Resources:
   # ========================================
@@ -193,6 +209,39 @@ Resources:
             Action:
               - 's3:GetObject'
             Resource: !Sub 'arn:aws:s3:::${ProdMediaSourceBucket}/*'
+
+  # Optional standalone policy — only created when
+  # SandboxMediaTargetBucket is set. Grants the cross-account WRITE
+  # half of the sync-s3-media path. Must be paired with the sandbox
+  # side's MediaBucket BucketPolicy (cf-storage-s3.yaml — set
+  # MigrationSourceAccountId + MigrationSourceRoleArnPattern). Without
+  # both sides, `aws s3 sync` fails at ListBucket during preflight.
+  # DeleteObject included so DELETE_ORPHANED=yes runs work without
+  # requiring a second stack deploy.
+  JumpboxSandboxMediaWritePolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasSandboxMediaTarget
+    Properties:
+      PolicyName: WriteSandboxMediaTarget
+      Roles:
+        - !Ref JumpboxRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListSandboxMediaBucket
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: !Sub 'arn:aws:s3:::${SandboxMediaTargetBucket}'
+          - Sid: WriteSandboxMediaObjects
+            Effect: Allow
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+              - 's3:GetObject'
+              - 's3:DeleteObject'
+            Resource: !Sub 'arn:aws:s3:::${SandboxMediaTargetBucket}/*'
 
   JumpboxInstanceProfile:
     Type: AWS::IAM::InstanceProfile

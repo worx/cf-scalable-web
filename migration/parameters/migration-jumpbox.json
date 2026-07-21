@@ -8,6 +8,7 @@
     "MigrationBucketArn": "arn:aws:s3:::sandbox-migration-kv-worxco",
     "MigrationBucketName": "sandbox-migration-kv-worxco",
     "MigrationSecretArn": "arn:aws:secretsmanager:us-east-1:978068244875:secret:cf-migration/prod-mysql-zinew-*",
-    "ProdMediaSourceBucket": "zi-documents"
+    "ProdMediaSourceBucket": "zi-documents",
+    "SandboxMediaTargetBucket": "sandbox-drupal-media-kv-worxco"
   }
 }
