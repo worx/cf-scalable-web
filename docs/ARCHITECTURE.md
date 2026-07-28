@@ -782,11 +782,27 @@ effective_io_concurrency = 200
 
 **Always Use Secrets Manager:**
 ```bash
-# Retrieve database password
+# Retrieve database password (this project stores DB passwords as
+# raw strings — SecretString is the password itself, no JSON wrapper)
 DB_PASSWORD=$(aws secretsmanager get-secret-value \
   --secret-id worxco/production/rds/master-password \
-  --query SecretString --output text | jq -r .password)
+  --query SecretString --output text)
 ```
+
+**Secret storage convention in this project — mixed:**
+
+Different secrets are stored differently. Check the specific secret before
+piping through `jq`:
+
+| Secret pattern | Storage format | Retrieval |
+|---|---|---|
+| `worxco/<env>/drupal/db-password` | Raw string | `--output text` (no jq) |
+| `worxco/<env>/drupal/hash-salt` | Raw string | `--output text` (no jq) |
+| `cf-migration/prod-mysql-*` | JSON `{ host, port, database, username, password }` | `--output text \| jq -r .password` |
+
+If you copy-paste a retrieval snippet and get an empty result, check
+whether the secret is stored as a raw string or JSON — `jq -r .password`
+on a raw-string secret silently returns nothing.
 
 ## Future Enhancements
 
