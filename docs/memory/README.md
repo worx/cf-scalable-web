@@ -46,6 +46,7 @@ Field notes:
 | `destroy-all-residue.md` | project | What survives `make destroy-all`; cleanup design options |
 | `ssm-new-experience-decision.md` | project | Why we disabled AWS SSM Quick Setup / DHMC; rollback playbook |
 | `user-preferences.md` | feedback | Kurt's working style, git workflow, naming conventions |
+| `php74-php83-storage-divergence.md` | project | Why php74=EBS legacy and php83=S3 forward-going — intentional architectural split |
 
 ## When to Add Memory
 
