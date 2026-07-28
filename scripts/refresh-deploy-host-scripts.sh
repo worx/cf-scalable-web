@@ -58,8 +58,15 @@ INNER_SCRIPT=$(cat <<'INNER_EOF'
 set -eu
 REPO=/home/ubuntu/projects/cf-scalable-web
 cd "$REPO"
-echo "=== git pull (best-effort) ==="
-git -c safe.directory="$REPO" pull --quiet \
+echo "=== git pull (best-effort, as ubuntu) ==="
+# Run as `ubuntu` so we inherit ubuntu's ~/.ssh/known_hosts and Git
+# identity. SSM ran us as root, and root has no GitHub SSH creds — a
+# plain `git pull` would always fail with "Host key verification failed"
+# and force this script to rely on the fallback re-install path. Running
+# under su - ubuntu gets us a real pull when the repo has upstream commits.
+# The `|| echo` fallback still covers genuine failures (offline, auth
+# rotated, etc.) — set -eu keeps propagating other errors.
+su - ubuntu -c "cd '$REPO' && git pull --quiet" \
   || echo "WARN: git pull failed — reinstalling from existing checkout"
 
 echo "=== reinstalling /usr/local/sbin/use-env ==="
