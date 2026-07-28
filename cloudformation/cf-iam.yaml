@@ -199,6 +199,17 @@ Resources:
                   - s3:PutObject
                   - s3:DeleteObject
                   - s3:ListBucket
+                  # ACL actions needed by the flysystem_s3 Drupal module's
+                  # stream wrapper (Codementality\FlysystemStreamWrapper).
+                  # On file serve, the wrapper calls GetObjectAcl to
+                  # determine per-object visibility (private/public); on
+                  # file write, it calls PutObjectAcl to set the ACL to
+                  # match the flysystem scheme's configured visibility.
+                  # Missing either causes AccessDenied errors that Drupal
+                  # translates to a 404 on the /_flysystem/s3/... route.
+                  # Discovered 2026-07-28 debugging sandbox media 404s.
+                  - s3:GetObjectAcl
+                  - s3:PutObjectAcl
                 Resource:
                   - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*'
                   - !Sub 'arn:aws:s3:::${EnvironmentName}-drupal-media-*/*'
