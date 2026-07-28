@@ -39,11 +39,18 @@ need — they compose but don't require each other:
 | Flow | What moves | Prod-side action | Sandbox-side action |
 |---|---|---|---|
 | **Database** | prod MySQL → sandbox Postgres | `make dump-mysql` | `make restore-mysql` + `make run-pgloader` |
-| **Codebase** | React2's `/var/www/drupal/` | `make dump-codebase` | (restore not yet wired — see follow-ups) |
+| **Codebase** | React2's Drupal root + any composer path-repository siblings | `make dump-codebase` (auto-discovers siblings from composer.json) | `make restore-codebase` (multi-top-level atomic swap; preserves sandbox's `settings.php` + `.installed` across the Drupal-root swap) |
 | **Public files** | uploaded media, images | `make dump-files` | `make restore-files` |
 | **Private files** | secure downloads, backups | `make dump-private` | `make restore-private` (preserves sandbox's salt.txt across atomic swap) |
 
 Or: `make dump-all` runs all four dumps in one call.
+
+**Note on codebase siblings:** production has custom modules that live
+*outside* the Drupal root as composer "path" repositories (e.g.
+`../entity_bundle_manager`). `dump-codebase` finds them dynamically by
+reading composer.json — no hardcoded list to maintain when Zac adds
+new packages. See `migration/README.md` § "Codebase dump: sibling
+package auto-discovery" for details and escape hatches.
 
 **Composed pipelines** (the "usual" way to run migration):
 - `make migrate-db-all` — DB-only chain (Phase -1 preflight → backup → restore-mysql → pgloader → cache-clear)

@@ -15,21 +15,32 @@
 # Flow (six phases):
 #   1. Preconditions       (root, tools, SSH key, AWS creds)
 #   2. Test SSH            (jumpbox → React2 as ubuntu)
-#   3. Source metadata     (approximate total size on React2)
+#   3. Source metadata     (approximate total size on React2) +
+#                          auto-discover composer path-repository siblings
+#                          from DRUPAL_ROOT/composer.json (unless
+#                          SIBLING_MODULES is set, or ="none" to opt out)
 #   4. Confirmation        (honors CONFIRMED=yes)
-#   5. Stream tar → S3     (ssh "tar cz" | aws s3 cp -)
+#   5. Stream tar → S3     (ssh "tar cz" | aws s3 cp -) — tar base is
+#                          dirname(DRUPAL_ROOT) so the archive contains
+#                          $(basename DRUPAL_ROOT) plus any siblings
+#                          as top-level members
 #   6. Verify S3 upload
 #
 # Idempotent: yes — S3 PUT is atomic and overwrites the previous
 #   object; there's no local intermediate on the jumpbox.
 #
 # Environment variables (all optional, listed with defaults):
-#   MIGRATION_BUCKET   Sandbox S3 bucket        (sandbox-migration-kv-worxco)
+#   MIGRATION_BUCKET   Sandbox S3 bucket         (sandbox-migration-kv-worxco)
 #   DUMP_S3_KEY        Target object key         (dumps/drupal-codebase.tar.gz)
 #   SOURCE_HOST        React2 IP or hostname     (172.31.23.46)
 #   SOURCE_USER        SSH user on React2        (ubuntu)
 #   DRUPAL_ROOT        Codebase root on React2   (/var/www/html/zoning_info_platform)
 #   SSH_KEY            SSH private key location  (/root/.ssh/id_ed25519)
+#   SIBLING_MODULES    Override sibling discovery. Space-separated bare
+#                      folder names (siblings of DRUPAL_ROOT) to include.
+#                      Empty (default) = auto-discover from composer.json's
+#                      path-type repositories. "none" = skip discovery,
+#                      dump just the Drupal root (legacy behavior).
 #   CONFIRMED          yes = skip Y/N confirmation
 #   DRY_RUN            yes = preview commands without executing
 #
@@ -62,17 +73,30 @@ SOURCE_HOST="${SOURCE_HOST:-172.31.23.46}"
 SOURCE_USER="${SOURCE_USER:-ubuntu}"
 DRUPAL_ROOT="${DRUPAL_ROOT:-/var/www/html/zoning_info_platform}"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
+# SIBLING_MODULES: space-separated list of composer path-repository
+# package folder names that live alongside DRUPAL_ROOT (siblings, not
+# children). If unset, Phase 3.5 auto-discovers them from DRUPAL_ROOT's
+# composer.json `repositories[type=path].url` entries. Set to a literal
+# "none" to skip both discovery and inclusion (dump just the Drupal
+# root, legacy behavior).
+SIBLING_MODULES="${SIBLING_MODULES:-}"
 
-# Codebase-specific exclusions — anything NOT in the sandbox copy.
-# Paths are relative to DRUPAL_ROOT (matches tar's `-C` semantics).
-EXCLUDES=(
-  './web/sites/default/settings.php'
-  './web/sites/default/settings.local.php'
-  './web/sites/default/services.yml'
-  './web/sites/default/files'
-  './private'
-  './.git'
-  './.ddev'
+# Drupal-specific exclusions (paths relative to the Drupal root dir).
+# See BUILD_EXCLUDE_ARGS below for how these get prefixed at tar time.
+DRUPAL_EXCLUDES=(
+  'web/sites/default/settings.php'
+  'web/sites/default/settings.local.php'
+  'web/sites/default/services.yml'
+  'web/sites/default/files'
+  'private'
+)
+
+# Global excludes (apply to Drupal root AND any sibling package). tar's
+# --exclude=NAME matches NAME at any depth by default, so a bare '.git'
+# strips .git from every top-level folder in the archive.
+GLOBAL_EXCLUDES=(
+  '.git'
+  '.ddev'
 )
 
 # ============================================================
@@ -88,8 +112,13 @@ log_info "SOURCE_HOST      = $SOURCE_HOST"
 log_info "SOURCE_USER      = $SOURCE_USER"
 log_info "DRUPAL_ROOT      = $DRUPAL_ROOT"
 log_info "SSH_KEY          = $SSH_KEY"
-log_info "Excluded paths (relative to DRUPAL_ROOT):"
-for excl in "${EXCLUDES[@]}"; do
+log_info "SIBLING_MODULES  = ${SIBLING_MODULES:-<auto-discover from composer.json>}"
+log_info "Drupal-scoped excludes (prefixed with drupal-basename at tar time):"
+for excl in "${DRUPAL_EXCLUDES[@]}"; do
+  log_info "  - $excl"
+done
+log_info "Global excludes (apply to Drupal root AND every sibling):"
+for excl in "${GLOBAL_EXCLUDES[@]}"; do
   log_info "  - $excl"
 done
 if [ "${DRY_RUN:-}" = "yes" ]; then
@@ -157,9 +186,9 @@ REMOTE_HOSTNAME=$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST"
 log_ok "SSH working — connected to $REMOTE_HOSTNAME as $SOURCE_USER"
 
 # ============================================================
-# Phase 3 of 6: Fetch source metadata
+# Phase 3 of 6: Fetch source metadata + auto-discover siblings
 # ============================================================
-log_step "Phase 3/6: Fetch source metadata"
+log_step "Phase 3/6: Fetch source metadata + auto-discover siblings"
 
 # du -sb needs sudo since some paths under DRUPAL_ROOT may be www-data
 # owned or root-owned. Passwordless sudo is standard on Ubuntu AMIs.
@@ -176,6 +205,58 @@ else
   log_info "and gzip compresses text (code/config) well."
 fi
 
+# Auto-discover sibling composer path-repositories, unless SIBLING_MODULES
+# was set explicitly (env var wins — set to "none" to opt out entirely).
+# Read composer.json's `repositories[] | select(.type == "path")` array;
+# each `.url` is a path relative to composer.json (e.g., "../foo"). We
+# take the basename because the tar-base is dirname(DRUPAL_ROOT) — same
+# parent that composer resolves ../foo against. Siblings failing this
+# match (e.g., "../../elsewhere") get logged and skipped.
+if [ "$SIBLING_MODULES" = "none" ]; then
+  log_info "SIBLING_MODULES=none — skipping discovery, dumping DRUPAL_ROOT only"
+  SIBLING_MODULES=""
+elif [ -z "$SIBLING_MODULES" ]; then
+  log_info "Auto-discovering composer path-repositories in $DRUPAL_ROOT/composer.json"
+  DISCOVERED=$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST" \
+    "sudo jq -r '.repositories[]? | select(.type == \"path\") | .url' \
+      '$DRUPAL_ROOT/composer.json' 2>/dev/null || true")
+  if [ -z "$DISCOVERED" ]; then
+    log_warn "No path-type repositories found in composer.json (or jq/composer.json missing)."
+    log_warn "Falling back to legacy behavior (Drupal root only)."
+  else
+    # Filter: each url must be a bare-sibling reference (../something).
+    # Warn on anything else so we don't silently drop unusual layouts.
+    for url in $DISCOVERED; do
+      case "$url" in
+        ../*/*)
+          log_warn "  skip $url — not a direct sibling (deeper than ../)"
+          ;;
+        ../*)
+          name="${url#../}"
+          # Confirm it exists so we don't tar a phantom.
+          if ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST" \
+              "sudo test -d '$(dirname "$DRUPAL_ROOT")/$name'" 2>/dev/null; then
+            SIBLING_MODULES="$SIBLING_MODULES $name"
+            log_ok "  found sibling: $name"
+          else
+            log_warn "  skip $name — composer.json references it but folder is absent"
+          fi
+          ;;
+        *)
+          log_warn "  skip $url — not a ../sibling reference"
+          ;;
+      esac
+    done
+    SIBLING_MODULES="${SIBLING_MODULES# }"  # trim leading space
+  fi
+else
+  log_info "SIBLING_MODULES set explicitly: $SIBLING_MODULES"
+fi
+
+if [ -n "$SIBLING_MODULES" ]; then
+  log_info "Will include $(echo $SIBLING_MODULES | wc -w) sibling package(s) in the tar"
+fi
+
 # ============================================================
 # Phase 4 of 6: Confirmation
 # ============================================================
@@ -183,6 +264,7 @@ log_step "Phase 4/6: Confirmation"
 
 confirm_or_exit "About to tar the Drupal codebase on React2 and stream to sandbox S3.
     Source: $SOURCE_USER@$SOURCE_HOST:$DRUPAL_ROOT (~${TOTAL_MB} MB pre-exclude)
+    Siblings: ${SIBLING_MODULES:-<none>}
     Target: s3://$MIGRATION_BUCKET/$DUMP_S3_KEY
     Excludes: settings*.php, services.yml, files/, private/, .git, .ddev
     Impact: sustained read I/O on React2's disk for the tar duration
@@ -193,19 +275,46 @@ confirm_or_exit "About to tar the Drupal codebase on React2 and stream to sandbo
 # ============================================================
 log_step "Phase 5/6: tar over SSH → S3 stream"
 
-# Build tar's --exclude args from the EXCLUDES array
+# The tar's base directory is the PARENT of DRUPAL_ROOT so we can include
+# both DRUPAL_ROOT's basename AND any sibling package folders as top-level
+# tar members. Extract on the sandbox side will see:
+#   zoning_info_platform/…
+#   entity_bundle_manager/…            (if it exists)
+#   filtered_entity_reference/…        (if it exists)
+# See restore-codebase.sh — it identifies the Drupal root inside the
+# staging tree by "the top-level dir that contains composer.json" and
+# swaps each top-level dir into place independently.
+DRUPAL_BASENAME=$(basename "$DRUPAL_ROOT")
+DRUPAL_PARENT=$(dirname "$DRUPAL_ROOT")
+
+# Build the --exclude arg list. Two groups:
+#   1) Global excludes (.git, .ddev) — bare names; tar matches at any depth
+#      in the archive, so they apply to Drupal root AND every sibling.
+#   2) Drupal-scoped excludes (settings.php, files/, etc.) — must be
+#      prefixed with $DRUPAL_BASENAME/ now that the tar base is one level
+#      up. Otherwise tar would look for e.g. `settings.php` at the tar
+#      root and miss the actual path.
 EXCLUDE_ARGS=""
-for excl in "${EXCLUDES[@]}"; do
+for excl in "${GLOBAL_EXCLUDES[@]}"; do
   EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude=$excl"
 done
+for excl in "${DRUPAL_EXCLUDES[@]}"; do
+  EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude=$DRUPAL_BASENAME/$excl"
+done
+
+# TAR_MEMBERS: what we tell tar to include (space-separated, expanded
+# unquoted in the ssh command so tar sees them as separate args).
+TAR_MEMBERS="$DRUPAL_BASENAME $SIBLING_MODULES"
 
 log_info "Starting tar stream from React2 → sandbox S3"
 log_info "(pipeline: React2 tar → SSH → jumpbox → aws s3 cp -)"
+log_info "tar base:    $DRUPAL_PARENT"
+log_info "tar members: $TAR_MEMBERS"
 
 if is_dry_run; then
   log_info "[DRY_RUN] would run:"
   log_info "  ssh $SOURCE_USER@$SOURCE_HOST \\"
-  log_info "    \"sudo tar czf - -C '$DRUPAL_ROOT' $EXCLUDE_ARGS .\" \\"
+  log_info "    \"sudo tar czf - -C '$DRUPAL_PARENT' $EXCLUDE_ARGS $TAR_MEMBERS\" \\"
   log_info "    | aws s3 cp - s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
 else
   time_start=$SECONDS
@@ -214,7 +323,7 @@ else
   # exits non-zero if any component fails. We wrap in `if !` to catch it
   # and remove any truncated S3 object.
   if ! ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST" \
-        "sudo tar czf - -C '$DRUPAL_ROOT' $EXCLUDE_ARGS ." \
+        "sudo tar czf - -C '$DRUPAL_PARENT' $EXCLUDE_ARGS $TAR_MEMBERS" \
       | aws s3 cp - "s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
   then
     log_error "Tar/upload pipeline failed. Removing partial S3 object..."

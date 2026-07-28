@@ -156,7 +156,7 @@ Each is independent — run what you need, skip what you don't.
 | Target | Source (React2) | S3 destination |
 |---|---|---|
 | `make dump-mysql` | live MySQL via SSH tunnel from jumpbox | `dumps/zinew.sql` |
-| `make dump-codebase` | `/var/www/html/zoning_info_platform/` | `dumps/drupal-codebase.tar.gz` |
+| `make dump-codebase` | `/var/www/html/zoning_info_platform/` **+ auto-discovered composer path-repo siblings** | `dumps/drupal-codebase.tar.gz` |
 | `make dump-files` | `sites/default/files/` | `dumps/drupal-files.tar.gz` |
 | `make dump-private` | private files dir | `dumps/drupal-private.tar.gz` |
 | `make dump-all` | all four sequentially | (all four keys above) |
@@ -164,6 +164,42 @@ Each is independent — run what you need, skip what you don't.
 Cadence: run once per test cycle. Prod dumps aren't part of
 `migrate-full-all` — they happen on a separate schedule (before
 sandbox tests, or when prod state has meaningfully changed).
+
+### Codebase dump: sibling package auto-discovery
+
+`dump-codebase` doesn't tar just the Drupal root — it also tars any
+composer path-repository sibling packages that live alongside it. This
+catches locally-developed modules Zac maintains outside the Drupal
+tree (e.g. `entity_bundle_manager`, `filtered_entity_reference`), which
+are referenced from `composer.json` like:
+
+```json
+"repositories": [
+  { "type": "path", "url": "../entity_bundle_manager" }
+]
+```
+
+Discovery mechanism: `dump-codebase.sh` shells into React2, reads
+`$DRUPAL_ROOT/composer.json`, and enumerates every
+`repositories[type=path].url`. Bare `../foo` references are included
+in the tar; anything deeper (`../../foo`) or absent from disk is
+logged and skipped.
+
+Escape hatches (set as env vars before invoking `make dump-codebase`):
+
+- `SIBLING_MODULES="foo bar"` — bypass discovery, use this literal list.
+- `SIBLING_MODULES=none` — skip both discovery and inclusion; dump
+  only the Drupal root (legacy behavior).
+
+The resulting tarball has multiple top-level directories
+(`zoning_info_platform/`, `entity_bundle_manager/`, etc.).
+`restore-codebase.sh` identifies the Drupal root inside the archive
+by "which top-level dir contains `composer.json`," then swaps each
+one into place independently under `/var/www/`.
+
+Legacy tarballs (single top-level layout, no siblings) still restore
+correctly — `restore-codebase.sh` detects them by finding
+`composer.json` at the tarball root.
 
 ## DB safety net — logical rename pattern
 

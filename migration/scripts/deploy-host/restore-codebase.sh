@@ -6,30 +6,47 @@
 # ============================================================
 # migration/scripts/deploy-host/restore-codebase.sh
 #
-# Purpose:  Restore prod's Drupal CODEBASE (composer install output +
-#           custom modules/themes) from an S3-staged tarball onto
-#           sandbox FSx. Atomic swap: extract fresh, rename current to
-#           .BAK.<UTC>, promote .NEW → current. Preserves sandbox-managed
-#           files across the swap (settings.php, .installed marker).
+# Purpose:  Restore prod's Drupal CODEBASE — Drupal root AND any custom
+#           composer path-repository sibling packages (e.g.
+#           `entity_bundle_manager`, `filtered_entity_reference`) — from
+#           an S3-staged tarball onto sandbox FSx. Each top-level package
+#           gets its own atomic swap; the Drupal root additionally
+#           preserves sandbox-managed files (settings.php, .installed).
 #
-# Sibling of restore-files.sh / restore-private.sh — same 6-phase pattern.
+# Sibling of restore-files.sh / restore-private.sh, same phase-based
+# pattern but with an extra iteration layer over the tarball's top-level
+# directories.
 #
 # Flow:
-#   1. Preconditions        (root, tools, /var/www mounted, Drupal target
-#                            parent exists)
+#   1. Preconditions        (root, tools, /var/www mounted, target parent
+#                            exists)
 #   2. Confirmation
 #   3. Fetch tarball        (reuses cached local file unless FORCE_DOWNLOAD=yes)
-#   4. Extract to .NEW dir  (no --strip-components; dump-codebase.sh uses
-#                            `tar czf - -C $DRUPAL_ROOT .` so tarball is
-#                            files-directly, not wrapped in a top-level dir)
-#   5. Ownership + perms    (root:www-data, u=rwX,g=rwX,o=)
-#   6. Atomic swap          (rename current → .BAK, .NEW → current,
-#                            then restore preserve-list files from .BAK)
+#   4. Extract to STAGING   Tarball produced by dump-codebase.sh contains
+#                           multiple top-level dirs — the Drupal root plus
+#                           any discovered composer path-repository
+#                           siblings. We extract them all into a staging
+#                           dir, then handle each independently.
+#                           BACKWARD COMPAT: also handles legacy tarballs
+#                           whose contents are directly at the tar root
+#                           (composer.json at staging root) — treated as
+#                           "Drupal root only, no siblings."
+#   5. Per top-level dir:
+#      a. Ownership + perms (root:www-data, u=rwX,g=rwX,o=)
+#      b. Atomic swap into place (current → .BAK, .NEW → current)
+#      c. If this dir is the Drupal root, apply PRESERVE_FROM_BAK
+#   6. Cleanup staging + report
 #
 # ** Codebase restore is UNUSUAL in practice. ** Most sandbox test cycles
 # WANT sandbox to run newer or diverged code from prod (that's the point
 # of a sandbox — test the changes not-yet-in-prod). Only reach for this
 # when you deliberately want prod-parity in the code path too.
+#
+# Identifying the Drupal root inside the staging tree:
+#   Heuristic: the top-level directory that contains a `composer.json` file.
+#   Any other top-level directory is treated as a sibling package.
+#   If zero contain composer.json → error (malformed tarball).
+#   If more than one contain composer.json → error (ambiguous).
 #
 # Preserve-list (sandbox-managed, override the tarball):
 #   web/sites/default/settings.php — env-var driven, written by
@@ -45,11 +62,13 @@
 #   MIGRATION_BUCKET   S3 bucket holding tarball  (sandbox-migration-kv-worxco)
 #   DUMP_S3_KEY        Object key                 (dumps/drupal-codebase.tar.gz)
 #   DUMP_LOCAL_PATH    Local staging path         (/var/www/mysql/drupal-codebase.tar.gz)
-#   TARGET_DIR         Where codebase lives       (/var/www/drupal)
+#   TARGET_DIR         Where Drupal root lives    (/var/www/drupal)
+#                      Siblings go to $(dirname TARGET_DIR)/${sibling_name}.
 #   PRESERVE_FROM_BAK  Space-separated repo-relative paths to copy from
-#                       .BAK back into new dir after swap
+#                       .BAK back into new Drupal root after swap
 #                       (default: "web/sites/default/settings.php .installed")
-#   KEEP_BAK           yes = keep .BAK on success (yes)
+#                       Only applies to Drupal root, not siblings.
+#   KEEP_BAK           yes = keep .BAK dirs on success (yes)
 #   FORCE_DOWNLOAD     yes = re-download from S3
 #   CONFIRMED          yes = skip Y/N confirm
 #   DRY_RUN            yes = preview commands
@@ -60,6 +79,8 @@
 #           + s3://$MIGRATION_BUCKET/logs/YYYY-MM-DD/ on exit.
 #
 # Created:  2026-07-20
+# Updated:  2026-07-28 — support multi-top-level tarballs for composer
+#                        path-repository siblings
 
 set -euo pipefail
 
@@ -76,8 +97,10 @@ log_init "restore-codebase"
 trap 'log_upload_and_exit "$MIGRATION_BUCKET"' EXIT
 
 STAMP=$(date -u +%Y%m%d_%H%M%SZ)
-NEW_DIR="${TARGET_DIR}.NEW.${STAMP}"
-BAK_DIR="${TARGET_DIR}.BAK.${STAMP}"
+# STAGING_DIR: extracted tarball contents (potentially multiple top-level
+# dirs — Drupal root + siblings). Cleaned up on success.
+STAGING_DIR="$(dirname "$TARGET_DIR")/.RESTORE-STAGING.${STAMP}"
+# Per-target NEW/BAK paths are computed inside Phase 5's loop.
 
 log_step "restore-codebase — S3 tarball → FSx (atomic swap, preserves sandbox files)"
 log_info "MIGRATION_BUCKET  = $MIGRATION_BUCKET"
@@ -180,99 +203,180 @@ if ! is_dry_run; then
 fi
 
 # ============================================================
-# Phase 4 of 6: Extract to .NEW dir
+# Phase 4 of 6: Extract tarball into a staging directory
 # ============================================================
-log_step "Phase 4/6: Extract tarball to $NEW_DIR"
+log_step "Phase 4/6: Extract tarball to $STAGING_DIR"
 
-if [ -e "$NEW_DIR" ]; then
-  log_error "$NEW_DIR already exists (aborted prior run?). Remove and retry."
+if [ -e "$STAGING_DIR" ]; then
+  log_error "$STAGING_DIR already exists (aborted prior run?). Remove and retry."
   exit 1
 fi
 
 if is_dry_run; then
-  log_info "[DRY_RUN] would run: mkdir -p $NEW_DIR && tar xzf $DUMP_LOCAL_PATH -C $NEW_DIR"
+  log_info "[DRY_RUN] would run: mkdir -p $STAGING_DIR && tar xzf $DUMP_LOCAL_PATH -C $STAGING_DIR"
 else
-  mkdir -p "$NEW_DIR"
-  # dump-codebase.sh uses `tar czf - -C $DRUPAL_ROOT .` — the leading `.`
-  # means the archive members are relative (`./composer.json`, `./web/...`)
-  # without a wrapping top-level directory. So no --strip-components here
-  # (unlike restore-files.sh / restore-private.sh which do strip a wrapper).
+  mkdir -p "$STAGING_DIR"
   time_start=$SECONDS
-  tar xzf "$DUMP_LOCAL_PATH" -C "$NEW_DIR"
-  EXTRACT_COUNT=$(find "$NEW_DIR" -type f 2>/dev/null | wc -l)
-  EXTRACT_SIZE=$(du -sh "$NEW_DIR" 2>/dev/null | cut -f1)
+  tar xzf "$DUMP_LOCAL_PATH" -C "$STAGING_DIR"
+  EXTRACT_COUNT=$(find "$STAGING_DIR" -type f 2>/dev/null | wc -l)
+  EXTRACT_SIZE=$(du -sh "$STAGING_DIR" 2>/dev/null | cut -f1)
   log_ok "Extracted ${EXTRACT_COUNT} files (${EXTRACT_SIZE}) in $(( SECONDS - time_start ))s"
 fi
 
-# ============================================================
-# Phase 5 of 6: Ownership + permissions
-# ============================================================
-log_step "Phase 5/6: Set ownership + permissions"
-
+# Detect tarball layout: is composer.json at the staging root (legacy
+# "bare" format), or at exactly one subdir (new "multi-top-level" format
+# with siblings)?
 if is_dry_run; then
-  log_info "[DRY_RUN] would run: chown -R root:www-data $NEW_DIR && chmod -R u=rwX,g=rwX,o= $NEW_DIR"
+  log_info "[DRY_RUN] skipping tarball layout detection"
+  # Dry-run: pretend it's the legacy layout so we still print reasonable output.
+  TOP_LEVEL_DIRS=""
+  DRUPAL_STAGING_PATH="$STAGING_DIR"
+  SIBLING_STAGING_PATHS=""
 else
-  chown -R root:www-data "$NEW_DIR"
-  chmod -R u=rwX,g=rwX,o= "$NEW_DIR"
-  log_ok "Ownership set to root:www-data; permissions u=rwX,g=rwX,o="
+  # Enumerate top-level dirs (bare filenames, one per line)
+  TOP_LEVEL_DIRS=$(find "$STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null)
+
+  if [ -f "$STAGING_DIR/composer.json" ]; then
+    # Legacy tarball: contents directly at staging root, no siblings.
+    log_info "Legacy tarball detected (composer.json at staging root, no siblings)"
+    DRUPAL_STAGING_PATH="$STAGING_DIR"
+    SIBLING_STAGING_PATHS=""
+  else
+    # New format: find the top-level dir(s) containing composer.json.
+    DRUPAL_CANDIDATES=""
+    for d in $TOP_LEVEL_DIRS; do
+      if [ -f "$STAGING_DIR/$d/composer.json" ]; then
+        DRUPAL_CANDIDATES="$DRUPAL_CANDIDATES $d"
+      fi
+    done
+    DRUPAL_CANDIDATES="${DRUPAL_CANDIDATES# }"
+    N=$(echo $DRUPAL_CANDIDATES | wc -w)
+    if [ "$N" = "0" ]; then
+      log_error "No top-level dir in the tarball contains composer.json."
+      log_error "Cannot identify the Drupal root. Malformed tarball?"
+      log_error "Staging kept at $STAGING_DIR for inspection."
+      exit 1
+    elif [ "$N" -gt "1" ]; then
+      log_error "Multiple top-level dirs contain composer.json:$(echo " $DRUPAL_CANDIDATES")"
+      log_error "Ambiguous — cannot pick a single Drupal root."
+      log_error "Staging kept at $STAGING_DIR for inspection."
+      exit 1
+    fi
+    DRUPAL_STAGING_NAME=$(echo $DRUPAL_CANDIDATES | tr -d ' ')
+    DRUPAL_STAGING_PATH="$STAGING_DIR/$DRUPAL_STAGING_NAME"
+    SIBLING_STAGING_PATHS=""
+    for d in $TOP_LEVEL_DIRS; do
+      [ "$d" = "$DRUPAL_STAGING_NAME" ] && continue
+      SIBLING_STAGING_PATHS="$SIBLING_STAGING_PATHS $d"
+    done
+    SIBLING_STAGING_PATHS="${SIBLING_STAGING_PATHS# }"
+    log_ok "Drupal root:  $DRUPAL_STAGING_NAME  (from $STAGING_DIR)"
+    if [ -n "$SIBLING_STAGING_PATHS" ]; then
+      log_ok "Sibling(s):   $SIBLING_STAGING_PATHS"
+    else
+      log_info "No sibling packages in tarball"
+    fi
+  fi
 fi
 
 # ============================================================
-# Phase 6 of 6: Atomic swap + preserve sandbox files
+# Phase 5 of 6: Per top-level dir — chown, atomic swap, preserve
 # ============================================================
-log_step "Phase 6/6: Atomic swap (current → BAK, NEW → current)"
+log_step "Phase 5/6: Swap each top-level dir into place"
 
-if is_dry_run; then
-  log_info "[DRY_RUN] would run:"
-  [ -d "$TARGET_DIR" ] && log_info "  mv $TARGET_DIR $BAK_DIR"
-  log_info "  mv $NEW_DIR $TARGET_DIR"
-  log_info "  for f in $PRESERVE_FROM_BAK: cp -p $BAK_DIR/f $TARGET_DIR/f"
-else
-  if [ -d "$TARGET_DIR" ]; then
-    mv "$TARGET_DIR" "$BAK_DIR"
-    log_ok "Renamed current: $TARGET_DIR → $BAK_DIR"
-  else
-    log_info "No existing $TARGET_DIR to preserve; skipping BAK step"
-    BAK_DIR=""
+TARGET_PARENT="$(dirname "$TARGET_DIR")"
+
+# Helper: swap a single staging path → its final target atomically.
+# Args: $1 = staging source path, $2 = target final path, $3 = "drupal" | "sibling"
+swap_one() {
+  local SRC="$1"
+  local DST="$2"
+  local KIND="$3"
+  local NEW="${DST}.NEW.${STAMP}"
+  local BAK="${DST}.BAK.${STAMP}"
+
+  if is_dry_run; then
+    log_info "[DRY_RUN] would swap $KIND: $SRC → $DST (via $NEW; existing → $BAK)"
+    return 0
   fi
 
-  mv "$NEW_DIR" "$TARGET_DIR"
-  log_ok "Promoted: $NEW_DIR → $TARGET_DIR"
+  # Move staging → .NEW. Both are on FSx so this is a metadata-only rename.
+  mv "$SRC" "$NEW"
+  chown -R root:www-data "$NEW"
+  chmod -R u=rwX,g=rwX,o= "$NEW"
 
-  # Preserve sandbox-managed files across the swap. See header + also
-  # migration/scripts/deploy-host/restore-private.sh for the same
-  # pattern applied to hash_salt.
-  if [ -n "$BAK_DIR" ] && [ -d "$BAK_DIR" ] && [ -n "$PRESERVE_FROM_BAK" ]; then
+  # Atomic swap
+  if [ -d "$DST" ]; then
+    mv "$DST" "$BAK"
+    log_ok "  $KIND: renamed current → $BAK"
+  else
+    log_info "  $KIND: no existing $DST to preserve; skipping BAK step"
+    BAK=""
+  fi
+  mv "$NEW" "$DST"
+  log_ok "  $KIND: promoted → $DST"
+
+  # Only the Drupal root gets the preserve-list treatment.
+  if [ "$KIND" = "drupal" ] && [ -n "$BAK" ] && [ -d "$BAK" ] && [ -n "$PRESERVE_FROM_BAK" ]; then
     for f in $PRESERVE_FROM_BAK; do
-      if [ -f "$BAK_DIR/$f" ]; then
-        # Ensure the destination parent directory exists — the extracted
-        # tarball SHOULD have provided it (settings.php's parent is a
-        # standard Drupal path), but belt-and-suspenders.
-        mkdir -p "$(dirname "$TARGET_DIR/$f")"
-        cp -p "$BAK_DIR/$f" "$TARGET_DIR/$f"
-        chown root:www-data "$TARGET_DIR/$f"
-        log_ok "Preserved sandbox file across swap: $f"
+      if [ -f "$BAK/$f" ]; then
+        mkdir -p "$(dirname "$DST/$f")"
+        cp -p "$BAK/$f" "$DST/$f"
+        chown root:www-data "$DST/$f"
+        log_ok "  drupal: preserved sandbox file across swap: $f"
       else
-        log_warn "$f not in $BAK_DIR — nothing to preserve"
+        log_warn "  drupal: $f not in $BAK — nothing to preserve"
       fi
     done
+  fi
+
+  if [ -n "$BAK" ] && [ -d "$BAK" ] && [ "$KEEP_BAK" != "yes" ]; then
+    log_info "  $KIND: KEEP_BAK=$KEEP_BAK — removing $BAK"
+    rm -rf "$BAK"
+  elif [ -n "$BAK" ]; then
+    log_info "  $KIND: previous $DST preserved at $BAK (rm -rf $BAK when satisfied)"
+  fi
+}
+
+# 1) Swap the Drupal root into $TARGET_DIR
+swap_one "$DRUPAL_STAGING_PATH" "$TARGET_DIR" "drupal"
+
+# 2) Swap each sibling into $(dirname TARGET_DIR)/${sibling_name}
+if [ -n "$SIBLING_STAGING_PATHS" ]; then
+  for sib in $SIBLING_STAGING_PATHS; do
+    swap_one "$STAGING_DIR/$sib" "$TARGET_PARENT/$sib" "sibling"
+  done
+fi
+
+# ============================================================
+# Phase 6 of 6: Cleanup staging + report
+# ============================================================
+log_step "Phase 6/6: Cleanup staging + report"
+
+if is_dry_run; then
+  log_info "[DRY_RUN] would run: rm -rf $STAGING_DIR"
+else
+  # Staging should now be empty (all its top-level dirs were mv'd out).
+  # Remove it even if not empty (belt-and-suspenders; unusual layouts).
+  if [ -d "$STAGING_DIR" ]; then
+    REMAINING=$(find "$STAGING_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | wc -l)
+    if [ "$REMAINING" -gt "0" ]; then
+      log_warn "Staging dir has $REMAINING unexpected leftovers — inspect $STAGING_DIR before removing"
+    else
+      rmdir "$STAGING_DIR"
+      log_ok "Removed empty staging dir"
+    fi
   fi
 
   NEW_COUNT=$(find "$TARGET_DIR" -type f 2>/dev/null | wc -l)
   NEW_SIZE=$(du -sh "$TARGET_DIR" 2>/dev/null | cut -f1)
   log_info "Restored $TARGET_DIR: $NEW_SIZE, $NEW_COUNT files"
-
-  if [ -n "$BAK_DIR" ] && [ -d "$BAK_DIR" ] && [ "$KEEP_BAK" != "yes" ]; then
-    log_info "KEEP_BAK=$KEEP_BAK — removing $BAK_DIR"
-    rm -rf "$BAK_DIR"
-    log_ok "Cleaned up $BAK_DIR"
-  elif [ -n "$BAK_DIR" ]; then
-    log_info "Previous codebase preserved at: $BAK_DIR"
-    log_info "Clean up when satisfied: sudo rm -rf $BAK_DIR"
-  fi
 fi
 
 log_step "restore-codebase complete"
 log_ok "$TARGET_DIR restored from s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
+if [ -n "$SIBLING_STAGING_PATHS" ]; then
+  log_ok "Sibling packages also restored:$(echo " $SIBLING_STAGING_PATHS")"
+fi
 log_info "Recommend: 'sudo -E vendor/bin/drush cr' (rebuild container against new code)"
 log_info "           make clear-drupal-cache ENV=<env> (invalidate Valkey + PHP compiled)"
