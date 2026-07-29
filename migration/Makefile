@@ -183,6 +183,11 @@ help:  ## Show this help
 	@echo "                                 $(CYAN)Env: AUTO=yes (auto-install-drupal on preflight fail — for overnight runs)$(NC)"
 	@echo "                                 $(CYAN)     SKIP_BACKUP=yes (skip Phase 0) SKIP_PREFLIGHT=yes POLL_TIMEOUT=<s>$(NC)"
 	@echo ""
+	@echo "$(YELLOW)Cleanup / maintenance:$(NC)"
+	@echo "  make clean-migration-baks    List /var/www/*.{BAK,NEW,RESTORE-STAGING}.* on FSx (safety backups from restore-* ops)"
+	@echo "                                 $(CYAN)FROM: Mac|deploy-host (auto-routes; sudo-wraps if non-root on deploy-host)$(NC)"
+	@echo "                                 $(CYAN)Env: CONFIRMED=yes to actually delete (default is dry-run listing)$(NC)"
+	@echo ""
 
 # -----------------------------------------------------------------------------
 # Sandbox-side stack: migration S3 bucket
