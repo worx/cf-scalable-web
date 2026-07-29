@@ -161,7 +161,10 @@ confirm_or_exit "About to REPLACE $TARGET_DIR (Drupal codebase) with the S3 tarb
     Sandbox-specific files WILL BE PRESERVED across the swap:
       $PRESERVE_FROM_BAK
     Rest of the tree becomes prod's (composer.json/lock, web/modules/, etc.).
-    Previous state preserved as $BAK_DIR
+    Sibling packages in the tarball (composer path-repository targets)
+    will land at \$(dirname $TARGET_DIR)/<sibling_name> — each with the
+    same atomic-swap treatment as $TARGET_DIR itself.
+    Previous state of each top-level dir preserved as <dir>.BAK.${STAMP}
     ($([ "$KEEP_BAK" = "yes" ] && echo "kept until manually deleted" || echo "auto-deleted on success"))."
 
 # ============================================================
