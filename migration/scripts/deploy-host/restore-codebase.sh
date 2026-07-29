@@ -124,9 +124,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for tool in tar aws stat find; do
+for tool in tar aws stat find jq; do
   command -v "$tool" >/dev/null 2>&1 \
-    || { log_error "Required tool '$tool' not found on PATH."; exit 1; }
+    || { log_error "Required tool '$tool' not found on PATH. Install: sudo apt install -y $tool"; exit 1; }
 done
 log_ok "All required tools available"
 
@@ -245,24 +245,35 @@ else
     DRUPAL_STAGING_PATH="$STAGING_DIR"
     SIBLING_STAGING_PATHS=""
   else
-    # New format: find the top-level dir(s) containing composer.json.
+    # New format: find the top-level dir whose composer.json declares
+    # `"type": "project"`. Every composer package (including sibling
+    # drupal-custom-module packages) has a composer.json, so mere
+    # presence isn't a distinguisher. The composer package type IS —
+    # only project-level composer.json uses "project"; module packages
+    # use "drupal-module" / "drupal-custom-module" / etc.
     DRUPAL_CANDIDATES=""
     for d in $TOP_LEVEL_DIRS; do
-      if [ -f "$STAGING_DIR/$d/composer.json" ]; then
+      CJ="$STAGING_DIR/$d/composer.json"
+      [ -f "$CJ" ] || continue
+      TYPE=$(jq -r '.type // ""' "$CJ" 2>/dev/null || echo "")
+      if [ "$TYPE" = "project" ]; then
         DRUPAL_CANDIDATES="$DRUPAL_CANDIDATES $d"
       fi
     done
     DRUPAL_CANDIDATES="${DRUPAL_CANDIDATES# }"
     N=$(echo $DRUPAL_CANDIDATES | wc -w)
     if [ "$N" = "0" ]; then
-      log_error "No top-level dir in the tarball contains composer.json."
+      log_error "No top-level dir in the tarball has composer.json type=project."
       log_error "Cannot identify the Drupal root. Malformed tarball?"
+      log_error "Top-level dirs found: $TOP_LEVEL_DIRS"
       log_error "Staging kept at $STAGING_DIR for inspection."
+      log_error "  Cleanup:  sudo rm -rf $STAGING_DIR"
       exit 1
     elif [ "$N" -gt "1" ]; then
-      log_error "Multiple top-level dirs contain composer.json:$(echo " $DRUPAL_CANDIDATES")"
+      log_error "Multiple top-level dirs declare composer.json type=project:$(echo " $DRUPAL_CANDIDATES")"
       log_error "Ambiguous — cannot pick a single Drupal root."
       log_error "Staging kept at $STAGING_DIR for inspection."
+      log_error "  Cleanup:  sudo rm -rf $STAGING_DIR"
       exit 1
     fi
     DRUPAL_STAGING_NAME=$(echo $DRUPAL_CANDIDATES | tr -d ' ')
