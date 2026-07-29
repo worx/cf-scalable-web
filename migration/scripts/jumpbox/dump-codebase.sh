@@ -217,13 +217,43 @@ if [ "$SIBLING_MODULES" = "none" ]; then
   SIBLING_MODULES=""
 elif [ -z "$SIBLING_MODULES" ]; then
   log_info "Auto-discovering composer path-repositories in $DRUPAL_ROOT/composer.json"
-  DISCOVERED=$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST" \
-    "sudo jq -r '.repositories[]? | select(.type == \"path\") | .url' \
-      '$DRUPAL_ROOT/composer.json' 2>/dev/null || true")
-  if [ -z "$DISCOVERED" ]; then
-    log_warn "No path-type repositories found in composer.json (or jq/composer.json missing)."
-    log_warn "Falling back to legacy behavior (Drupal root only)."
+  # Capture stderr separately so we can distinguish three failure modes:
+  #   1. jq/composer.json missing on the source host → ssh exits non-zero,
+  #      stderr has "jq: command not found" or similar
+  #   2. jq ran fine but there are no path-type repos → exit 0, empty stdout
+  #   3. Real error mid-jq (malformed json etc.) → non-zero exit, stderr has details
+  # Prior version squashed stderr with `2>/dev/null` — lost the diagnostic
+  # entirely and made #1 indistinguishable from #2. Discovered 2026-07-29
+  # when a jq-not-installed run silently fell back.
+  DISCOVERY_STDERR=$(mktemp)
+  if DISCOVERED=$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SOURCE_USER@$SOURCE_HOST" \
+      "sudo jq -r '.repositories[]? | select(.type == \"path\") | .url' \
+        '$DRUPAL_ROOT/composer.json'" 2>"$DISCOVERY_STDERR"); then
+    DISCOVERY_OK=yes
   else
+    DISCOVERY_OK=no
+    DISCOVERY_EXIT=$?
+  fi
+
+  if [ "$DISCOVERY_OK" = "no" ]; then
+    log_warn "Auto-discovery failed on $SOURCE_HOST (exit=${DISCOVERY_EXIT:-?})."
+    if [ -s "$DISCOVERY_STDERR" ]; then
+      log_warn "  Remote stderr:"
+      while IFS= read -r line; do log_warn "    $line"; done < "$DISCOVERY_STDERR"
+    fi
+    log_warn "  Common cause: jq is not installed on $SOURCE_HOST."
+    log_warn "  Fix:  ssh $SOURCE_USER@$SOURCE_HOST sudo apt install -y jq"
+    log_warn "  Or:   set SIBLING_MODULES=\"foo bar\" (explicit list) or"
+    log_warn "        SIBLING_MODULES=none (skip siblings entirely)."
+    log_warn "Falling back to legacy behavior (Drupal root only)."
+    rm -f "$DISCOVERY_STDERR"
+    DISCOVERED=""
+  elif [ -z "$DISCOVERED" ]; then
+    log_warn "No path-type repositories found in composer.json."
+    log_warn "Proceeding with Drupal root only."
+    rm -f "$DISCOVERY_STDERR"
+  else
+    rm -f "$DISCOVERY_STDERR"
     # Filter: each url must be a bare-sibling reference (../something).
     # Warn on anything else so we don't silently drop unusual layouts.
     for url in $DISCOVERED; do
