@@ -70,6 +70,7 @@ NC     := \033[0m
         restore-files restore-private restore-codebase \
         dispatch-restore-files dispatch-restore-private dispatch-restore-codebase migrate-full-all \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
+        clean-migration-baks \
         .preflight
 
 # -----------------------------------------------------------------------------
@@ -721,6 +722,15 @@ dispatch-restore-codebase:  ## Fire restore-codebase on deploy-host via SSM (wal
 	@# Unusual — usually sandbox runs newer or diverged code from prod.
 	@# Reach for this only when full prod-parity in the code path matters.
 	@./scripts/_ssm-run-deploy-host.sh restore-codebase
+
+clean-migration-baks:  ## List (or with CONFIRMED=yes, delete) /var/www/*.BAK.* + *.NEW.* + *.RESTORE-STAGING.* on deploy-host FSx  [FROM: Mac|deploy-host]
+	@# Universal entry point — the dispatcher auto-routes:
+	@#   Mac (Darwin)          → SSMs to deploy-host, runs worker there
+	@#   Deploy-host as ubuntu → sudo bash worker directly
+	@#   Deploy-host as root   → bash worker directly (no sudo)
+	@# Dispatcher derives repo root from its own path, so this works
+	@# whether make was invoked from repo root or from migration/.
+	@../scripts/dispatch-clean-migration-baks.sh
 
 migrate-db-all:  ## Full DB migration walk-away safe: preflight → db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
 	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit

@@ -2727,9 +2727,6 @@ verify-drupal-installed:  ## Preflight for migration: SSM to deploy-host, verify
 refresh-deploy-host-scripts:  ## Re-install /usr/local/sbin/{use-env,refresh-env-config} + sudoers on deploy-host after a git pull (no full bootstrap)
 	@scripts/refresh-deploy-host-scripts.sh
 
-clean-migration-baks:  ## List (or with CONFIRMED=yes, delete) /var/www/*.BAK.* + *.NEW.* + *.RESTORE-STAGING.* on deploy-host FSx
-	@scripts/dispatch-clean-migration-baks.sh
-
 install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
 	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
 	@# environment and turns it into a working, publicly-reachable, smoke-

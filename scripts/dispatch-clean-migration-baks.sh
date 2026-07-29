@@ -22,7 +22,13 @@
 set -euo pipefail
 
 CONFIRMED="${CONFIRMED:-}"
-WORKER_REL="migration/scripts/deploy-host/clean-migration-baks.sh"
+# Repo root derived from this script's own location so the dispatcher
+# works regardless of the caller's cwd. `make clean-migration-baks`
+# can be invoked from repo root or from migration/ (whose Makefile
+# owns the target); both call this dispatcher.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKER_ABS_LOCAL="$REPO_ROOT/migration/scripts/deploy-host/clean-migration-baks.sh"
 
 # ---------------------------------------------------------------------
 # Detect the environment we're running in
@@ -111,22 +117,18 @@ fi
 # Case 2/3: Linux deploy-host — run the worker directly
 # ---------------------------------------------------------------------
 if is_deploy_host; then
-  # Worker path relative to the repo root. The Makefile is invoked from
-  # the repo root, so a plain relative path works.
-  WORKER_ABS="$WORKER_REL"
-  [ -f "$WORKER_ABS" ] || WORKER_ABS="./$WORKER_REL"
-  if [ ! -f "$WORKER_ABS" ]; then
-    echo "ERROR: worker script not found at $WORKER_REL" >&2
-    echo "  cwd: $(pwd)" >&2
+  if [ ! -f "$WORKER_ABS_LOCAL" ]; then
+    echo "ERROR: worker script not found at $WORKER_ABS_LOCAL" >&2
+    echo "  (derived from dispatcher location $SCRIPT_DIR)" >&2
     exit 1
   fi
 
   if [ "$(id -u)" -eq 0 ]; then
     # Already root — no sudo needed.
-    exec bash "$WORKER_ABS" CONFIRMED="$CONFIRMED"
+    exec bash "$WORKER_ABS_LOCAL" CONFIRMED="$CONFIRMED"
   else
     # Not root — need sudo. Pass CONFIRMED via env preservation.
-    exec sudo CONFIRMED="$CONFIRMED" bash "$WORKER_ABS"
+    exec sudo CONFIRMED="$CONFIRMED" bash "$WORKER_ABS_LOCAL"
   fi
 fi
 
