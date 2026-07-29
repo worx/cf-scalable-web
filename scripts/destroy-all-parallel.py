@@ -37,44 +37,57 @@ os.chdir(PROJECT_ROOT)
 # ============================================================
 # Track definitions — declarative reverse-dependency graph
 # ============================================================
+#
+# NOT included in TRACKS by design:
+#   - cf-app-drupal (Secrets Manager + SSM params, per-env identity).
+#     Intentionally survives destroy-all so admin password / DB password
+#     stay stable across cost-cycling and destroy → redeploy loops.
+#     Nuclear option: `make destroy-app-drupal` (explicit, one-off).
+#     See cf-app-drupal.yaml header block for full rationale.
+#   - cf-deploy-host / cf-deploy-host-backups (operator-owned lifecycle).
+#     Deploy-host is a persistent operator instance; its backups bucket
+#     retains history across compute rebuilds. Wipe with the dedicated
+#     targets: `make destroy-deploy-host` / `make destroy-deploy-host-backups`.
+#   - cf-migration-* stacks (prod-account resources; different lifecycle,
+#     managed via migration/Makefile).
 
 TRACKS = {
     # Tier 1 — start at T=0 (no CFN imports gate these)
     "cnx": {"deps": [], "label": "cnx", "name": "nginx ASG + instances",
-            "cmd": "make destroy-compute-nginx ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-compute-nginx ENV={env} CONFIRMED=yes"},
     "cph": {"deps": [], "label": "cph", "name": "PHP ASGs (74 + 83) + instances",
-            "cmd": "make destroy-compute-php ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-compute-php ENV={env} CONFIRMED=yes"},
     "ib":  {"deps": [], "label": " ib", "name": "image-builder + its AMIs",
-            "cmd": "make destroy-image-builder ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-image-builder ENV={env} CONFIRMED=yes"},
     "umn": {"deps": [], "label": "umn", "name": "unmount FSx on deploy-host",
-            "cmd": "make unmount-deploy-host-fsx || true"},
+            "cmd": "make unmount-deploy-host-fsx"},
     # cch + db have NO CFN imports from compute — independent stacks. Hoist to T=0.
     "cch": {"deps": [], "label": "cch", "name": "cache (ElastiCache Valkey)",
-            "cmd": "make destroy-cache ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-cache ENV={env} CONFIRMED=yes"},
     "db":  {"deps": [], "label": " db", "name": "database (RDS PostgreSQL)",
-            "cmd": "make destroy-database ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-database ENV={env} CONFIRMED=yes"},
 
     # Tier 2 — load balancers (after their ASG consumers are gone)
     "alb": {"deps": ["cnx"], "label": "alb", "name": "compute ALB + target groups",
-            "cmd": "make destroy-compute-alb ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-compute-alb ENV={env} CONFIRMED=yes"},
     "nlb": {"deps": ["cph"], "label": "nlb", "name": "compute NLB + target groups",
-            "cmd": "make destroy-compute-nlb ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-compute-nlb ENV={env} CONFIRMED=yes"},
 
     # Tier 3 — storage split: FSx needs compute gone (no mounters) + umn done;
     # S3 needs image-builder gone (it consumes the image-builder bucket).
     "fxs": {"deps": ["cnx", "cph", "umn"], "label": "fxs", "name": "storage FSx OpenZFS",
-            "cmd": "make destroy-storage-fsx ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-storage-fsx ENV={env} CONFIRMED=yes"},
     "s3":  {"deps": ["ib"], "label": " s3", "name": "storage S3 buckets",
-            "cmd": "make destroy-storage-s3 ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-storage-s3 ENV={env} CONFIRMED=yes"},
     "iam": {"deps": ["cnx", "cph", "ib"], "label": "iam", "name": "IAM roles + instance profiles",
-            "cmd": "make destroy-iam ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-iam ENV={env} CONFIRMED=yes"},
     "per": {"deps": ["cnx", "cph"], "label": "per", "name": "peering (deploy-host <-> workload)",
-            "cmd": "make destroy-peering ENV={env} || true"},
+            "cmd": "make destroy-peering ENV={env}"},
 
     # Tier 4 — VPC must be ABSOLUTE last. Any lingering ENI hangs the delete.
     "vpc": {"deps": ["cnx", "cph", "alb", "nlb", "ib", "cch", "db", "fxs", "s3", "iam", "per"],
             "label": "vpc", "name": "VPC + subnets + security groups",
-            "cmd": "make destroy-vpc ENV={env} CONFIRMED=yes || true"},
+            "cmd": "make destroy-vpc ENV={env} CONFIRMED=yes"},
 }
 
 DISPLAY_ORDER = ["cnx", "cph", "alb", "nlb", "umn", "ib", "s3", "cch", "db", "fxs", "iam", "per", "vpc"]
@@ -221,8 +234,14 @@ def check_completed(track: TrackState) -> bool:
         return False
     track.ended_at = time.time()
     track.exit_code = rc
-    # Note: every cmd has `|| true` appended, so rc=0 even on stack-not-found.
-    # Only non-zero exit here indicates a genuine make-target failure.
+    # The underlying `make destroy-*` targets ARE idempotent — a stack that
+    # doesn't exist returns success (via cf-wait's DELETED-case handling).
+    # A non-zero exit here indicates a REAL CloudFormation failure
+    # (DELETE_FAILED, missing IAM permissions, dependent-resource still
+    # attached, etc.) that the operator needs to see and investigate.
+    # Previously the cmds included `|| true` which swallowed these failures
+    # entirely and reported ✓ — that bug was fixed 2026-07-29 after a
+    # DELETE_FAILED on storage-s3 (versioned bucket) went unreported.
     track.state = "done" if rc == 0 else "failed"
     track.log_handle.close()
     return True
@@ -289,16 +308,16 @@ def main() -> int:
 
     start_time = time.time()
     last_refresh = 0.0
-    abort_in_effect = False
 
     interrupt_count = 0
 
     def sig_handler(_sig, _frame):
-        nonlocal interrupt_count, abort_in_effect
+        nonlocal interrupt_count
         interrupt_count += 1
         if interrupt_count == 1:
+            # First Ctrl-C: abort pending tracks (they never start).
+            # Running tracks continue — nothing kills them mid-flight.
             mark_pending_as_aborted(tracks)
-            abort_in_effect = True
         else:
             print()
             print("⚠ Second interrupt — exiting immediately.", file=sys.stderr)
@@ -315,9 +334,13 @@ def main() -> int:
         for t in tracks.values():
             if check_completed(t):
                 state_changed = True
-                if t.state == "failed" and not abort_in_effect:
-                    mark_pending_as_aborted(tracks)
-                    abort_in_effect = True
+                # A failed track no longer triggers a blanket abort of ALL
+                # pending tracks. That was too aggressive for a destroy
+                # operation — one bucket failing shouldn't stop IAM, VPC,
+                # etc. from tearing down independently. Downstream tracks
+                # (those that DEPEND on the failed one) still abort via
+                # `any_dep_failed` below. Blanket-abort remains for user
+                # Ctrl-C only (see sig_handler).
 
         for t in tracks.values():
             if t.state == "pending":

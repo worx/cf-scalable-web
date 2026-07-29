@@ -49,6 +49,7 @@ Field notes:
 | `php74-php83-storage-divergence.md` | project | Why php74=EBS legacy and php83=S3 forward-going — intentional architectural split |
 | `research-document-bundle-gaps.md` | project | 4 of 12 `zi_research_document` bundles have no PHP subclass — questions for Zac |
 | `pdf-generation-lambda-candidates.md` | project | 2 routes do live PDF generation on PHP-FPM and 504 — move to Lambda, don't grow the boxes |
+| `phase-d-backlog.md` | project | Rolling list of follow-up work items — destroy-all polish, CFN hardening, script tidy-up, etc. |
 
 ## When to Add Memory
 

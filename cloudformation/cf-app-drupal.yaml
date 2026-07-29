@@ -32,6 +32,20 @@
 #     environment. Existing Drupal install will fail at next boot if
 #     secrets are gone but FSx files / RDS tables remain.
 #
+# INTENTIONALLY SURVIVES `make destroy-all` BY DESIGN:
+#   `destroy-all-parallel.py`'s TRACKS list does NOT include this stack.
+#   Rationale: the secrets and SSM parameters here are per-environment
+#   identity. They should remain stable across cost-cycling (pause-compute
+#   / resume-compute) and even full destroy → redeploy cycles. Blowing
+#   them away every destroy-all would force operators to re-look-up the
+#   admin password, and would generate a NEW DB password that any
+#   external references (Drush aliases, snapshot restores, etc.) wouldn't
+#   know about.
+#   To EXPLICITLY delete this stack (nuclear option): `make destroy-app-drupal`
+#   Related survivor: hash_salt secret (worxco/${env}/drupal/hash-salt)
+#   which is owned by install-drupal.sh rather than by any CFN stack —
+#   see docs/memory/salt-persistence-design.md.
+#
 # Migration from auto-created secrets (existing install-drupal-managed env):
 #   - Option A (clean): make remove-drupal ENV=<env>, then delete secrets
 #     manually via aws CLI, then deploy this stack, then make install-drupal
