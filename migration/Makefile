@@ -177,13 +177,13 @@ help:  ## Show this help
 	@echo "  make dispatch-restore-private Kick restore-private on deploy-host, poll from Mac"
 	@echo "  make dispatch-restore-codebase Kick restore-codebase on deploy-host, poll from Mac (unusual — sandbox usually runs diverged code)"
 	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox$(NC)"
-	@echo "  make migrate-db-all          FULL DB migration: preflight → db-backup → restore-mysql → pgloader → cache-clear"
+	@echo "  make migrate-db-all          FULL DB migration: refresh-env → preflight → db-backup → restore-mysql → pgloader → cache-clear"
 	@echo "  make migrate-full-all        FULL migration: migrate-db-all + sync-s3-media + files + private + codebase + cache-clear"
-	@echo "                                 $(CYAN)FROM: Mac|deploy-host   PROFILE: ZI-Sandbox + ZoningInfoAdmin$(NC)"
+	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: ZI-Sandbox + ZoningInfoAdmin$(NC)"
 	@echo "                                 $(CYAN)Prereq: `make dump-all` must have run recently (populates the S3 dumps this restores from)$(NC)"
 	@echo "                                 $(CYAN)Env: AUTO=yes (auto-install-drupal on preflight fail — for overnight runs)$(NC)"
-	@echo "                                 $(CYAN)     SKIP_BACKUP=yes (skip Phase 0) SKIP_PREFLIGHT=yes POLL_TIMEOUT=<s>$(NC)"
-	@echo "                                 $(CYAN)     SKIP_CODEBASE=yes (omit Phase 7 — sandbox keeps its own diverged code)$(NC)"
+	@echo "                                 $(CYAN)     SKIP_REFRESH_ENV=yes (skip Phase -2) SKIP_PREFLIGHT=yes (skip Phase -1)$(NC)"
+	@echo "                                 $(CYAN)     SKIP_BACKUP=yes (skip Phase 0) SKIP_CODEBASE=yes (skip Phase 7) POLL_TIMEOUT=<s>$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Cleanup / maintenance:$(NC)"
 	@echo "  make clean-migration-baks    List /var/www/*.{BAK,NEW,RESTORE-STAGING}.* on FSx (safety backups from restore-* ops)"
@@ -739,25 +739,58 @@ clean-migration-baks:  ## List (or with CONFIRMED=yes, delete) /var/www/*.BAK.* 
 	@# whether make was invoked from repo root or from migration/.
 	@../scripts/dispatch-clean-migration-baks.sh
 
-migrate-db-all:  ## Full DB migration walk-away safe: preflight → db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+migrate-db-all:  ## Full DB migration walk-away safe: refresh-env-config → preflight → db-backup → dispatch-restore-mysql → dispatch-run-pgloader → clear-drupal-cache  [FROM: deploy-host, PROFILE: ZI-Sandbox]
 	@# Defaults: SKIP_BACKUP=no (safety net taken), KEEP_BACKUP=yes (implicit
 	@# — no auto-cleanup; operator drops it manually when satisfied).
 	@# Environment:
-	@#   SKIP_BACKUP=yes    Skip Phase 0. Use when the sandbox DB is already
-	@#                       empty/scratch and there's no state worth preserving.
-	@#   SKIP_PREFLIGHT=yes Skip Phase -1. Only use if you KNOW Drupal is
-	@#                       installed but the check has a false-negative bug.
-	@#                       Default: preflight fails fast if Drupal isn't
-	@#                       structurally present on sandbox.
-	@#   AUTO=yes           If Phase -1 fails (Drupal not installed), auto-
-	@#                       invoke install-drupal ENV=sandbox instead of
-	@#                       bailing. Intended for overnight/fire-and-forget
-	@#                       runs where "come back to a failed job because
-	@#                       install-drupal wasn't run" is worse than the
-	@#                       ~10 min autonomy cost. Default is off: operator
-	@#                       is expected to run install-drupal explicitly.
-	@#   POLL_TIMEOUT       Override the per-dispatch poll timeout (default 2h).
+	@#   SKIP_REFRESH_ENV=yes Skip Phase -2. Only use if you know the env
+	@#                        file at /etc/worxco/envs/$(ENV) is already
+	@#                        current for the deployed CFN stacks.
+	@#   SKIP_BACKUP=yes      Skip Phase 0. Use when the sandbox DB is already
+	@#                        empty/scratch and there's no state worth preserving.
+	@#   SKIP_PREFLIGHT=yes   Skip Phase -1. Only use if you KNOW Drupal is
+	@#                        installed but the check has a false-negative bug.
+	@#                        Default: preflight fails fast if Drupal isn't
+	@#                        structurally present on sandbox.
+	@#   AUTO=yes             If Phase -1 fails (Drupal not installed), auto-
+	@#                        invoke install-drupal ENV=sandbox instead of
+	@#                        bailing. Intended for overnight/fire-and-forget
+	@#                        runs where "come back to a failed job because
+	@#                        install-drupal wasn't run" is worse than the
+	@#                        ~10 min autonomy cost. Default is off: operator
+	@#                        is expected to run install-drupal explicitly.
+	@#   POLL_TIMEOUT         Override the per-dispatch poll timeout (default 2h).
 	@#
+	@# Phase -2: refresh-env-config — regenerate /etc/worxco/envs/$(ENV)
+	@# from current SSM parameters. Required on a fresh sandbox (post
+	@# destroy-all → deploy-all) because CFN populates NEW SSM values
+	@# for RDS endpoint, media bucket, secrets, etc. The env file
+	@# on the deploy-host was written from PREVIOUS SSM state and
+	@# won't match. Symptom: run-pgloader Phase 2 fails with
+	@# "Env var 'DRUPAL_DB_HOST' not set after sourcing /etc/worxco/envs/...".
+	@# Caught 2026-07-30 during first fresh-sandbox migrate-full-all.
+	@#
+	@# TODO (Phase D): add a proper Mac-side dispatcher so this phase
+	@# works from anywhere. Today it requires being on the deploy-host.
+	@if [ "$(SKIP_REFRESH_ENV)" != "yes" ]; then \
+		echo ""; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		echo "$(YELLOW)  Phase -2: refresh env file from SSM$(NC)"; \
+		echo "$(YELLOW)============================================$(NC)"; \
+		if [ ! -f /etc/worxco/deploy-host-marker ]; then \
+			echo "$(RED)Phase -2 requires running on the deploy-host$(NC)"; \
+			echo "$(CYAN)Options:$(NC)"; \
+			echo "$(CYAN)  1) Run this target from the deploy-host: make ssm-deploy-host$(NC)"; \
+			echo "$(CYAN)  2) Manually run: (on deploy-host) sudo refresh-env-config $(ENV)$(NC)"; \
+			echo "$(CYAN)     then retry with: make migrate-db-all SKIP_REFRESH_ENV=yes$(NC)"; \
+			exit 1; \
+		fi; \
+		sudo refresh-env-config $(ENV) \
+			|| { echo "$(RED)refresh-env-config failed. Check SSM parameters exist for $(ENV).$(NC)"; exit 1; }; \
+		echo "$(GREEN)Env file refreshed: /etc/worxco/envs/$(ENV)$(NC)"; \
+	else \
+		echo "$(YELLOW)  Phase -2: SKIPPED (SKIP_REFRESH_ENV=yes)$(NC)"; \
+	fi
 	@# Phase -1: preflight — verify Drupal is installed on the target
 	@# env's deploy-host. Migration is a "swap contents" workflow; it
 	@# requires the structural foundation (codebase, settings.php, salt.txt,
