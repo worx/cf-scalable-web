@@ -66,6 +66,21 @@
 
 set -euo pipefail
 
+# ============================================================
+# Environment robustness for non-interactive invocation
+# ============================================================
+# pgloader (SBCL/lparallel) requires HOME to be set — its PostgreSQL
+# driver's initialization tries to resolve ~/.pgpass, and when HOME
+# is unset it aborts with:
+#     Failed to connect to pgsql at "..." (port 5432) as user "...":
+#     failed to resolve home directory for Unix uid=0
+# Then drops into the SBCL interactive debugger, which hangs an
+# SSM send-command invocation until the poll timeout fires. Caught
+# 2026-07-30 during migrate-full-all run: SSM ran ~1h and TimedOut
+# because the pgloader parent thread was stuck at a debugger prompt
+# nobody could type into. install-drupal.sh has the same guard.
+export HOME="${HOME:-/root}"
+
 # Source the shared helper library (colors, logging, confirm, dry-run, ...)
 # _common.sh lives one directory up from this script (migration/scripts/).
 source "$(dirname "$(readlink -f "$0")")/../_common.sh"
