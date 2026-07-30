@@ -38,6 +38,21 @@ export HOME="${HOME:-/root}"
 export COMPOSER_ALLOW_SUPERUSER=1
 
 # ============================================================
+# Capture our own script directory BEFORE any cd. The script later
+# `cd`s into $DRUPAL_ROOT for drush operations and never cds back;
+# by the time we invoke sibling scripts (write-install-marker.sh)
+# near the end, cwd is /var/www/drupal/ and `dirname "$(readlink -f "$0")"`
+# would resolve to nothing (since "$0" is the RELATIVE path given at
+# invocation, and $DRUPAL_ROOT doesn't contain a scripts/deploy-host/
+# subdirectory). Result: sibling invocation collapses to
+# `./write-install-marker.sh`, which doesn't exist in the cwd → 127.
+# Caught 2026-07-30 during first migrate-full-all AUTO=yes run.
+# BASH_SOURCE[0] is the script's path even in sourced/-c contexts,
+# and we resolve it here (top of script) while cwd is still whatever
+# the caller intended.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ============================================================
 # Args + config
 # ============================================================
 ENV="${1:-}"
@@ -713,8 +728,10 @@ vendor/bin/drush status \
 step "Drop install marker"
 # ============================================================
 # Delegate to the shared marker-writer so `make create-installed` and
-# this script produce identical content.
-"$(dirname "$(readlink -f "$0")")/write-install-marker.sh" "$ENV"
+# this script produce identical content. Uses SCRIPT_DIR captured at
+# the top of this file (before any cd) — see the comment there for
+# the bug this pattern avoids.
+"$SCRIPT_DIR/write-install-marker.sh" "$ENV"
 
 log ""
 log "============================================"
