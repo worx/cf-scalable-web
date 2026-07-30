@@ -256,6 +256,11 @@ log_info "         --command-id $CMD_ID --instance-id $INSTANCE_ID --region $AWS
 
 start_time=$SECONDS
 STATUS="Unknown"
+# Poll-tick counter — every 5th tick prints '|' instead of '.' so the
+# operator can eyeball elapsed poll-time at a glance (5 ticks × 30s =
+# 2.5 min per '|'). Increments only on real polls (not on Success /
+# Failed exits), so the tick count always == polls actually made.
+DOT_COUNT=0
 while true; do
   elapsed=$(( SECONDS - start_time ))
   if [ "$elapsed" -gt "$POLL_TIMEOUT" ]; then
@@ -271,7 +276,12 @@ while true; do
 
   case "$STATUS" in
     InProgress|Pending|Delayed)
-      printf "."
+      DOT_COUNT=$((DOT_COUNT + 1))
+      if [ $((DOT_COUNT % 5)) -eq 0 ]; then
+        printf "|"
+      else
+        printf "."
+      fi
       sleep "$POLL_INTERVAL"
       ;;
     Success)
