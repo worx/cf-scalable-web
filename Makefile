@@ -1038,7 +1038,13 @@ install-drupal:  ## Install Drupal 11 against ENV's RDS+FSx (~3-5 min)
 		read -r confirm; \
 		[ "$$confirm" = "production" ] || { echo "Cancelled"; exit 1; }; \
 	fi
-	@bash scripts/deploy-host/install-drupal.sh $(ENV)
+	@# Auto-sudo so the target works whether the operator invoked
+	@# `make install-drupal` directly (typically as ubuntu) or via a
+	@# chain like `make migrate-full-all AUTO=yes` (also ubuntu). The
+	@# script itself does chown/chmod across user boundaries on FSx
+	@# and needs real root. Passwordless sudo is standard on this AMI.
+	@# `-E` preserves the caller's env (ENV, AWS_*, PATH, HOME).
+	@sudo -E bash scripts/deploy-host/install-drupal.sh $(ENV)
 
 remove-drupal:  ## Drop Drupal tables and wipe FSx files for ENV (preserves Secrets Manager)
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
