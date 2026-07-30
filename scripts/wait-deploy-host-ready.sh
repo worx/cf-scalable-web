@@ -54,7 +54,8 @@ for i in $(seq 1 30); do
     echo "ERROR: SSM agent did not come online within 5 min" >&2
     exit 1
   fi
-  printf "."
+  # Every 5th tick print '|' for eyeball timing (5 ticks × 10s = 50s per '|').
+  if [ $((i % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
   sleep 10
 done
 

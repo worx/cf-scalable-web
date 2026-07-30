@@ -53,6 +53,7 @@ echo ""
 echo "CommandId: $CMD_ID"
 
 echo -n "Waiting for completion"
+DOT_COUNT=0
 for _ in $(seq 1 20); do
   PENDING=$(aws ssm list-command-invocations --command-id "$CMD_ID" \
     --query "length(CommandInvocations[?Status=='Pending' || Status=='InProgress'])" \
@@ -61,7 +62,8 @@ for _ in $(seq 1 20); do
     echo " done."
     break
   fi
-  echo -n "."
+  DOT_COUNT=$((DOT_COUNT + 1))
+  if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
   sleep 3
 done
 

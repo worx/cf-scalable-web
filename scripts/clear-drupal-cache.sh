@@ -95,11 +95,16 @@ CMD_ID=$(aws ssm send-command \
 echo "CommandId: $CMD_ID"
 
 echo -n "Waiting for completion"
+DOT_COUNT=0
 for _ in $(seq 1 30); do
   STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" \
     --query "CommandInvocations[0].Status" --output text 2>/dev/null || echo "Pending")
   case "$STATUS" in
-    Pending|InProgress) echo -n "."; sleep 3 ;;
+    Pending|InProgress)
+      DOT_COUNT=$((DOT_COUNT + 1))
+      if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
+      sleep 3
+      ;;
     *) echo " $STATUS."; break ;;
   esac
 done

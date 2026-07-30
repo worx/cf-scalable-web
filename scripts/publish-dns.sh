@@ -156,6 +156,7 @@ fi
 
 # Verify against a public resolver (bypasses local cache). Poll for up to 60s.
 echo -n "  Verifying $SITE_NAME resolves (via 8.8.8.8)"
+DOT_COUNT=0
 for _ in $(seq 1 12); do
   RESOLVED=$(dig +short @8.8.8.8 "$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' ')
   if [ -n "$RESOLVED" ]; then
@@ -165,7 +166,8 @@ for _ in $(seq 1 12); do
     echo "  End-to-end test: make smoke-test-public ENV=$ENV"
     exit 0
   fi
-  echo -n "."
+  DOT_COUNT=$((DOT_COUNT + 1))
+  if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
   sleep 5
 done
 echo ""

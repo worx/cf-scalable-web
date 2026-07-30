@@ -2864,10 +2864,12 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS â†’ ALB â†
 	echo "  URL:  https://$$SITE_NAME/"; \
 	echo -n "  DNS:  resolving"; \
 	RESOLVED=""; \
+	DOT_COUNT=0; \
 	for _ in $$(seq 1 12); do \
 		RESOLVED=$$(dig +short "$$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' '); \
 		[ -n "$$RESOLVED" ] && break; \
-		echo -n "."; \
+		DOT_COUNT=$$((DOT_COUNT + 1)); \
+		if [ $$((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi; \
 		sleep 5; \
 	done; \
 	echo ""; \
