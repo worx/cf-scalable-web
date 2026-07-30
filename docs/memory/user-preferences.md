@@ -43,7 +43,12 @@ recoverable anyway. Stated explicitly 2026-05-20.
   ```
   Then `git push origin main`.
 - Still: stage specific files (`git add path/to/file`), never `git add -A`.
-- Still: include prompt logs when batching housekeeping commits.
+- **PROMPT_LOGS go IN the same commit as the fixes/changes they document,
+  not a separate follow-up commit.** Kurt clarified 2026-07-29 — separate
+  PROMPT_LOGS commits are extra noise long-term. They will ALWAYS be
+  there each cycle, they're directly related to the changes in that same
+  cycle, so one commit per cycle (fix files + new/modified PROMPT_LOGS)
+  keeps history clean and greppable.
 - Still: GPL-2.0-or-later headers on all source files.
 - Still: never `--no-verify`, never force-push to main, never amend
   already-pushed commits.
