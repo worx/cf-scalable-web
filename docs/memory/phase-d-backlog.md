@@ -26,29 +26,31 @@ turn "works if you know the manual steps" into "just works."
 
 ## Route 53 / DNS
 
-- **Publish DNS EARLY in the deploy chain, not late.** Current
-  flow: ALB comes up mid-compute, DNS gets published only after
-  install-drupal-full (or manually), migration takes 1-2h more,
-  THEN operator wants to test the URL — but that's when the
-  5-min DNS negative-cache window BEGINS (per the SOA MIN we
-  just lowered). Insight from Kurt 2026-07-31: publish-dns can
-  run the SECOND the ALB is up — nothing about the DNS record
-  depends on Drupal being installed. If we do that, by the time
-  install + migrate finish (1-2h later), the 5-min negative-cache
-  is long past and the URL just works.
-  Fix shape: add publish-dns as an early phase in either
-  deploy-all's compute-alb track, or in install-drupal-full,
-  BEFORE install-drupal-remote. Also verify SOA MIN is 300 (not
-  the Route 53 default 86400) as an idempotent preflight check —
-  if it's 86400, UPSERT to 300 with a warning so operators know
-  the zone got recreated.
-- **SOA MIN change we made 2026-07-31.** Lowered SOA MINIMUM
-  (negative-cache TTL) on `envs.zoning-info.com` from Route 53's
-  default 86400 (24h) to 300 (5 min). Manual change via
-  route53 change-resource-record-sets (no CFN template owns the
-  SOA today). Follow-up: put the SOA record under CFN control
-  so it can't drift back to defaults if someone recreates the
-  zone. Related: [[macos-dns-negative-cache]].
+- **DONE 2026-07-31 (commit b7c3169) — Publish DNS EARLY in the
+  deploy chain.** New `dns` track in `scripts/deploy-all-parallel.py`
+  runs `make publish-dns ENV={env}` the moment the `alb` track
+  completes (typically ~10-15 min into deploy-all, well before
+  cnx/cph/install/migrate). SOA MIN preflight lives in
+  `scripts/publish-dns-soa-preflight.sh`: idempotent, UPSERTs SOA
+  MIN to 300s if higher, SKIPS entirely for ENV=production per
+  Kurt's explicit policy. Result: by the time install-drupal +
+  migrate-full-all finish (1-2 hours later), the 5-min
+  negative-cache has long expired and the operator's URL test
+  resolves immediately.
+
+- **DONE 2026-07-31 (manual, then automated by b7c3169) — SOA MIN
+  lowered on envs.zoning-info.com.** Was Route 53's default 86400
+  (24h), now 300 (5 min). The manual UPSERT that unblocked us
+  tonight is now backstopped by the preflight above — even if the
+  zone is ever recreated and the SOA drifts back to defaults, the
+  next `make publish-dns` (or deploy-all's `dns` track) auto-corrects.
+
+- **Still on backlog: put the SOA record under CFN control.** The
+  preflight makes the current setup self-healing, but drift is still
+  possible if someone hand-edits the SOA. A CFN-managed SOA would
+  give us a "diff against source of truth" workflow. Not urgent
+  since the preflight covers the practical case. Related:
+  [[macos-dns-negative-cache]].
 
 ## cf-storage-s3.yaml
 
