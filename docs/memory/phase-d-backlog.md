@@ -24,6 +24,32 @@ turn "works if you know the manual steps" into "just works."
   bucket had versioned objects, storage-s3 stack ended DELETE_FAILED,
   orchestrator reported ✓.
 
+## Route 53 / DNS
+
+- **Publish DNS EARLY in the deploy chain, not late.** Current
+  flow: ALB comes up mid-compute, DNS gets published only after
+  install-drupal-full (or manually), migration takes 1-2h more,
+  THEN operator wants to test the URL — but that's when the
+  5-min DNS negative-cache window BEGINS (per the SOA MIN we
+  just lowered). Insight from Kurt 2026-07-31: publish-dns can
+  run the SECOND the ALB is up — nothing about the DNS record
+  depends on Drupal being installed. If we do that, by the time
+  install + migrate finish (1-2h later), the 5-min negative-cache
+  is long past and the URL just works.
+  Fix shape: add publish-dns as an early phase in either
+  deploy-all's compute-alb track, or in install-drupal-full,
+  BEFORE install-drupal-remote. Also verify SOA MIN is 300 (not
+  the Route 53 default 86400) as an idempotent preflight check —
+  if it's 86400, UPSERT to 300 with a warning so operators know
+  the zone got recreated.
+- **SOA MIN change we made 2026-07-31.** Lowered SOA MINIMUM
+  (negative-cache TTL) on `envs.zoning-info.com` from Route 53's
+  default 86400 (24h) to 300 (5 min). Manual change via
+  route53 change-resource-record-sets (no CFN template owns the
+  SOA today). Follow-up: put the SOA record under CFN control
+  so it can't drift back to defaults if someone recreates the
+  zone. Related: [[macos-dns-negative-cache]].
+
 ## cf-storage-s3.yaml
 
 - **Lambda-backed purge-on-delete for versioned MediaBucket.**
