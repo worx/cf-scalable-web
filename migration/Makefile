@@ -189,7 +189,7 @@ help:  ## Show this help
 	@echo "  make migrate-db-all          FULL DB migration: refresh-env → preflight → db-backup → restore-mysql → pgloader → cache-clear"
 	@echo "  make migrate-full-all        FULL migration: migrate-db-all + sync-s3-media + files + private + codebase + cache-clear"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: ZI-Sandbox + ZoningInfoAdmin$(NC)"
-	@echo "                                 $(CYAN)Prereq: `make dump-all` must have run recently (populates the S3 dumps this restores from)$(NC)"
+	@echo "                                 $(CYAN)Prereq: 'make dump-all' must have run recently (populates the S3 dumps this restores from)$(NC)"
 	@echo "                                 $(CYAN)Env: AUTO=yes (auto-install-drupal on preflight fail — for overnight runs)$(NC)"
 	@echo "                                 $(CYAN)     SKIP_REFRESH_ENV=yes (skip Phase -2) SKIP_PREFLIGHT=yes (skip Phase -1)$(NC)"
 	@echo "                                 $(CYAN)     SKIP_BACKUP=yes (skip Phase 0) SKIP_CODEBASE=yes (skip Phase 7) POLL_TIMEOUT=<s>$(NC)"
