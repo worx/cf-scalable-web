@@ -2833,7 +2833,15 @@ unmount-deploy-host-fsx:  ## SSM-dispatch `use-env none` to deploy-host (umount 
 	@chmod +x ./scripts/unmount-deploy-host-fsx.sh
 	@./scripts/unmount-deploy-host-fsx.sh
 
-publish-dns:  ## UPSERT Route 53 ALIAS record from /$(ENV)/drupal/site-name to the env's ALB
+publish-dns:  ## UPSERT Route 53 ALIAS record from /$(ENV)/drupal/site-name to the env's ALB (+ SOA MIN preflight for non-prod)
+	@# Preflight: for non-production envs, ensure the parent zone's SOA
+	@# MINIMUM (negative-cache TTL) is 300s instead of Route 53's
+	@# 86400 (24h) default. Prevents multi-hour "URL doesn't resolve"
+	@# stalls after destroy-all → deploy-all cycles. Script no-ops if
+	@# ENV=production. See scripts/publish-dns-soa-preflight.sh for details.
+	@chmod +x ./scripts/publish-dns-soa-preflight.sh
+	@./scripts/publish-dns-soa-preflight.sh $(ENV) \
+		|| echo "$(YELLOW)SOA preflight had a hiccup — continuing with the alias UPSERT anyway$(NC)"
 	@chmod +x ./scripts/publish-dns.sh
 	@./scripts/publish-dns.sh $(ENV)
 

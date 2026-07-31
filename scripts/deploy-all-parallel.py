@@ -109,6 +109,17 @@ TRACKS = {
     "nlb": {"deps": ["vpc"], "label": "nlb", "name": "compute NLB + target groups",
             "cmd": "make deploy-compute-nlb ENV={env} VALIDATED=1"},
 
+    # Publish DNS the SECOND the ALB is up — well before install-drupal
+    # and migration finish (which is 1-2 hours later). This front-loads
+    # the SOA MINIMUM (5-min) negative-cache expiration window so that
+    # by the time the operator is ready to test, DNS resolves cleanly
+    # everywhere. Idea from Kurt 2026-07-31.
+    # publish-dns is idempotent: UPSERTs the alias to point at the
+    # freshly-deployed ALB, and includes a SOA MIN preflight for non-
+    # production envs (skips for production per policy).
+    "dns": {"deps": ["alb"], "label": "dns", "name": "Route 53 alias + SOA preflight",
+            "cmd": "make publish-dns ENV={env}"},
+
     # Compute ASGs — need their LB's target group + AMI in SSM + every other
     # infra piece (db endpoint, cache endpoint, FSx mountable + layout
     # initialized, IAM profile, app-drupal SSM params). nginx and PHP are
@@ -124,7 +135,7 @@ TRACKS = {
 # Track display order in the live status block (top-to-bottom)
 DISPLAY_ORDER = ["vpc", "iam", "app", "s3", "ib", "ami",
                  "fxs", "per", "db", "cch", "fsi",
-                 "alb", "nlb", "cnx", "cph"]
+                 "alb", "nlb", "dns", "cnx", "cph"]
 
 # Single-character state codes (per design discussion 2026-05-24)
 STATE_CHARS = {
