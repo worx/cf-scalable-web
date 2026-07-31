@@ -1027,7 +1027,23 @@ verify-app-drupal:  ## Show app-drupal stack outputs and the secrets/params it o
 # Drupal Install (cloud — RDS + FSx, deploy-host only)
 # -----------------------------------------------------------------------------
 
-install-drupal:  ## Install Drupal 11 against ENV's RDS+FSx (~3-5 min)
+install-drupal:  ## Install Drupal 11 + publish vhost + reload nginx → leaves a fully reachable Drupal (~3-5 min)
+	@# Contract: after this returns 0, Drupal is INSTALLED (drush
+	@# site:install done, settings.php written, salt/DB creds wired)
+	@# AND REACHABLE (nginx vhost published to FSx, nginx fleet
+	@# reloaded to pick it up). What this target does NOT do:
+	@# publish-dns (public URL routing) or smoke tests. Those are
+	@# install-drupal-full's territory, or handled independently by
+	@# the deploy-all-parallel `dns` track.
+	@#
+	@# Prior to 2026-07-31 this target stopped after the install
+	@# script — leaving Drupal on FSx but nginx not knowing about it,
+	@# so any URL hit returned "no vhost configured for this host".
+	@# `install-drupal-full` compensated with steps 2 (publish-vhost)
+	@# and 3 (reload-nginx). But when migrate-full-all AUTO=yes
+	@# triggered install-drupal (bare), the env came up broken.
+	@# Fixed by folding those two steps into install-drupal itself —
+	@# "installed" now correctly means "installed AND reachable."
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
 		echo "$(YELLOW)Run this on the deploy-host (or via SSM dispatch).$(NC)"; \
 		echo "$(CYAN)ssh deploy-host && cd ~/projects/cf-scalable-web && make install-drupal ENV=$(ENV)$(NC)"; \
@@ -1044,7 +1060,17 @@ install-drupal:  ## Install Drupal 11 against ENV's RDS+FSx (~3-5 min)
 	@# script itself does chown/chmod across user boundaries on FSx
 	@# and needs real root. Passwordless sudo is standard on this AMI.
 	@# `-E` preserves the caller's env (ENV, AWS_*, PATH, HOME).
+	@echo "$(CYAN)==== install-drupal step 1/3: install (drush site:install + settings) ====$(NC)"
 	@sudo -E bash scripts/deploy-host/install-drupal.sh $(ENV)
+	@echo ""
+	@echo "$(CYAN)==== install-drupal step 2/3: publish-drupal-vhost (write drupal.conf to FSx) ====$(NC)"
+	@$(MAKE) --no-print-directory publish-drupal-vhost ENV=$(ENV)
+	@echo ""
+	@echo "$(CYAN)==== install-drupal step 3/3: reload-nginx (nginx fleet picks up new vhost) ====$(NC)"
+	@$(MAKE) --no-print-directory reload-nginx ENV=$(ENV)
+	@echo ""
+	@echo "$(GREEN)✓ install-drupal complete: Drupal installed + vhost published + nginx reloaded$(NC)"
+	@echo "$(CYAN)Site should now respond via ALB. See install-drupal-full for DNS + smoke tests.$(NC)"
 
 remove-drupal:  ## Drop Drupal tables and wipe FSx files for ENV (preserves Secrets Manager)
 	@if [ ! -f /etc/worxco/deploy-host-marker ]; then \
@@ -2725,43 +2751,41 @@ verify-drupal-installed:  ## Preflight for migration: SSM to deploy-host, verify
 refresh-deploy-host-scripts:  ## Re-install /usr/local/sbin/{use-env,refresh-env-config} + sudoers on deploy-host after a git pull (no full bootstrap)
 	@scripts/refresh-deploy-host-scripts.sh
 
-install-drupal-full:  ## Full sandbox Drupal setup: install + publish-dns + both smoke tests (~5-7 min)
-	@# Operator-friendly orchestrator: takes a freshly-deployed (infra-only)
-	@# environment and turns it into a working, publicly-reachable, smoke-
-	@# tested Drupal site. Each step is strict (fail = abort) because this
-	@# target's contract is "set up the test Drupal end-to-end" — the
-	@# operator wants to know which layer broke if anything does.
+install-drupal-full:  ## Full sandbox Drupal setup: install-drupal + smoke-test + publish-dns + smoke-test-public (~5-7 min)
+	@# Operator-friendly orchestrator on top of install-drupal. Adds
+	@# DNS publish + both smoke tests so a fresh env goes from "no
+	@# Drupal" to "publicly reachable and end-to-end verified" in one
+	@# call. Each step is strict (fail = abort) so the operator sees
+	@# which layer broke.
 	@#
-	@# Order chosen to validate progressively narrower scopes:
-	@#   1. install-drupal-remote — installs Drupal on FSx via the deploy-host
-	@#   2. publish-drupal-vhost  — (re)write drupal.conf to FSx — idempotent,
-	@#                              defense against the "install marker exists
-	@#                              but drupal.conf is stale or missing" mode
-	@#   3. reload-nginx          — SSM-reload nginx fleet to pick up the vhost
-	@#   4. smoke-test-drupal     — ALB+cert+nginx+PHP-FPM+Drupal (DNS-bypassed)
-	@#   5. publish-dns           — UPSERT Route 53 alias to env's ALB
-	@#   6. smoke-test-public     — end-to-end via real public DNS
-	@# A failure at step N tells you the issue is at layer N (or later).
+	@# Refactored 2026-07-31: install-drupal is now self-sufficient
+	@# — it publishes the nginx vhost and reloads the nginx fleet as
+	@# part of "installed." install-drupal-full no longer needs to
+	@# call publish-drupal-vhost and reload-nginx explicitly — those
+	@# happen inside install-drupal (via install-drupal-remote SSM).
+	@# Same functional result, cleaner semantics.
+	@#
+	@# Steps:
+	@#   1. install-drupal-remote — installs Drupal AND publishes vhost
+	@#                              AND reloads nginx (all via install-drupal
+	@#                              on the deploy-host)
+	@#   2. smoke-test-drupal     — ALB+cert+nginx+PHP-FPM+Drupal (DNS-bypassed)
+	@#   3. publish-dns           — UPSERT Route 53 alias + SOA MIN preflight
+	@#   4. smoke-test-public     — end-to-end via real public DNS
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  install-drupal-full: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
-	@echo "$(CYAN)Step 1/6: Install Drupal on deploy-host (via SSM, ~5 min)$(NC)"
+	@echo "$(CYAN)Step 1/4: Install Drupal on deploy-host + publish vhost + reload nginx (via SSM, ~5 min)$(NC)"
 	@$(MAKE) install-drupal-remote ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 2/6: (Re)publish drupal.conf to FSx (idempotent)$(NC)"
-	@$(MAKE) publish-drupal-vhost ENV=$(ENV)
-	@echo ""
-	@echo "$(CYAN)Step 3/6: Reload nginx fleet to pick up vhost$(NC)"
-	@$(MAKE) reload-nginx ENV=$(ENV)
-	@echo ""
-	@echo "$(CYAN)Step 4/6: Smoke-test Drupal (DNS-bypassed via --resolve)$(NC)"
+	@echo "$(CYAN)Step 2/4: Smoke-test Drupal (DNS-bypassed via --resolve)$(NC)"
 	@$(MAKE) smoke-test-drupal ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 5/6: Publish Route 53 alias for the env's site name$(NC)"
+	@echo "$(CYAN)Step 3/4: Publish Route 53 alias for the env's site name$(NC)"
 	@$(MAKE) publish-dns ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 6/6: End-to-end smoke test via real public DNS$(NC)"
+	@echo "$(CYAN)Step 4/4: End-to-end smoke test via real public DNS$(NC)"
 	@$(MAKE) smoke-test-public ENV=$(ENV)
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
