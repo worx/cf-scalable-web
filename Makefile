@@ -1451,7 +1451,7 @@ destroy-storage-s3:  ## Delete storage S3 stack (empties buckets first; WARNING:
 	for bucket in $$BUCKETS; do \
 		[ -z "$$bucket" ] && continue; \
 		echo "  $(YELLOW)Purging: $$bucket$(NC)"; \
-		scripts/purge-versioned-bucket.sh "$$bucket"; \
+		bash scripts/purge-versioned-bucket.sh "$$bucket"; \
 	done
 	@echo "$(YELLOW)Deleting storage S3 stack: $(STORAGE_S3_STACK)$(NC)"
 	@time aws cloudformation delete-stack --stack-name $(STORAGE_S3_STACK) --region $(AWS_REGION)
