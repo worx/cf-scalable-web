@@ -57,6 +57,15 @@ CYAN   := \033[0;36m
 NC     := \033[0m
 
 # -----------------------------------------------------------------------------
+# Default goal — bare 'make' in this directory shows help, never runs
+# anything destructive. Explicit because relying on "help happens to be
+# the first target" is fragile: reordering targets would silently make
+# a different (potentially costly) target the default. Matches the
+# top-level Makefile's convention (top-level Makefile line 203).
+# -----------------------------------------------------------------------------
+.DEFAULT_GOAL := help
+
+# -----------------------------------------------------------------------------
 # .PHONY declarations
 # -----------------------------------------------------------------------------
 .PHONY: help \
