@@ -14,10 +14,20 @@
 # Flow (six phases, each logged separately):
 #   1. Preconditions       (tools, env vars)
 #   2. Fetch credentials   (Secrets Manager → mysql defaults-file)
-#   3. Test connection     (mysql SELECT VERSION + table count + size)
+#   3. Test connection     (mysql SELECT VERSION + table count + size,
+#                           enumerate cache_* tables for structure-only dump)
 #   4. Confirmation        (mysqldump adds prod read load — honors CONFIRMED=yes)
-#   5. Stream dump → S3    (single pipeline, pipefail on)
+#   5. Stream dump → S3    (two-pass mysqldump into ONE S3 upload:
+#                           Pass 1 = cache_* structure only, no data;
+#                           Pass 2 = everything else, full)
 #   6. Verify S3 upload    (head-object; fail if suspiciously small)
+#
+# Cache-data exclusion: cache_* tables typically hold 30–70% of an aged
+# Drupal DB's byte volume (every rendered page, menu, config-object).
+# The data is guaranteed stale on arrival (references old container
+# classes + cache-tag hashes) and Phase 8 clear-drupal-cache TRUNCATEs
+# it anyway. Structure is preserved so Drupal doesn't have to auto-
+# create tables on first cache-write.
 #
 # Idempotent: yes — S3 PUT is atomic, so re-runs overwrite the previous
 #   dump cleanly. There's no local intermediate to clean up between runs.
@@ -208,6 +218,57 @@ if [ "$TABLE_COUNT" -eq 0 ]; then
 fi
 log_info "Source '$PROD_DB': $TABLE_COUNT tables, ~${DB_SIZE_MB} MB (data + indexes)"
 
+# ------------------------------------------------------------
+# Enumerate cache_* tables so we can dump their STRUCTURE but SKIP
+# their DATA. Drupal caches every rendered page, menu, config-object,
+# etc.; on an aged prod site cache_* alone is commonly 30–70% of the
+# dump. That data is guaranteed stale on arrival (references old
+# container class names + cache-tag hashes) and Phase 8 clear-drupal-
+# cache TRUNCATEs it all anyway — so today it's copied over the wire,
+# imported into MariaDB, dumped again by pgloader, imported into
+# Postgres, and immediately thrown away. Free savings.
+#
+# --ignore-table doesn't accept wildcards, so we enumerate at run
+# time and generate the flags dynamically. That also picks up any
+# new cache_* tables added by contrib/custom modules automatically.
+# ------------------------------------------------------------
+log_info "Enumerating cache tables (data excluded, structure preserved)"
+# Arrays (not space-separated strings) — the classic accumulator pattern
+# for multi-arg CLI flags. Two independent arrays because they feed two
+# different mysqldump passes with different semantics.
+#
+# Match BOTH:
+#   - modern D8+ 'cache_<binname>' (cache_bootstrap, cache_config, ...)
+#   - legacy bare 'cache' table (D6/D7 leftover or contrib module)
+# `LIKE 'cache\\_%'` alone misses the bare 'cache' — the underscore is
+# required in that pattern. The OR-with-equality catches it.
+CACHE_TABLES=()      # bare table names for Pass 1's mysqldump DB table1 ...
+IGNORE_FLAGS=()      # --ignore-table=DB.table1 args for Pass 2
+while IFS= read -r t; do
+  [ -z "$t" ] && continue
+  CACHE_TABLES+=("$t")
+  IGNORE_FLAGS+=("--ignore-table=$PROD_DB.$t")
+done < <(mysql --defaults-extra-file="$CREDFILE" -N -e "
+  SELECT table_name FROM information_schema.tables
+   WHERE table_schema='$PROD_DB'
+     AND table_type='BASE TABLE'
+     AND (table_name = 'cache' OR table_name LIKE 'cache\\_%')
+   ORDER BY table_name;")
+
+CACHE_COUNT=${#CACHE_TABLES[@]}
+if [ "$CACHE_COUNT" -eq 0 ]; then
+  log_info "  (no cache tables found in $PROD_DB — nothing to exclude)"
+else
+  # Size of the cache data we're about to skip — surfaced so operators
+  # see the concrete savings in the dump log.
+  CACHE_MB=$(mysql --defaults-extra-file="$CREDFILE" -N -e "
+    SELECT COALESCE(ROUND(SUM(data_length + index_length)/1024/1024, 1), 0)
+      FROM information_schema.tables
+     WHERE table_schema='$PROD_DB'
+       AND (table_name = 'cache' OR table_name LIKE 'cache\\_%');")
+  log_ok  "  Excluding data from $CACHE_COUNT cache tables (~${CACHE_MB} MB skipped)"
+fi
+
 # ============================================================
 # Phase 4 of 6: Confirmation
 # ============================================================
@@ -219,6 +280,7 @@ confirm_or_exit "About to mysqldump prod MySQL and stream to sandbox S3.
     Flags:  --single-transaction (no table locks)
             --set-gtid-purged=OFF --column-statistics=0
             --routines --triggers --events
+    Cache:  $CACHE_COUNT cache tables — structure only, no data
     Warning: this WILL add read load on prod for the dump duration.
     Recommend running off-hours (Kurt's convention: after 5pm)."
 
@@ -231,31 +293,66 @@ log_info "Starting mysqldump stream to s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
 log_info "(may take several minutes for a multi-GB database)"
 
 if is_dry_run; then
-  log_info "[DRY_RUN] would run:"
+  log_info "[DRY_RUN] would run (concatenated into one S3 upload):"
+  if [ "$CACHE_COUNT" -gt 0 ]; then
+    log_info "  # Pass 1 — cache_* structure only (no data):"
+    log_info "  mysqldump --defaults-extra-file=... --single-transaction \\"
+    log_info "            --set-gtid-purged=OFF --column-statistics=0 --no-data \\"
+    log_info "            --skip-add-drop-table \\"
+    log_info "            $PROD_DB ${CACHE_TABLES[*]}"
+  fi
+  log_info "  # Pass 2 — everything else (full):"
   log_info "  mysqldump --defaults-extra-file=... --single-transaction \\"
   log_info "            --set-gtid-purged=OFF --column-statistics=0 \\"
-  log_info "            --routines --triggers --events $PROD_DB \\"
-  log_info "    | aws s3 cp - s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
+  log_info "            --routines --triggers --events \\"
+  log_info "            ${IGNORE_FLAGS[*]} \\"
+  log_info "            $PROD_DB"
+  log_info "  # ...concatenated | aws s3 cp - s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
 else
   time_start=$SECONDS
 
-  # NOTE on flags:
+  # NOTE on flags (shared between both passes):
   #   --single-transaction   REPEATABLE READ snapshot, no InnoDB locks
   #   --set-gtid-purged=OFF  Skip GTID SET statements MariaDB doesn't need
   #   --column-statistics=0  MySQL 8 client feature that older servers reject
-  #   --routines --triggers --events  Include stored objects (safe if none)
   #
-  # NOTE on pipeline: `set -o pipefail` (from `set -euo pipefail`) means the
-  # pipeline's exit code is the last non-zero exit code of any component.
-  # So if mysqldump errors, the pipeline errors, we detect it via `if !`,
+  # Pass-1-only:
+  #   --no-data              cache_* structure without INSERTs (empty rebuilds)
+  #   --skip-add-drop-table  no DROP TABLE stanza (avoids clash with Pass 2)
+  #                          — Pass 1 is table-list-scoped so DROPs are safe
+  #                          in isolation, but the concatenated dump reads
+  #                          cleaner without duplicate DROPs from any overlap.
+  #
+  # Pass-2-only:
+  #   --routines --triggers --events   Stored objects — DB-scoped, not per-table
+  #   "${IGNORE_FLAGS[@]}"             --ignore-table for every cache_* table
+  #
+  # NOTE on ordering: cache tables FIRST so they exist before Pass 2's
+  # CREATE for anything that might reference them (none currently do, but
+  # ordering is cheap insurance and makes the dump readable top-down).
+  #
+  # NOTE on pipeline: `set -o pipefail` means the pipeline's exit code is
+  # the last non-zero exit code of any component. If either mysqldump
+  # errors, the group errors, the pipe errors, we detect via `if !`,
   # and remove the truncated S3 object.
-  if ! mysqldump --defaults-extra-file="$CREDFILE" \
-        --single-transaction \
-        --set-gtid-purged=OFF \
-        --column-statistics=0 \
-        --routines --triggers --events \
-        "$PROD_DB" \
-      | aws s3 cp - "s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
+  if ! { \
+        if [ "$CACHE_COUNT" -gt 0 ]; then \
+          mysqldump --defaults-extra-file="$CREDFILE" \
+            --single-transaction \
+            --set-gtid-purged=OFF \
+            --column-statistics=0 \
+            --no-data \
+            --skip-add-drop-table \
+            "$PROD_DB" "${CACHE_TABLES[@]}"; \
+        fi; \
+        mysqldump --defaults-extra-file="$CREDFILE" \
+          --single-transaction \
+          --set-gtid-purged=OFF \
+          --column-statistics=0 \
+          --routines --triggers --events \
+          "${IGNORE_FLAGS[@]}" \
+          "$PROD_DB"; \
+      } | aws s3 cp - "s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
   then
     log_error "Dump pipeline failed. Removing partial S3 object..."
     aws s3 rm "s3://$MIGRATION_BUCKET/$DUMP_S3_KEY" 2>/dev/null || true

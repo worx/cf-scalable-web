@@ -797,32 +797,53 @@ migrate-db-all:  ## Full DB migration walk-away safe: refresh-env-config → pre
 	@# drupal DB in RDS) that install-drupal.sh produces.
 	@#
 	@# Behavior on preflight FAIL:
-	@#   AUTO not set → bail with "run make install-drupal" hint (fail-fast)
-	@#   AUTO=yes     → run install-drupal, re-verify, continue (walk-away)
+	@#   AUTO not set → bail with "run make install-drupal" hint + full FAIL
+	@#                  details (fail-fast; operator needs to see what broke)
+	@#   AUTO=yes     → suppress FAIL details (they're expected on a fresh env
+	@#                  under walk-away), print a friendly "First-time install
+	@#                  detected" note, run install-drupal, re-verify with
+	@#                  output visible so any second-time failure IS surfaced.
+	@#                  Suppressed FAIL text is only dumped if install-drupal
+	@#                  itself then fails — so an unusual root cause isn't lost.
 	@if [ "$(SKIP_PREFLIGHT)" != "yes" ]; then \
 		echo ""; \
 		echo "$(YELLOW)============================================$(NC)"; \
 		echo "$(YELLOW)  Phase -1: preflight (Drupal installed?)$(NC)"; \
 		echo "$(YELLOW)============================================$(NC)"; \
-		if $(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox; then \
-			echo "$(GREEN)Preflight OK.$(NC)"; \
-		elif [ "$(AUTO)" = "yes" ]; then \
-			echo ""; \
-			echo "$(YELLOW)AUTO=yes — preflight failed, running install-drupal ENV=sandbox...$(NC)"; \
-			$(MAKE) --no-print-directory -C .. install-drupal ENV=sandbox \
-				|| { echo "$(RED)AUTO install-drupal failed. Check its output above; probably need manual intervention.$(NC)"; exit 1; }; \
-			echo ""; \
-			echo "$(BLUE)install-drupal complete — re-running preflight...$(NC)"; \
-			$(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox \
-				|| { echo "$(RED)Preflight STILL failing after install-drupal. Something's off — bailing.$(NC)"; exit 1; }; \
-			echo "$(GREEN)Preflight OK after AUTO install-drupal.$(NC)"; \
+		if [ "$(AUTO)" = "yes" ]; then \
+			PREFLIGHT_LOG=$$(mktemp -t migrate-preflight-XXXXXX); \
+			if $(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox > "$$PREFLIGHT_LOG" 2>&1; then \
+				cat "$$PREFLIGHT_LOG"; \
+				rm -f "$$PREFLIGHT_LOG"; \
+				echo "$(GREEN)Preflight OK.$(NC)"; \
+			else \
+				echo "$(CYAN)First-time install detected — running install-drupal ENV=sandbox...$(NC)"; \
+				echo "$(CYAN)(Preflight FAIL details suppressed under AUTO=yes; expected on a fresh env.)$(NC)"; \
+				if ! $(MAKE) --no-print-directory -C .. install-drupal ENV=sandbox; then \
+					echo "$(RED)AUTO install-drupal failed. Check its output above; probably need manual intervention.$(NC)"; \
+					echo "$(RED)Suppressed preflight output (in case the FAIL was unusual):$(NC)"; \
+					cat "$$PREFLIGHT_LOG"; \
+					rm -f "$$PREFLIGHT_LOG"; \
+					exit 1; \
+				fi; \
+				rm -f "$$PREFLIGHT_LOG"; \
+				echo ""; \
+				echo "$(BLUE)install-drupal complete — re-running preflight...$(NC)"; \
+				$(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox \
+					|| { echo "$(RED)Preflight STILL failing after install-drupal. Something's off — bailing.$(NC)"; exit 1; }; \
+				echo "$(GREEN)Preflight OK after AUTO install-drupal.$(NC)"; \
+			fi; \
 		else \
-			echo ""; \
-			echo "$(RED)Preflight failed.$(NC)"; \
-			echo "$(CYAN)Fix by running: make install-drupal ENV=sandbox$(NC)"; \
-			echo "$(CYAN)Or retry with:  make migrate-db-all AUTO=yes$(NC)  (auto-install on preflight fail)"; \
-			echo "$(CYAN)Or bypass:     make migrate-db-all SKIP_PREFLIGHT=yes$(NC)  (only if the check has a false negative)"; \
-			exit 1; \
+			if $(MAKE) --no-print-directory -C .. verify-drupal-installed ENV=sandbox; then \
+				echo "$(GREEN)Preflight OK.$(NC)"; \
+			else \
+				echo ""; \
+				echo "$(RED)Preflight failed.$(NC)"; \
+				echo "$(CYAN)Fix by running: make install-drupal ENV=sandbox$(NC)"; \
+				echo "$(CYAN)Or retry with:  make migrate-db-all AUTO=yes$(NC)  (auto-install on preflight fail)"; \
+				echo "$(CYAN)Or bypass:     make migrate-db-all SKIP_PREFLIGHT=yes$(NC)  (only if the check has a false negative)"; \
+				exit 1; \
+			fi; \
 		fi; \
 	else \
 		echo "$(YELLOW)  Phase -1: SKIPPED (SKIP_PREFLIGHT=yes)$(NC)"; \
@@ -877,7 +898,7 @@ migrate-db-all:  ## Full DB migration walk-away safe: refresh-env-config → pre
 	@echo "$(CYAN)  make list-db-backups ENV=sandbox$(NC)"
 	@echo "$(CYAN)  make delete-db-backup ENV=sandbox SELECT=<N>$(NC)"
 
-migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-files + restore-private + restore-codebase (unless SKIP_CODEBASE=yes)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
+migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-files + restore-private + restore-codebase + clear-cache + restart-php-fpm (SKIP_CODEBASE=yes to skip Phase 7)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
 	@# Sequences the whole end-to-end migration into one walk-away-safe
 	@# call: DB + S3 media + public files + private files + codebase.
 	@# See migrate-db-all for AUTO / SKIP_BACKUP / SKIP_PREFLIGHT env docs.
@@ -932,6 +953,18 @@ migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-f
 	@echo "$(YELLOW)  + any container caches invalidated by codebase swap)$(NC)"
 	@echo "$(YELLOW)============================================$(NC)"
 	@$(MAKE) --no-print-directory -C .. clear-drupal-cache ENV=sandbox
+	@echo ""
+	@echo "$(YELLOW)============================================$(NC)"
+	@echo "$(YELLOW)  Phase 9: restart-php-fpm — MANDATORY after codebase swap$(NC)"
+	@echo "$(YELLOW)  Reason: restore-codebase replaced vendor/ + web/ on FSx, but$(NC)"
+	@echo "$(YELLOW)  PHP-FPM workers still hold pre-swap bytecode in OPcache.$(NC)"
+	@echo "$(YELLOW)  Bytecode for files that no longer exist on disk will still$(NC)"
+	@echo "$(YELLOW)  execute — and reference classes the new classmap doesn't$(NC)"
+	@echo "$(YELLOW)  have. Every request hits HTTP 500 until PHP-FPM restarts.$(NC)"
+	@echo "$(YELLOW)  (Skipped in Phase 8 above — clear-drupal-cache is a$(NC)"
+	@echo "$(YELLOW)  filesystem+DB op only; it does not touch OPcache.)$(NC)"
+	@echo "$(YELLOW)============================================$(NC)"
+	@$(MAKE) --no-print-directory -C .. restart-php-fpm ENV=sandbox
 	@echo ""
 	@echo "$(GREEN)============================================$(NC)"
 	@echo "$(GREEN)  migrate-full-all COMPLETE$(NC)"

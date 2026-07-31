@@ -457,6 +457,16 @@ $databases['default']['default'] = [
   'username' => getenv('DRUPAL_DB_USER') ?: 'drupal_user',
   'password' => getenv('DRUPAL_DB_PASS') ?: '',
   'prefix'   => '',
+  // schema: pgloader creates all migrated tables in the source-MySQL
+  // db-name'd schema (prod: 'zinew'). Without this, Drupal's pgsql
+  // introspection code hardcodes 'public.<table>' and fails with
+  // 'relation "public.search_dataset" does not exist' during drush cr
+  // and other schema-inspection paths — even though ordinary queries
+  // resolve fine via PostgreSQL's search_path. Env-driven with a
+  // sensible default matching the current pgloader output. Change here
+  // (or set DRUPAL_DB_SCHEMA in Secrets Manager) if pgloader's target
+  // schema ever changes.
+  'schema'   => getenv('DRUPAL_DB_SCHEMA') ?: 'zinew',
 ];
 
 // Paths on FSx — no env prefix (post-cutover commit ee319d5; the env's

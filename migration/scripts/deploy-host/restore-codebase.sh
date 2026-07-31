@@ -392,5 +392,35 @@ log_ok "$TARGET_DIR restored from s3://$MIGRATION_BUCKET/$DUMP_S3_KEY"
 if [ -n "$SIBLING_STAGING_PATHS" ]; then
   log_ok "Sibling packages also restored:$(echo " $SIBLING_STAGING_PATHS")"
 fi
-log_info "Recommend: 'sudo -E vendor/bin/drush cr' (rebuild container against new code)"
-log_info "           make clear-drupal-cache ENV=<env> (invalidate Valkey + PHP compiled)"
+
+# ============================================================
+# MANDATORY next steps — DO NOT SKIP.
+# ============================================================
+# We just replaced vendor/ and web/ on FSx. But every PHP-FPM worker
+# on every compute box still holds pre-swap bytecode in OPcache. If
+# a request lands before OPcache is busted, PHP-FPM will:
+#   (1) execute cached bytecode from files that no longer exist on disk;
+#   (2) resolve class names against the NEW composer classmap on the
+#       fresh vendor tree; and
+#   (3) fatal-error when the old bytecode references classes the new
+#       classmap doesn't have (e.g. Drupal 11.3.13's DrupalRuntime
+#       when prod's tarball uses classic bootstrap).
+#
+# clear-drupal-cache alone is NOT sufficient — it only touches the
+# FSx compiled-container dir + cache_* tables. It does NOT invalidate
+# per-worker OPcache. restart-php-fpm is the only thing that does.
+#
+# migrate-full-all sequences the restart automatically as Phase 9.
+# If you ran restore-codebase standalone, run these two, in order:
+echo ""
+echo "  ================================================================"
+echo "  WARNING: PHP-FPM OPcache is now STALE. Every request will 500"
+echo "  ================================================================"
+echo "  Required follow-up (in order, from the operator's Mac):"
+echo ""
+echo "    make clear-drupal-cache ENV=<env>   # from repo root"
+echo "    make restart-php-fpm ENV=<env>      # from repo root  <-- MANDATORY"
+echo ""
+echo "  (migrate-full-all does both automatically as Phases 8 and 9.)"
+echo "  ================================================================"
+echo ""
