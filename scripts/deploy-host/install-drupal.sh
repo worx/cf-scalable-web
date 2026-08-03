@@ -567,12 +567,24 @@ step "Export env vars settings.php reads (for the rest of this script)"
 # bootstrap the DB. Earlier drush calls (site:install) bypassed this by
 # taking --db-url= on the command line. The verify step further down
 # used to re-export the same vars; that's now redundant and removed.
+#
+# DRUPAL_DB_SCHEMA override (added 2026-08-03): drush site:install just
+# created tables in PostgreSQL's default schema (`public`). The
+# env-driven settings.php we just wrote defaults 'schema' to 'zinew'
+# (the post-migration target). Without this override, drush's next call
+# would look for tables in `zinew` (empty) and fail with
+# "Command pm:uninstall was not found. Drush was unable to query the
+# database." This export is process-scoped — it lives only for the rest
+# of THIS script. PHP-FPM workers keep seeing the settings.php default
+# ('zinew'), which is correct: by the time real requests hit them,
+# pgloader has populated `zinew` with the migrated production data.
 export ENVIRONMENT_NAME="$ENV"
 export DRUPAL_DB_HOST="$RDS_ENDPOINT"
 export DRUPAL_DB_PORT="5432"
 export DRUPAL_DB_NAME="$DB_NAME"
 export DRUPAL_DB_USER="$DB_USER"
 export DRUPAL_DB_PASS="$DRUPAL_DB_PW"
+export DRUPAL_DB_SCHEMA="public"
 export DRUPAL_SITE_NAME="$SITE_NAME"
 
 # ============================================================
