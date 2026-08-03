@@ -3032,6 +3032,36 @@ clean:  ## Clean temporary files
 	@rm -rf tmp/
 	@echo "$(GREEN)✓ Clean complete$(NC)"
 
+print-doc:  ## Render an MD file to print-ready PDF via pandoc+xelatex (DOC=path OUT=pdf-path FONT=Charter OPEN=yes)
+	@# Wraps scripts/pandoc/render-pdf.sh with a clean CLI. Bundles the fixes
+	@# that give good macOS output out of the box: a Lua filter that forces
+	@# proportional-width wrapping table columns (prevents cell overflow
+	@# into adjacent columns), a LaTeX preamble that maps Unicode
+	@# arrows/checkmarks to LaTeX equivalents (macOS system fonts don't
+	@# ship these), TOC, colored links, Charter body + Menlo code.
+	@#
+	@# Env overrides:
+	@#   DOC       required, path to the .md file to render
+	@#   OUT       optional, output PDF path (default: /tmp/<basename>.pdf)
+	@#   FONT      optional, mainfont (default: Charter — installed on macOS)
+	@#   FONTSIZE  optional, body font size (default: 11pt)
+	@#   MARGIN    optional, page margin (default: 1in)
+	@#   OPEN      optional, 'no' to skip auto-open in Preview (default: yes)
+	@#
+	@# Examples:
+	@#   make print-doc DOC=docs/plans/multi-tenant-refactor-review-2026-07-31.md
+	@#   make print-doc DOC=docs/FSX-LAYOUT.md OUT=~/Downloads/fsx.pdf
+	@#   make print-doc DOC=README.md FONT="PT Serif" FONTSIZE=10pt
+	@#
+	@# Requires: pandoc (brew install pandoc) + xelatex (brew install --cask basictex).
+	@if [ -z "$(DOC)" ]; then \
+		echo "$(RED)ERROR: DOC=<path/to/file.md> is required$(NC)"; \
+		echo "$(CYAN)Example:$(NC) make print-doc DOC=docs/plans/multi-tenant-refactor-review-2026-07-31.md"; \
+		exit 2; \
+	fi
+	@OPEN="$(OPEN)" FONT="$(FONT)" FONTSIZE="$(FONTSIZE)" MARGIN="$(MARGIN)" \
+		scripts/pandoc/render-pdf.sh "$(DOC)" $(OUT)
+
 # Default to today's date for log consolidation
 DATE ?= $(shell date +%Y-%m-%d)
 

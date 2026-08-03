@@ -1,0 +1,79 @@
+% SPDX-License-Identifier: GPL-2.0-or-later
+% Copyright (C) 2026 The Worx Company
+% Author: Kurt Vanderwater <kurt@worxco.net>
+%
+% preamble.tex — LaTeX preamble for pandoc → xelatex → PDF rendering.
+%
+% Purpose: map Unicode characters that macOS system serif fonts (Charter,
+% Helvetica Neue, etc.) don't ship glyphs for onto real LaTeX equivalents.
+% Without this, arrows and check-marks render as tofu (missing-glyph
+% boxes) in the PDF.
+%
+% Coverage: arrows (→ ← ↔ ⇒), check/cross marks (✓ ✗), ellipsis (…),
+% en-dash / em-dash (– —). Add lines below as new characters surface.
+%
+% Called by: scripts/pandoc/render-pdf.sh via `pandoc --include-in-header`.
+%            Used by the `make print-doc` Makefile target.
+%
+% Created: 2026-08-03
+
+\usepackage{newunicodechar}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{↔}{\ensuremath{\leftrightarrow}}
+\newunicodechar{⇒}{\ensuremath{\Rightarrow}}
+\newunicodechar{⇐}{\ensuremath{\Leftarrow}}
+\newunicodechar{↑}{\ensuremath{\uparrow}}
+\newunicodechar{↓}{\ensuremath{\downarrow}}
+\newunicodechar{✓}{\ensuremath{\checkmark}}
+\newunicodechar{✗}{\ensuremath{\times}}
+\newunicodechar{✔}{\ensuremath{\checkmark}}
+\newunicodechar{…}{\ldots}
+\newunicodechar{–}{--}
+\newunicodechar{—}{---}
+
+% ------------------------------------------------------------
+% Table cell wrapping fixes — critical for wide tables with paths/URLs.
+% ------------------------------------------------------------
+% Problem: pandoc emits long monospaced strings (paths, config keys) as
+% \texttt{/var/www/sites/<slug>/drupal-config/} — a single unbreakable
+% atom in LaTeX. Even with proportional-width p{} columns (set by the
+% Lua filter), \texttt{} content refuses to wrap, and overflow prints
+% over the adjacent column. This is THE classic "column 2 prints over
+% column 3" artifact.
+%
+% Fix, in layers:
+%   1. hyphenat[htt] — enable hyphenation inside \texttt{} content
+%   2. seqsplit — insert breakable points between every character of
+%      \texttt{} content (invisible; kicks in when hyphenation isn't
+%      enough)
+%   3. Relaxed line-breaking parameters (emergencystretch, tolerance)
+%      so LaTeX accepts imperfect line breaks rather than overflowing
+%   4. Smaller table font (\footnotesize) for extra horizontal room
+
+\usepackage[htt]{hyphenat}
+\usepackage{seqsplit}
+\usepackage{etoolbox}
+
+% Relax line-breaking globally so LaTeX prefers imperfect breaks over
+% overfull hboxes.
+\emergencystretch=3em
+\tolerance=2000
+\hyphenpenalty=500
+
+% Preamble-time definition of a "breakable texttt" — invisible break
+% points between every character via \seqsplit. \OrigTt is captured at
+% environment-start via \let (see \AtBeginEnvironment below), so this
+% wrapper can call it without knowing \texttt's identity at preamble time.
+\newcommand{\BreakableTt}[1]{\OrigTt{\seqsplit{#1}}}
+
+% Inside longtable ONLY: shrink cell font AND swap \texttt for the
+% breakable variant. Scoping to longtable avoids breaking fragile
+% contexts (section headings) that also contain \texttt{path/like/things}.
+% \let-based swap dodges the ##1 parameter-doubling issue that hits
+% \renewcommand inside a hook.
+\AtBeginEnvironment{longtable}{%
+  \footnotesize%
+  \let\OrigTt\texttt%
+  \let\texttt\BreakableTt%
+}
