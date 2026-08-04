@@ -78,6 +78,7 @@ NC     := \033[0m
         dispatch-restore-mysql dispatch-run-pgloader migrate-db-all \
         restore-files restore-private restore-codebase \
         dispatch-restore-files dispatch-restore-private dispatch-restore-codebase migrate-full-all \
+        deploy-nightly-cron remove-nightly-cron test-nightly-cron \
         backup-jumpbox restore-jumpbox list-jumpbox-backups \
         clean-migration-baks \
         .preflight
@@ -165,6 +166,13 @@ help:  ## Show this help
 	@echo "  make dump-private            Push script to jumpbox → tar private/ → sandbox S3"
 	@echo "                                 $(CYAN)FROM: Mac|DH   PROFILE: ZI-Sandbox + ZoningInfoAdmin$(NC)"
 	@echo "                                 $(CYAN)Common env: CONFIRMED=yes DRY_RUN=yes$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Nightly automated dumps (cron on jumpbox — deploy-host doesn't need to be up):$(NC)"
+	@echo "  make deploy-nightly-cron     Install crontab entry on jumpbox (default: 3am UTC Tue-Sat)"
+	@echo "  make remove-nightly-cron     Remove crontab entry (wrapper stays for manual runs)"
+	@echo "  make test-nightly-cron       Trigger the wrapper NOW (same as scheduled run)"
+	@echo "                                 $(CYAN)FROM: Mac|DH   PROFILE: ZI-Sandbox + ZoningInfoAdmin$(NC)"
+	@echo "                                 $(CYAN)SNS failure alerts: set SSM param /migration/nightly-cron/sns-topic-arn$(NC)"
 	@echo "  make restore-mysql           Fetch prod dump from S3 → local MariaDB scratch"
 	@echo "                                 $(CYAN)FROM: deploy-host   PROFILE: instance-role$(NC)"
 	@echo "                                 $(CYAN)Env overrides: MIGRATION_BUCKET DUMP_S3_KEY LOCAL_DB_NAME LOCAL_DB_USER LOCAL_DB_PASS FORCE_DOWNLOAD$(NC)"
@@ -549,6 +557,80 @@ dump-all:  ## Run all 4 dumps sequentially: mysql → codebase → files → pri
 	@echo "$(CYAN)  aws --profile ZI-Sandbox s3 ls s3://sandbox-migration-kv-worxco/dumps/ --human-readable$(NC)"
 	@echo "$(CYAN)Or peek at any run's log:$(NC)"
 	@echo "$(CYAN)  aws --profile ZI-Sandbox s3 ls s3://sandbox-migration-kv-worxco/logs/$$(date -u +%Y-%m-%d)/$(NC)"
+
+# -----------------------------------------------------------------------------
+# Nightly automated dumps (cron on jumpbox)
+# -----------------------------------------------------------------------------
+# Installs a crontab entry on the jumpbox that runs the four dump-*
+# scripts in sequence at a scheduled time (default: 3 AM UTC Tue-Sat).
+# Deploy-host does not need to be up — the jumpbox has all the IAM
+# needed to write to the sandbox migration bucket and read from prod.
+#
+# Failure notification is via SNS if an ARN is stored in SSM param
+# `/migration/nightly-cron/sns-topic-arn`. If unset, failures just log
+# to the jumpbox at /var/log/worxco-migration/nightly-*.log.
+#
+# Scripts:
+#   jumpbox/nightly-dump-runner.sh   — cron invokes this; runs the 4 dumps
+#   jumpbox/install-nightly-cron.sh  — one-time setup; fetches wrapper +
+#                                       installs crontab entry
+#   jumpbox/remove-nightly-cron.sh   — inverse; removes crontab entry
+# -----------------------------------------------------------------------------
+
+deploy-nightly-cron:  ## Install nightly-dump cron on jumpbox (default: 3am UTC Tue-Sat)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
+	@# Two-step install: (1) pre-upload the wrapper to S3 so the install
+	@# script can fetch it during its jumpbox-side run, (2) dispatch the
+	@# install script via SSM. Wrapper stays in S3 for the ongoing sync
+	@# behavior at cron-fire time; install script sits on the jumpbox.
+	@echo "$(BLUE)Step 1/2: pre-upload wrapper to migration bucket$(NC)"
+	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(BUCKET_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+		--output text --region $(AWS_REGION)); \
+	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+		echo "$(RED)ERROR: cannot resolve migration bucket name from $(BUCKET_STACK)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "  bucket: $$BUCKET_NAME"; \
+	aws --profile ZI-Sandbox s3 cp scripts/jumpbox/nightly-dump-runner.sh \
+		"s3://$$BUCKET_NAME/scripts/jumpbox/nightly-dump-runner.sh" \
+		--quiet
+	@echo "$(GREEN)✓ wrapper uploaded$(NC)"
+	@echo ""
+	@echo "$(BLUE)Step 2/2: dispatch install-nightly-cron to jumpbox via SSM$(NC)"
+	@AWS_REGION="$(AWS_REGION)" \
+	 BUCKET_STACK="$(BUCKET_STACK)" \
+	 JUMPBOX_STACK="$(JUMPBOX_STACK)" \
+	 SECRET_NAME="$(SECRET_NAME)" \
+	 ./scripts/_ssm-run-jumpbox.sh install-nightly-cron
+	@echo ""
+	@echo "$(CYAN)Optional: enable SNS failure notifications:$(NC)"
+	@echo "  $(CYAN)aws --profile ZoningInfoAdmin ssm put-parameter \\$(NC)"
+	@echo "  $(CYAN)  --name /migration/nightly-cron/sns-topic-arn \\$(NC)"
+	@echo "  $(CYAN)  --value <topic-arn> --type String --overwrite --region $(AWS_REGION)$(NC)"
+	@echo ""
+	@echo "$(CYAN)Sanity check: 'make test-nightly-cron' triggers the wrapper now (same as scheduled run)$(NC)"
+
+remove-nightly-cron:  ## Remove nightly-dump cron from jumpbox (wrapper stays at /opt/nightly-dumps/)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
+	@AWS_REGION="$(AWS_REGION)" \
+	 BUCKET_STACK="$(BUCKET_STACK)" \
+	 JUMPBOX_STACK="$(JUMPBOX_STACK)" \
+	 SECRET_NAME="$(SECRET_NAME)" \
+	 ./scripts/_ssm-run-jumpbox.sh remove-nightly-cron
+
+test-nightly-cron:  ## Manually invoke the nightly-dump wrapper on jumpbox NOW (same as scheduled run, ~15-30 min)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox + ZoningInfoAdmin]
+	@# Pre-upload the wrapper first (so this works even before deploy-nightly-cron).
+	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(BUCKET_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+		--output text --region $(AWS_REGION)); \
+	aws --profile ZI-Sandbox s3 cp scripts/jumpbox/nightly-dump-runner.sh \
+		"s3://$$BUCKET_NAME/scripts/jumpbox/nightly-dump-runner.sh" --quiet
+	@AWS_REGION="$(AWS_REGION)" \
+	 BUCKET_STACK="$(BUCKET_STACK)" \
+	 JUMPBOX_STACK="$(JUMPBOX_STACK)" \
+	 SECRET_NAME="$(SECRET_NAME)" \
+	 ./scripts/_ssm-run-jumpbox.sh nightly-dump-runner
 
 # -----------------------------------------------------------------------------
 # Jumpbox state protection — backup, restore, list
