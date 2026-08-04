@@ -755,6 +755,46 @@ step "Drop install marker"
 # the bug this pattern avoids.
 "$SCRIPT_DIR/write-install-marker.sh" "$ENV"
 
+# ============================================================
+step "Warm the OS resolver + ALB path for later smoke tests"
+# ============================================================
+# By this point the site is fully serving: install-drupal published the
+# vhost, drush verify passed, install marker is on FSx. Fire one throwaway
+# curl against the public DNS name so:
+#   1. This host's DNS resolver populates its POSITIVE cache with the
+#      Route 53 alias — evicting any stale NXDOMAIN that got cached
+#      earlier (during destroy-all, or in the window between deploy-all
+#      starting and the dns track running publish-dns).
+#   2. The ALB target-health + nginx path gets exercised end-to-end so
+#      any first-hit slowness (connection setup, TLS handshake caching,
+#      target-group warmup) happens NOW instead of at the end of the
+#      long migration when we actually care.
+#
+# By the time migrate-full-all finishes (60-90 min later) and the final
+# smoke-test-public runs, the resolver has been positive-caching for
+# an hour and the ALB path is warm. That test hits on attempt 1 every
+# time — the retry+flush safety net in smoke-test-public becomes purely
+# a fallback for weird environments.
+#
+# Everything below is best-effort — failures are not fatal. The final
+# smoke test is the authoritative check; this is just cache-priming.
+if [ "$(uname -s)" = "Darwin" ]; then
+  sudo -n dscacheutil -flushcache 2>/dev/null || true
+  sudo -n killall -HUP mDNSResponder 2>/dev/null || true
+elif command -v resolvectl >/dev/null 2>&1; then
+  sudo -n resolvectl flush-caches 2>/dev/null || true
+elif command -v systemd-resolve >/dev/null 2>&1; then
+  sudo -n systemd-resolve --flush-caches 2>/dev/null || true
+fi
+WARMUP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 15 \
+  "https://$SITE_NAME/" 2>/dev/null || echo "curl-error")
+if [ "$WARMUP_CODE" = "200" ] || [ "$WARMUP_CODE" = "302" ]; then
+  log "  ✓ Warm-up curl https://$SITE_NAME/ → HTTP $WARMUP_CODE"
+  log "  ✓ DNS + ALB path primed. Final smoke-test-public will hit a warm system."
+else
+  log "  (warm-up curl returned '$WARMUP_CODE' — not fatal; final smoke-test-public will retry)"
+fi
+
 log ""
 log "============================================"
 log "  Drupal Cloud Install Complete (env=$ENV)"
