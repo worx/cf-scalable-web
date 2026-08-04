@@ -585,10 +585,15 @@ deploy-nightly-cron:  ## Install nightly-dump cron on jumpbox (default: 3am UTC 
 	@echo "$(BLUE)Step 1/2: pre-upload wrapper to migration bucket$(NC)"
 	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
 		--stack-name $(BUCKET_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
-		--output text --region $(AWS_REGION)); \
-	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
-		echo "$(RED)ERROR: cannot resolve migration bucket name from $(BUCKET_STACK)$(NC)"; \
+		--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>&1); \
+	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ] || echo "$$BUCKET_NAME" | grep -q "^An error"; then \
+		echo "$(RED)ERROR: cannot resolve MigrationBucketName from CFN stack '$(BUCKET_STACK)'$(NC)"; \
+		echo "$(RED)  AWS returned: $$BUCKET_NAME$(NC)"; \
+		echo "$(CYAN)Common causes + fixes:$(NC)"; \
+		echo "  $(CYAN)- Stack not deployed:$(NC)      make deploy-bucket"; \
+		echo "  $(CYAN)- Wrong AWS profile:$(NC)       check 'aws sts get-caller-identity --profile ZI-Sandbox'"; \
+		echo "  $(CYAN)- Wrong region ($(AWS_REGION)):$(NC) override with AWS_REGION=... make deploy-nightly-cron"; \
 		exit 1; \
 	fi; \
 	echo "  bucket: $$BUCKET_NAME"; \
@@ -622,8 +627,14 @@ test-nightly-cron:  ## Manually invoke the nightly-dump wrapper on jumpbox NOW (
 	@# Pre-upload the wrapper first (so this works even before deploy-nightly-cron).
 	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
 		--stack-name $(BUCKET_STACK) \
-		--query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
-		--output text --region $(AWS_REGION)); \
+		--query "Stacks[0].Outputs[?OutputKey=='MigrationBucketName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>&1); \
+	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ] || echo "$$BUCKET_NAME" | grep -q "^An error"; then \
+		echo "$(RED)ERROR: cannot resolve MigrationBucketName from CFN stack '$(BUCKET_STACK)'$(NC)"; \
+		echo "$(RED)  AWS returned: $$BUCKET_NAME$(NC)"; \
+		echo "$(CYAN)  → Try: make deploy-bucket   (or check AWS profile / region)$(NC)"; \
+		exit 1; \
+	fi; \
 	aws --profile ZI-Sandbox s3 cp scripts/jumpbox/nightly-dump-runner.sh \
 		"s3://$$BUCKET_NAME/scripts/jumpbox/nightly-dump-runner.sh" --quiet
 	@AWS_REGION="$(AWS_REGION)" \
