@@ -102,7 +102,7 @@ for _ in $(seq 1 100); do
   case "$STATUS" in
     Pending|InProgress)
       DOT_COUNT=$((DOT_COUNT + 1))
-      if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|" >&2; else printf "." >&2; fi
+      if [ $((DOT_COUNT % 10)) -eq 0 ]; then printf "|" >&2; elif [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "+" >&2; else printf "." >&2; fi
       sleep 3
       ;;
     *) echo " $STATUS." >&2; break ;;

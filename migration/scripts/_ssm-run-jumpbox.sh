@@ -245,8 +245,10 @@ while true; do
   case "$STATUS" in
     InProgress|Pending|Delayed)
       DOT_COUNT=$((DOT_COUNT + 1))
-      if [ $((DOT_COUNT % 5)) -eq 0 ]; then
+      if [ $((DOT_COUNT % 10)) -eq 0 ]; then
         printf "|"
+      elif [ $((DOT_COUNT % 5)) -eq 0 ]; then
+        printf "+"
       else
         printf "."
       fi

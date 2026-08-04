@@ -2917,7 +2917,7 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS â†’ ALB â†
 		RESOLVED=$$(dig +short "$$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' '); \
 		[ -n "$$RESOLVED" ] && break; \
 		DOT_COUNT=$$((DOT_COUNT + 1)); \
-		if [ $$((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi; \
+		if [ $$((DOT_COUNT % 10)) -eq 0 ]; then printf "|"; elif [ $$((DOT_COUNT % 5)) -eq 0 ]; then printf "+"; else printf "."; fi; \
 		sleep 5; \
 	done; \
 	echo ""; \

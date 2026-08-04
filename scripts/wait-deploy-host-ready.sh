@@ -55,7 +55,7 @@ for i in $(seq 1 30); do
     exit 1
   fi
   # Every 5th tick print '|' for eyeball timing (5 ticks × 10s = 50s per '|').
-  if [ $((i % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
+  if [ $((i % 10)) -eq 0 ]; then printf "|"; elif [ $((i % 5)) -eq 0 ]; then printf "+"; else printf "."; fi
   sleep 10
 done
 

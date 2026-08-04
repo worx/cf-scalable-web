@@ -58,7 +58,7 @@ for _ in $(seq 1 24); do
   case "$STATUS" in
     Pending|InProgress)
       DOT_COUNT=$((DOT_COUNT + 1))
-      if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
+      if [ $((DOT_COUNT % 10)) -eq 0 ]; then printf "|"; elif [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "+"; else printf "."; fi
       sleep 5
       ;;
     *) echo " $STATUS"; break ;;

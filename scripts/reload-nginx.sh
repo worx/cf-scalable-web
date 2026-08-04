@@ -63,7 +63,7 @@ for _ in $(seq 1 20); do
     break
   fi
   DOT_COUNT=$((DOT_COUNT + 1))
-  if [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "|"; else printf "."; fi
+  if [ $((DOT_COUNT % 10)) -eq 0 ]; then printf "|"; elif [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "+"; else printf "."; fi
   sleep 3
 done
 
