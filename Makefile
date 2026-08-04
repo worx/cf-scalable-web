@@ -2881,6 +2881,22 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB �
 	@# failures the forged-Host smoke test can't see (alias missing/stale,
 	@# DRUPAL_SITE_NAME not propagated to PHP-FPM workers, etc.).
 	@echo "$(BLUE)End-to-end smoke test for ENV=$(ENV)$(NC)"
+	@# Pre-flush the OS resolver cache to preempt stale negative-cache from
+	@# any DNS lookup done before publish-dns wrote the alias record.
+	@# OS-detect so we run the right command; best-effort (sudo -n so no
+	@# password prompt, failures suppressed so this never blocks the test).
+	@# Silent on success — noisy only if the environment lacks a resolver
+	@# we know how to flush.
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		sudo -n dscacheutil -flushcache 2>/dev/null || true; \
+		sudo -n killall -HUP mDNSResponder 2>/dev/null || true; \
+	elif command -v resolvectl >/dev/null 2>&1; then \
+		sudo -n resolvectl flush-caches 2>/dev/null || true; \
+	elif command -v systemd-resolve >/dev/null 2>&1; then \
+		sudo -n systemd-resolve --flush-caches 2>/dev/null || true; \
+	else \
+		echo "  $(YELLOW)  (no known DNS resolver to flush; if you hit stale-DNS, flush manually)$(NC)"; \
+	fi
 	@SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
 	if [ -z "$$SITE_NAME" ] || [ "$$SITE_NAME" = "None" ]; then \
@@ -2913,7 +2929,15 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB �
 	fi; \
 	echo "  DNS:  $$RESOLVED"; \
 	BODY=$$(mktemp); \
-	HTTP=$$(curl -sL -o "$$BODY" -w "%{http_code}" "https://$$SITE_NAME/" --max-time 20); \
+	HTTP=""; \
+	for attempt in 1 2 3; do \
+		HTTP=$$(curl -sL -o "$$BODY" -w "%{http_code}" "https://$$SITE_NAME/" --max-time 20); \
+		[ "$$HTTP" = "200" ] && break; \
+		if [ "$$attempt" -lt 3 ]; then \
+			echo "  $(YELLOW)attempt $$attempt returned HTTP $$HTTP — retrying in 15s (DNS/ALB/target-health may be converging)$(NC)"; \
+			sleep 15; \
+		fi; \
+	done; \
 	if [ "$$HTTP" = "200" ]; then \
 		echo "  $(GREEN)✓ Drupal returned HTTP 200 over the public DNS path$(NC)"; \
 		head -3 "$$BODY"; \
@@ -2936,7 +2960,7 @@ smoke-test-public:  ## End-to-end test: curl the real public URL (DNS → ALB �
 			echo "  $(YELLOW)→ Pinned-IP curl returned 200. dig sees the record, but your OS$(NC)"; \
 			echo "  $(YELLOW)  resolver does not. This is a stale negative-cache (NXDOMAIN cached$(NC)"; \
 			echo "  $(YELLOW)  before publish-dns wrote the record). The ALB / cert / Drupal stack$(NC)"; \
-			echo "  $(YELLOW)  is fine — your Mac's resolver just hasn't refreshed.$(NC)"; \
+			echo "  $(YELLOW)  is fine — your OS resolver just hasn't refreshed.$(NC)"; \
 			echo ""; \
 			if [ "$$(uname -s)" = "Darwin" ]; then \
 				echo "  $(YELLOW)  Fix (macOS):$(NC)"; \
