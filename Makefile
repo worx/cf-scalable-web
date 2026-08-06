@@ -2794,6 +2794,61 @@ refresh-deploy-host-scripts:  ## Re-install /usr/local/sbin/{use-env,refresh-env
 		$(MAKE) deploy-migrate-host-backups; \
 	fi
 
+# Internal: verify the project VPC exports the migrate-host template
+# needs actually exist. Runs BEFORE cloudformation deploy so we fail
+# fast with an actionable message instead of letting CFN roll back a
+# half-created stack (which then blocks re-deploys until manually
+# deleted). ENV defaults to sandbox; override for staging/production.
+ENV ?= sandbox
+.migrate-host-vpc-preflight:
+	@MISSING=""; \
+	for export in $(ENV)-vpc-id $(ENV)-public-subnets $(ENV)-rds-sg-id; do \
+		if ! aws --profile ZI-Sandbox cloudformation list-exports \
+				--query "Exports[?Name=='$$export'].Value" \
+				--output text --region $(AWS_REGION) 2>/dev/null | grep -q .; then \
+			MISSING="$$MISSING $$export"; \
+		fi; \
+	done; \
+	if [ -n "$$MISSING" ]; then \
+		echo "$(RED)ERROR: required CFN exports missing:$$MISSING$(NC)"; \
+		echo ""; \
+		echo "$(YELLOW)The migrate-host template imports VPC ID, public subnets, and RDS SG$(NC)"; \
+		echo "$(YELLOW)from the project VPC + database stacks. Those must be deployed first.$(NC)"; \
+		echo ""; \
+		echo "$(CYAN)Minimum needed for migrate-host to build (~15 min):$(NC)"; \
+		echo "  $(CYAN)make deploy-vpc         ENV=$(ENV)$(NC)"; \
+		echo "  $(CYAN)make deploy-iam         ENV=$(ENV)$(NC)"; \
+		echo "  $(CYAN)make deploy-storage-s3  ENV=$(ENV)$(NC)"; \
+		echo "  $(CYAN)make deploy-database    ENV=$(ENV)$(NC)"; \
+		echo ""; \
+		echo "$(CYAN)Or the full environment (~50 min):$(NC)"; \
+		echo "  $(CYAN)make deploy-all         ENV=$(ENV)$(NC)"; \
+		echo ""; \
+		echo "$(CYAN)Then retry: make deploy-migrate-host$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(CYAN)Project VPC exports present for ENV=$(ENV) — good.$(NC)"
+
+# Internal: if a prior deploy-migrate-host attempt failed and left the
+# stack in ROLLBACK_COMPLETE, CFN refuses to update it. Auto-delete
+# the failed stack so the operator can just re-run without manual
+# cleanup. Only fires on ROLLBACK_COMPLETE (the "safely deletable"
+# terminal failure state); any other status is left alone.
+.migrate-host-rollback-cleanup:
+	@STATUS=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_STACK) \
+		--query "Stacks[0].StackStatus" \
+		--output text --region $(AWS_REGION) 2>/dev/null || echo "DOES_NOT_EXIST"); \
+	if [ "$$STATUS" = "ROLLBACK_COMPLETE" ]; then \
+		echo "$(YELLOW)Found cf-migrate-host in ROLLBACK_COMPLETE (prior failed deploy).$(NC)"; \
+		echo "$(YELLOW)Auto-deleting so re-deploy can proceed...$(NC)"; \
+		aws --profile ZI-Sandbox cloudformation delete-stack \
+			--stack-name $(MIGRATE_HOST_STACK) --region $(AWS_REGION); \
+		aws --profile ZI-Sandbox cloudformation wait stack-delete-complete \
+			--stack-name $(MIGRATE_HOST_STACK) --region $(AWS_REGION); \
+		echo "$(GREEN)✓ Rolled-back stack deleted, proceeding with fresh deploy$(NC)"; \
+	fi
+
 deploy-migrate-host-backups:  ## Create the migrate-host backups S3 bucket (sandbox)
 	@echo "$(BLUE)Deploying migrate-host backups bucket: $(MIGRATE_HOST_BACKUPS_STACK)$(NC)"
 	@aws --profile ZI-Sandbox cloudformation deploy \
@@ -2839,7 +2894,16 @@ destroy-migrate-host-backups:  ## Delete migrate-host backups bucket + ALL state
 		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) --region $(AWS_REGION)
 	@echo "$(GREEN)✓ Migrate-host backups bucket deleted$(NC)"
 
-deploy-migrate-host: .migrate-host-backups-preflight  ## Deploy migrate-host (auto-deploys backups bucket + waits for ready). Env: ENV=sandbox (default).
+deploy-migrate-host: .migrate-host-backups-preflight .migrate-host-vpc-preflight .migrate-host-rollback-cleanup  ## Deploy migrate-host (auto-deploys backups bucket + waits for ready). Env: ENV=sandbox (default).
+	@# Preflights (all internal, run in order):
+	@#   1. .migrate-host-backups-preflight — auto-deploys the backups
+	@#      bucket stack if it doesn't exist
+	@#   2. .migrate-host-vpc-preflight     — fails fast with an
+	@#      actionable message if the project VPC exports we import
+	@#      don't exist yet (prevents CFN-rollback-on-missing-import)
+	@#   3. .migrate-host-rollback-cleanup  — auto-deletes any prior
+	@#      ROLLBACK_COMPLETE stack so re-runs after a failure just work
+	@#
 	@# The MigrateHostBackupsBucketName param defaults to the sandbox
 	@# bucket name; no template edits needed unless targeting staging/prod.
 	@echo "$(BLUE)Deploying migrate-host stack: $(MIGRATE_HOST_STACK)$(NC)"
