@@ -228,14 +228,22 @@ Resources:
       ImageId: !Ref UbuntuAMI
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref MigrateHostInstanceProfile
-      SubnetId: !Select
-        - 0
-        - !Split
-          - ','
-          - !ImportValue
-              Fn::Sub: '${EnvironmentName}-public-subnets'
-      SecurityGroupIds:
-        - !Ref MigrateHostSecurityGroup
+      # NetworkInterfaces (not SubnetId + SecurityGroupIds) so we can
+      # explicitly request a public IP. The sandbox public subnets
+      # have MapPublicIpOnLaunch=false, so relying on the subnet
+      # default would launch without a public IP — outbound apt/curl
+      # would fail. AssociatePublicIpAddress: true forces the IP.
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Select
+            - 0
+            - !Split
+              - ','
+              - !ImportValue
+                  Fn::Sub: '${EnvironmentName}-public-subnets'
+          GroupSet:
+            - !Ref MigrateHostSecurityGroup
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
