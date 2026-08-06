@@ -9,9 +9,17 @@
 # Purpose:  Internal orchestrator for the `make dispatch-*` targets.
 #           Uploads a migration/scripts/deploy-host/<name>.sh script
 #           + _common.sh to the sandbox migration S3 bucket, then uses
-#           `aws ssm send-command` to have the sandbox deploy-host
+#           `aws ssm send-command` to have a sandbox worker instance
 #           download and execute it. Polls for completion and displays
 #           stdout/stderr.
+#
+#           Target host is chosen via HOST_STACK (defaults to
+#           cf-deploy-host for backward compat; set cf-migrate-host to
+#           re-target the ephemeral migrate-host built in Phase 1).
+#           Script pathnames stay under scripts/deploy-host/ regardless
+#           — the migrate-host runs the exact same restore-mysql.sh and
+#           run-pgloader.sh, guarded by /etc/worxco/migrate-host-marker
+#           for host-specific tuning branches.
 #
 #           Walk-away safe — the remote command runs in SSM's own runner,
 #           surviving Mac-side interrupts (session timeout, sleep, lid
@@ -33,7 +41,13 @@
 # get sane defaults):
 #   AWS_REGION            Region for all ops              (us-east-1)
 #   BUCKET_STACK          Migration bucket CFN stack      (cf-scalable-web-sandbox-migration-bucket)
-#   DEPLOY_HOST_STACK     Deploy-host CFN stack           (cf-deploy-host)
+#   HOST_STACK            Target host CFN stack           (cf-deploy-host)
+#                           Set HOST_STACK=cf-migrate-host to re-target
+#                           the ephemeral migrate-host. Instance-ID
+#                           output-key is derived automatically:
+#                             cf-deploy-host  → DeployHostInstanceId
+#                             cf-migrate-host → MigrateHostInstanceId
+#   DEPLOY_HOST_STACK     Back-compat alias for HOST_STACK
 #   CONFIRMED             yes = skip remote confirm prompt
 #   DRY_RUN               yes = tell remote script to dry-run
 #   MIGRATION_DB_NAME     Passed through to run-pgloader  (zinew)
@@ -82,7 +96,26 @@ fi
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 BUCKET_STACK="${BUCKET_STACK:-cf-scalable-web-sandbox-migration-bucket}"
-DEPLOY_HOST_STACK="${DEPLOY_HOST_STACK:-cf-deploy-host}"
+
+# Target host resolution. HOST_STACK is the new name; DEPLOY_HOST_STACK
+# is the old name kept as a back-compat alias so nothing that already
+# sets it breaks. Precedence: HOST_STACK > DEPLOY_HOST_STACK > default.
+HOST_STACK="${HOST_STACK:-${DEPLOY_HOST_STACK:-cf-deploy-host}}"
+
+# Map stack name → instance-ID CFN output key. Both stacks expose the
+# instance ID as an output, but the key names differ. Extending this
+# case block is the ONE place to add a new target-host type.
+case "$HOST_STACK" in
+  cf-deploy-host)  INSTANCE_ID_OUTPUT_KEY="DeployHostInstanceId" ;;
+  cf-migrate-host) INSTANCE_ID_OUTPUT_KEY="MigrateHostInstanceId" ;;
+  *)
+    log_error "Unknown HOST_STACK '$HOST_STACK'."
+    log_error "  Known values: cf-deploy-host, cf-migrate-host."
+    log_error "  Extend the case block in _ssm-run-deploy-host.sh if adding a new target."
+    exit 1
+    ;;
+esac
+
 CONFIRMED="${CONFIRMED:-}"
 DRY_RUN="${DRY_RUN:-}"
 MIGRATION_DB_NAME="${MIGRATION_DB_NAME:-}"
@@ -91,14 +124,15 @@ POLL_INTERVAL="${POLL_INTERVAL:-30}"
 POLL_TIMEOUT="${POLL_TIMEOUT:-7200}"
 
 log_step "_ssm-run-deploy-host — orchestrating '$SCRIPT_NAME'"
-log_info "AWS_REGION         = $AWS_REGION"
-log_info "BUCKET_STACK       = $BUCKET_STACK"
-log_info "DEPLOY_HOST_STACK  = $DEPLOY_HOST_STACK"
-log_info "CONFIRMED          = ${CONFIRMED:-<unset>}"
-log_info "DRY_RUN            = ${DRY_RUN:-<unset>}"
-log_info "MIGRATION_DB_NAME  = ${MIGRATION_DB_NAME:-<default>}"
-log_info "PGLOADER_HEAP_MB   = ${PGLOADER_HEAP_MB:-<default>}"
-log_info "POLL_TIMEOUT       = ${POLL_TIMEOUT}s"
+log_info "AWS_REGION              = $AWS_REGION"
+log_info "BUCKET_STACK            = $BUCKET_STACK"
+log_info "HOST_STACK              = $HOST_STACK"
+log_info "INSTANCE_ID_OUTPUT_KEY  = $INSTANCE_ID_OUTPUT_KEY"
+log_info "CONFIRMED               = ${CONFIRMED:-<unset>}"
+log_info "DRY_RUN                 = ${DRY_RUN:-<unset>}"
+log_info "MIGRATION_DB_NAME       = ${MIGRATION_DB_NAME:-<default>}"
+log_info "PGLOADER_HEAP_MB        = ${PGLOADER_HEAP_MB:-<default>}"
+log_info "POLL_TIMEOUT            = ${POLL_TIMEOUT}s"
 
 # ============================================================
 # Step 1: Look up sandbox migration bucket
@@ -118,21 +152,24 @@ fi
 log_ok "Bucket: $BUCKET_NAME"
 
 # ============================================================
-# Step 2: Look up sandbox deploy-host instance ID
+# Step 2: Look up target-host instance ID
 # ============================================================
-log_step "Step 2: Look up deploy-host instance ID"
+log_step "Step 2: Look up target-host instance ID ($HOST_STACK)"
 
 INSTANCE_ID=$(aws --profile ZI-Sandbox cloudformation describe-stacks \
-    --stack-name "$DEPLOY_HOST_STACK" \
-    --query "Stacks[0].Outputs[?OutputKey=='DeployHostInstanceId'].OutputValue" \
+    --stack-name "$HOST_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='${INSTANCE_ID_OUTPUT_KEY}'].OutputValue" \
     --output text --region "$AWS_REGION" 2>/dev/null || echo "")
 
 if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
-  log_error "Deploy-host stack '$DEPLOY_HOST_STACK' not deployed."
-  log_error "  Deploy first (from repo root): make deploy-deploy-host"
+  log_error "Host stack '$HOST_STACK' not deployed (or missing $INSTANCE_ID_OUTPUT_KEY output)."
+  case "$HOST_STACK" in
+    cf-deploy-host)  log_error "  Deploy first (from repo root): make deploy-deploy-host"  ;;
+    cf-migrate-host) log_error "  Deploy first (from repo root): make deploy-migrate-host" ;;
+  esac
   exit 1
 fi
-log_ok "Deploy-host: $INSTANCE_ID"
+log_ok "Target host ($HOST_STACK): $INSTANCE_ID"
 
 # ============================================================
 # Step 3: Upload scripts to S3
@@ -228,7 +265,7 @@ log_ok "Parameters built ($(wc -c < "$PARAMS_FILE") bytes)"
 # ============================================================
 # Step 5: Dispatch via SSM send-command
 # ============================================================
-log_step "Step 5: Dispatch to deploy-host via SSM send-command"
+log_step "Step 5: Dispatch to $HOST_STACK via SSM send-command"
 
 CMD_ID=$(aws --profile ZI-Sandbox ssm send-command \
     --instance-ids "$INSTANCE_ID" \
