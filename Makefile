@@ -83,6 +83,16 @@ DEPLOY_HOST_BACKUPS_TEMPLATE := cloudformation/cf-deploy-host-backups.yaml
 DEPLOY_HOST_BACKUPS_PARAMS := cloudformation/parameters/deploy-host-backups.json
 DEPLOY_HOST_TEMPLATE := cloudformation/cf-deploy-host.yaml
 DEPLOY_HOST_PARAMS := cloudformation/parameters/deploy-host.json
+
+# Migrate-host: ephemeral EC2 in the project VPC for MariaDB + pgloader
+# runs. Lifecycle: on-demand deploy → migration work → destroy.
+# See docs/plans/migrate-host-design-2026-08-05.md.
+MIGRATE_HOST_STACK := cf-migrate-host
+MIGRATE_HOST_BACKUPS_STACK := cf-migrate-host-backups
+MIGRATE_HOST_BACKUPS_TEMPLATE := cloudformation/cf-migrate-host-backups.yaml
+MIGRATE_HOST_BACKUPS_PARAMS := cloudformation/parameters/migrate-host-backups.json
+MIGRATE_HOST_TEMPLATE := cloudformation/cf-migrate-host.yaml
+MIGRATE_HOST_PARAMS := cloudformation/parameters/migrate-host.json
 DEPLOY_HOST_SECRET_PATH := worxco/deploy-host/root-password
 
 # Deploy Host VPC Peering (per environment, bridges deploy-host VPC to project VPC)
@@ -2750,6 +2760,211 @@ verify-drupal-installed:  ## Preflight for migration: SSM to deploy-host, verify
 
 refresh-deploy-host-scripts:  ## Re-install /usr/local/sbin/{use-env,refresh-env-config} + sudoers on deploy-host after a git pull (no full bootstrap)
 	@scripts/refresh-deploy-host-scripts.sh
+
+# =============================================================================
+# Migrate host — ephemeral EC2 for MariaDB + pgloader migration work
+# =============================================================================
+# Design doc: docs/plans/migrate-host-design-2026-08-05.md
+#
+# Lifecycle:
+#   - Deployed on-demand at the start of a migration run
+#   - Destroyed after migration completes (`ephemeral` lifecycle default)
+#   - Optionally kept up for interactive exploration (`keep` lifecycle)
+#
+# Key differences from deploy-host (parallel Makefile block above):
+#   - Lives IN the project VPC (public subnet) — direct RDS access
+#     via inline SG ingress, zero peering complexity
+#   - Runs MariaDB (systemctl enabled) + pgloader — dialed-up tuning
+#     per §6 of the design doc
+#   - No peering-restore-marker dance in destroy (no peering exists)
+#   - No use-env / FSx mount — dump stages on local /var/tmp/migration/
+# =============================================================================
+
+# Internal: pre-flight for `make deploy-migrate-host`. If the backups
+# bucket stack doesn't exist yet, deploy it first. Same auto-deploy
+# convenience pattern as .deploy-host-backups-preflight.
+.migrate-host-backups-preflight:
+	@if aws cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) \
+		--region $(AWS_REGION) >/dev/null 2>&1; then \
+		echo "$(CYAN)Migrate-host backups stack '$(MIGRATE_HOST_BACKUPS_STACK)' present — good.$(NC)"; \
+	else \
+		echo "$(YELLOW)Migrate-host backups stack '$(MIGRATE_HOST_BACKUPS_STACK)' not found.$(NC)"; \
+		echo "$(YELLOW)Auto-deploying it first (bucket must exist for auto-restore + nightly scheduler)...$(NC)"; \
+		$(MAKE) deploy-migrate-host-backups; \
+	fi
+
+deploy-migrate-host-backups:  ## Create the migrate-host backups S3 bucket (sandbox)
+	@echo "$(BLUE)Deploying migrate-host backups bucket: $(MIGRATE_HOST_BACKUPS_STACK)$(NC)"
+	@aws --profile ZI-Sandbox cloudformation deploy \
+		--template-file $(MIGRATE_HOST_BACKUPS_TEMPLATE) \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) \
+		--parameter-overrides $$(jq -r '.Parameters | to_entries | map("\(.key)=\(.value)") | join(" ")' $(MIGRATE_HOST_BACKUPS_PARAMS)) \
+		--region $(AWS_REGION) \
+		--no-fail-on-empty-changeset
+	@echo "$(GREEN)✓ Migrate-host backups bucket deployed$(NC)"
+	@aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) \
+		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
+		--output table --region $(AWS_REGION)
+
+destroy-migrate-host-backups:  ## Delete migrate-host backups bucket + ALL state backups. CONFIRMED=yes skips prompt.
+	@# Migrate-host is ephemeral so losing the backups bucket has smaller
+	@# blast radius than the deploy-host equivalent (operator loses at
+	@# most bash-history + dotfiles from prior migrate-host sessions).
+	@# Confirmation is standard CONFIRMED=yes, not the paranoid text-prompt
+	@# gate the deploy-host equivalent has.
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo ""; \
+		echo "$(YELLOW)This will delete the migrate-host backups bucket + ALL state backups.$(NC)"; \
+		echo "$(YELLOW)Any future migrate-host will start with pristine dotfiles.$(NC)"; \
+		echo "$(YELLOW)Deploy-host and its own backups are unaffected.$(NC)"; \
+		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt.)$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then echo "Cancelled"; exit 0; fi; \
+	fi
+	@echo "$(BLUE)Emptying migrate-host backups bucket before deletion...$(NC)"
+	@BUCKET=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) \
+		--query "Stacks[0].Outputs[?OutputKey=='MigrateHostBackupsBucketName'].OutputValue" \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -n "$$BUCKET" ] && [ "$$BUCKET" != "None" ]; then \
+		echo "  Emptying: $$BUCKET"; \
+		aws --profile ZI-Sandbox s3 rm "s3://$$BUCKET" --recursive --region $(AWS_REGION) 2>/dev/null || true; \
+	fi
+	@aws --profile ZI-Sandbox cloudformation delete-stack \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion...$(NC)"
+	@aws --profile ZI-Sandbox cloudformation wait stack-delete-complete \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ Migrate-host backups bucket deleted$(NC)"
+
+deploy-migrate-host: .migrate-host-backups-preflight  ## Deploy migrate-host (auto-deploys backups bucket + waits for ready). Env: ENV=sandbox (default).
+	@# The MigrateHostBackupsBucketName param defaults to the sandbox
+	@# bucket name; no template edits needed unless targeting staging/prod.
+	@echo "$(BLUE)Deploying migrate-host stack: $(MIGRATE_HOST_STACK)$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@time aws --profile ZI-Sandbox cloudformation deploy \
+		--template-file $(MIGRATE_HOST_TEMPLATE) \
+		--stack-name $(MIGRATE_HOST_STACK) \
+		--parameter-overrides file://$(MIGRATE_HOST_PARAMS) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION)
+	@echo "$(CYAN)✓ CloudFormation stack created. Instance launching; bootstrap.sh still running.$(NC)"
+	@echo ""
+	@$(MAKE) wait-migrate-host-ready
+	@echo ""
+	@echo "$(GREEN)✓ Migrate host fully bootstrapped and READY$(NC)"
+	@$(MAKE) verify-migrate-host
+
+ssm-migrate-host:  ## Open SSM interactive shell on migrate-host
+	@INSTANCE_ID=$$(aws --profile ZI-Sandbox ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(MIGRATE_HOST_STACK)" \
+		         "Name=instance-state-name,Values=running" \
+		--query 'Reservations[0].Instances[0].InstanceId' \
+		--output text --region $(AWS_REGION) 2>/dev/null); \
+	if [ -z "$$INSTANCE_ID" ] || [ "$$INSTANCE_ID" = "None" ]; then \
+		echo "$(RED)Migrate-host instance not found (stack: $(MIGRATE_HOST_STACK)).$(NC)"; \
+		echo "$(CYAN)Deploy first: make deploy-migrate-host$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(BLUE)Opening SSM session to migrate-host $$INSTANCE_ID...$(NC)"; \
+	aws --profile ZI-Sandbox ssm start-session --target $$INSTANCE_ID --region $(AWS_REGION)
+
+wait-migrate-host-ready:  ## Block until migrate-host cloud-init finishes + bootstrap marker exists (~5-10 min)
+	@scripts/wait-migrate-host-ready.sh
+
+backup-migrate-host: .migrate-host-backups-preflight  ## Snapshot migrate-host state (SSH keys, .env, .zsh_history) → sandbox S3
+	@AWS_REGION="$(AWS_REGION)" \
+	 MIGRATE_HOST_STACK="$(MIGRATE_HOST_STACK)" \
+	 MIGRATE_HOST_BACKUPS_STACK="$(MIGRATE_HOST_BACKUPS_STACK)" \
+	 ./scripts/migrate-host/_ssm-run.sh backup-state
+
+restore-migrate-host:  ## Restore migrate-host state from S3 (auto-snapshots current to /tmp first)
+	@AWS_REGION="$(AWS_REGION)" \
+	 MIGRATE_HOST_STACK="$(MIGRATE_HOST_STACK)" \
+	 MIGRATE_HOST_BACKUPS_STACK="$(MIGRATE_HOST_BACKUPS_STACK)" \
+	 ./scripts/migrate-host/_ssm-run.sh restore-state
+
+list-migrate-host-backups:  ## List all migrate-host state backups in S3
+	@BUCKET_NAME=$$(aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_BACKUPS_STACK) --region $(AWS_REGION) \
+		--query "Stacks[0].Outputs[?OutputKey=='MigrateHostBackupsBucketName'].OutputValue" \
+		--output text 2>/dev/null); \
+	if [ -z "$$BUCKET_NAME" ] || [ "$$BUCKET_NAME" = "None" ]; then \
+		echo "$(RED)Bucket stack '$(MIGRATE_HOST_BACKUPS_STACK)' not deployed.$(NC)"; exit 1; \
+	fi; \
+	echo "$(BLUE)=== Latest pointer (never expires) ===$(NC)"; \
+	aws --profile ZI-Sandbox s3 ls "s3://$$BUCKET_NAME/config/migrate-host-latest.tar.gz" \
+		--region $(AWS_REGION) --human-readable 2>&1 || echo "  (no latest — no backup taken yet)"; \
+	echo ""; \
+	echo "$(BLUE)=== Timestamped archives (90-day retention) ===$(NC)"; \
+	aws --profile ZI-Sandbox s3 ls "s3://$$BUCKET_NAME/config/migrate-host-archive/" \
+		--region $(AWS_REGION) --human-readable 2>&1 || echo "  (no archives yet)"; \
+	echo ""; \
+	echo "$(CYAN)Restore latest: make restore-migrate-host$(NC)"; \
+	echo "$(CYAN)Restore specific: make restore-migrate-host RESTORE_KEY=config/migrate-host-archive/migrate-host-<UTC>.tar.gz$(NC)"
+
+verify-migrate-host:  ## Show migrate-host connection info
+	@echo "$(BLUE)Migrate Host Connection Info$(NC)"
+	@echo "$(BLUE)========================================$(NC)"
+	@echo ""
+	@echo "$(CYAN)Stack Outputs:$(NC)"
+	@aws --profile ZI-Sandbox cloudformation describe-stacks \
+		--stack-name $(MIGRATE_HOST_STACK) \
+		--query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Migrate host stack not found$(NC)"
+	@echo ""
+	@echo "$(CYAN)Instance Status:$(NC)"
+	@aws --profile ZI-Sandbox ec2 describe-instances \
+		--filters "Name=tag:Name,Values=$(MIGRATE_HOST_STACK)" \
+		--query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,Type:InstanceType,IP:PublicIpAddress}' \
+		--output table \
+		--region $(AWS_REGION) 2>/dev/null || echo "  $(RED)Instance not found$(NC)"
+	@echo ""
+	@echo "$(GREEN)✓ Migrate host verification complete$(NC)"
+
+destroy-migrate-host:  ## Delete migrate-host (with final backup by default). CONFIRMED=yes skips prompt; SKIP_FINAL_BACKUP=yes skips backup.
+	@if [ "$(CONFIRMED)" != "yes" ]; then \
+		echo "$(YELLOW)This will delete the migrate-host EC2 instance.$(NC)"; \
+		echo "$(CYAN)A final state backup will be taken automatically before delete$(NC)"; \
+		echo "$(CYAN)(set SKIP_FINAL_BACKUP=yes to skip that too).$(NC)"; \
+		echo "$(CYAN)(Pass CONFIRMED=yes to skip this prompt for unattended runs.)$(NC)"; \
+		read -p "Type 'yes' to confirm: " confirm; \
+		if [ "$$confirm" != "yes" ]; then \
+			echo "Cancelled"; \
+			exit 0; \
+		fi; \
+	fi
+	@# Take a final state backup so the operator can restore into a
+	@# rebuilt migrate-host later without losing SSH keys / dotfiles.
+	@if [ "$(SKIP_FINAL_BACKUP)" != "yes" ]; then \
+		if aws cloudformation describe-stacks --stack-name $(MIGRATE_HOST_BACKUPS_STACK) \
+		    --region $(AWS_REGION) >/dev/null 2>&1; then \
+			echo "$(BLUE)Taking final backup before destroy...$(NC)"; \
+			if ! $(MAKE) backup-migrate-host CONFIRMED=yes; then \
+				echo "$(YELLOW)Final backup failed. Options:$(NC)"; \
+				echo "$(YELLOW)  1) Fix backup issue + rerun 'make destroy-migrate-host'$(NC)"; \
+				echo "$(YELLOW)  2) Skip: 'make destroy-migrate-host SKIP_FINAL_BACKUP=yes'$(NC)"; \
+				exit 1; \
+			fi; \
+		else \
+			echo "$(YELLOW)Backups stack $(MIGRATE_HOST_BACKUPS_STACK) not deployed — skipping final backup.$(NC)"; \
+		fi; \
+	else \
+		echo "$(YELLOW)SKIP_FINAL_BACKUP=yes — skipping final backup.$(NC)"; \
+	fi
+	@# No peering-teardown dance: migrate-host has NO peering (inline
+	@# RDS SG ingress rules in cf-migrate-host.yaml are lifecycle-atomic
+	@# with the stack). Just delete.
+	@echo "$(BLUE)Deleting migrate-host stack: $(MIGRATE_HOST_STACK)$(NC)"
+	@aws --profile ZI-Sandbox cloudformation delete-stack \
+		--stack-name $(MIGRATE_HOST_STACK) --region $(AWS_REGION)
+	@echo "$(BLUE)Waiting for deletion...$(NC)"
+	@aws --profile ZI-Sandbox cloudformation wait stack-delete-complete \
+		--stack-name $(MIGRATE_HOST_STACK) --region $(AWS_REGION)
+	@echo "$(GREEN)✓ Migrate host deleted$(NC)"
 
 install-drupal-full:  ## Full sandbox Drupal setup: install-drupal + smoke-test + publish-dns + smoke-test-public (~5-7 min)
 	@# Operator-friendly orchestrator on top of install-drupal. Adds

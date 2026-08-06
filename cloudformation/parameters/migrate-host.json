@@ -1,0 +1,10 @@
+{
+  "Parameters": {
+    "EnvironmentName": "sandbox",
+    "InstanceType": "r7g.xlarge",
+    "MigrateHostBackupsBucketName": "sandbox-migrate-host-backups-kv-worxco",
+    "RootVolumeSize": "40",
+    "RootVolumeIops": "10000",
+    "RootVolumeThroughput": "500"
+  }
+}

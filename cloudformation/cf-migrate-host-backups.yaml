@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
+
+#
+# CloudFormation Template: Migrate-Host State Backups Bucket
+#
+# Purpose: A dedicated S3 bucket in the SANDBOX account that holds
+#          migrate-host operator-managed state backups (SSH keys, .env,
+#          .aws/config, bash/zsh/mysql history, .config/htop). Parallel
+#          in concept to cf-deploy-host-backups but scoped to the
+#          ephemeral migrate-host lifecycle.
+#
+#          The migrate-host is EPHEMERAL — spun up per migration run
+#          and destroyed after. Backup parity with deploy-host is
+#          intentional (per Kurt's design decision 2026-08-05): if the
+#          operator uses a "keep"-lifecycle day for interactive
+#          exploration, painstakingly-assembled bash history + SSH
+#          keys + operator dotfiles survive the eventual destroy →
+#          re-create cycle. On a fresh migrate-host, restore-state.sh
+#          runs from UserData and re-populates operator state
+#          automatically.
+#
+#          Populated by scripts/migrate-host/backup-state.sh running:
+#            - On-demand via `make backup-migrate-host`
+#            - Nightly via EventBridge Scheduler (defined in
+#              cf-migrate-host.yaml) — fires ONLY when the instance
+#              is up; silent no-op otherwise
+#            - Pre-destroy via `make destroy-migrate-host` (unless
+#              SKIP_FINAL_BACKUP=yes)
+#
+#          Consumed by scripts/migrate-host/restore-state.sh:
+#            - Via UserData auto-restore on new migrate-host boot
+#            - On-demand via `make restore-migrate-host`
+#
+# Layout:  s3://<bucket>/
+#          ├── scripts/                     (no expiration - runtime dep)
+#          ├── logs/                        (30-day retention)
+#          └── config/
+#              ├── migrate-host-latest.tar.gz    (never expires)
+#              └── migrate-host-archive/         (90-day retention)
+#
+# Deploy:  make deploy-migrate-host-backups   [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+# Destroy: make destroy-migrate-host-backups  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Migrate-host state backups S3 bucket (SANDBOX account)'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name used in bucket naming
+    Default: sandbox
+
+  BucketSuffix:
+    Type: String
+    Description: Unique suffix for the bucket name (S3 global uniqueness)
+    AllowedPattern: '^[a-z0-9-]{4,20}$'
+    Default: kv-worxco
+
+Resources:
+  MigrateHostBackupsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${EnvironmentName}-migrate-host-backups-${BucketSuffix}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Prefix-scoped lifecycle rules matching the pattern established by
+      # cf-deploy-host-backups. The migrate-host-latest.tar.gz pointer at
+      # config/ root never expires — it is the auto-restore source of
+      # truth. Timestamped archives get 90 days of history.
+      LifecycleConfiguration:
+        Rules:
+          # Script execution logs from backup-state.sh and restore-state.sh
+          # runs (both scheduled and on-demand). Enough for post-mortem.
+          - Id: ExpireLogs
+            Status: Enabled
+            Prefix: logs/
+            ExpirationInDays: 30
+
+          # Scripts uploaded during SSM orchestration.
+          # NO EXPIRATION — the nightly EventBridge Scheduler and
+          # UserData auto-restore both read these scripts from S3
+          # without running a make target. Expiring them would cause
+          # silent failures for those automated triggers.
+          # Scripts are overwritten in place on every `make X`, so
+          # there is no version accumulation.
+
+          # Timestamped state backups — 90 days of history for rollback
+          # or audit purposes. The latest pointer is kept separately below.
+          - Id: ExpireArchivedMigrateHostState
+            Status: Enabled
+            Prefix: config/migrate-host-archive/
+            ExpirationInDays: 90
+
+          # NOTE: config/migrate-host-latest.tar.gz has NO expiration rule.
+          # S3 lifecycle only expires objects matching a rule prefix, so
+          # a single object at the top of the config/ prefix (not under
+          # config/migrate-host-archive/) is untouched by any rule above.
+
+          # Cancel and clean up incomplete multipart uploads after 1 day.
+          - Id: AbortIncompleteMultipartUpload
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-migrate-host-backups-${BucketSuffix}'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: Migrate-host state protection - operator dotfiles across ephemeral runs
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  MigrateHostBackupsBucketName:
+    Description: Bucket name (used by scripts and CFN Scheduler in cf-migrate-host)
+    Value: !Ref MigrateHostBackupsBucket
+    Export:
+      Name: cf-migrate-host-backups-bucket-name
+
+  MigrateHostBackupsBucketArn:
+    Description: Bucket ARN (used by IAM policy on migrate-host instance role)
+    Value: !GetAtt MigrateHostBackupsBucket.Arn
+    Export:
+      Name: cf-migrate-host-backups-bucket-arn
+
+# License: GPL-2.0-or-later
+# Copyright (C) 2026 The Worx Company
+# Author: Kurt Vanderwater <kurt@worxco.net>
