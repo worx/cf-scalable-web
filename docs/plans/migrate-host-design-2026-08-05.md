@@ -61,6 +61,12 @@ Kurt's exact requirements, restated for clarity:
 
 1. **New CFN-managed instance**, launched on-demand for migration
    work, destroyed after. ~1 hour of existence per run.
+   **Provisioning approach: bootstrap.sh (parallel to deploy-host's
+   pattern), NOT a pre-built AMI.** Trade-off Kurt weighed and
+   accepted: bootstrap.sh takes 3-4 min at first-boot vs ~90 sec
+   for a pre-baked AMI, but bootstrap.sh is far easier to iterate
+   on during the tuning phases. See §12 for the "Phase 6: bake AMI"
+   post-MVP optimization once the design settles.
 2. **Graviton — NOT the t4g family**. At least 4 vCPUs, 16 GiB RAM.
 3. **MariaDB moves off deploy-host** onto the new host.
 4. **pgloader moves off deploy-host** onto the new host.
@@ -77,6 +83,10 @@ Kurt's exact requirements, restated for clarity:
    the reason it was upped.
 9. **Goal**: shave 20-30 min off total migration time (currently ~1h35m
    end-to-end for destroy-all + deploy-all + migrate-full-all + smoke).
+10. **Access pattern**: SSM Session Manager only (no SSH). Deploy-host
+    / operator's Mac talks to migrate-host via `aws ssm send-command`
+    over AWS APIs — no VPC-level network path required. This is
+    critical to §7.3's design simplification.
 
 ---
 
@@ -212,10 +222,12 @@ AskUserQuestion in the 2026-08-05 planning session.
 | 4.3 | Swap | 0 (none) | 32 GiB RAM + our tuning ceilings never approach 24 GiB used. Swap would only mask an OOM by turning it into thrash. |
 | 4.4 | Lifecycle default | `MIGRATE_HOST_LIFECYCLE=ephemeral` (deploy → run → destroy every `migrate-db-all`) | Matches Kurt's stated intent. Cost per run ~$0.35 (instance + storage for ~1 hour). `keep` and `none` available as env-var overrides. |
 | 4.5 | Backup parity | Full deploy-host style: dedicated S3 bucket, backup-state.sh + restore-state.sh, nightly EventBridge Scheduler, auto-restore on first boot from S3 latest tarball | Kurt explicit: "we even want to have a backup restore function for the migrate host, like we do for the deploy host" — for the "poke around interactively" case where bash history + SSH keys + operator dotfiles are painful to lose. |
-| 4.6 | Peering SG ingress | INLINE in `cf-migrate-host.yaml` (not a separate `cf-migrate-peering.yaml`) | Ingress rules reference migrate-host SG. Inlining makes deploy/destroy lifecycle-atomic. Separate stack would fail on destroy due to cross-stack SG reference. |
-| 4.7 | SSMSessionPreferences | NOT duplicated | Account-wide `SSM-SessionManagerRunShell` document already owned by cf-deploy-host. Two stacks creating same-named document = collision. |
-| 4.8 | MariaDB service state on migrate-host | `systemctl enable --now mariadb` (opposite of deploy-host's `disable --now`) | This box's whole purpose is to run MariaDB. Different from deploy-host where MariaDB is on-demand-only. |
-| 4.9 | Marker file | `/etc/worxco/migrate-host-marker` (parallel to deploy-host's marker) | Guards for restore-mysql.sh wrap code — only apply bulk-load flags when running on migrate-host, not on legacy deploy-host during rollout. |
+| 4.6 | **Network placement** (revised 2026-08-05 per Kurt's review) | **Migrate-host lives IN the project VPC** (private subnet), NOT in the default VPC alongside deploy-host. This eliminates ALL peering complexity for the migrate-host. Deploy-host stays in default VPC (still peers to project VPC per today). SSM SendCommand between deploy-host and migrate-host goes over AWS APIs — no VPC-to-VPC network path needed. |
+| 4.7 | **SG ingress rules** (revised) | ONE ingress rule needed: RDS SG accepts 5432 from migrate-host SG. No FSx access needed (dump staged locally on migrate-host's 40 GiB gp3, not `/var/www/mysql/` on FSx). No Valkey access needed (Drupal caching is not part of migration). Ingress rule lives inline in `cf-migrate-host.yaml` for lifecycle atomicity. |
+| 4.8 | SSMSessionPreferences | NOT duplicated | Account-wide `SSM-SessionManagerRunShell` document already owned by cf-deploy-host. Two stacks creating same-named document = collision. |
+| 4.9 | MariaDB service state on migrate-host | `systemctl enable --now mariadb` (opposite of deploy-host's `disable --now`) | This box's whole purpose is to run MariaDB. Different from deploy-host where MariaDB is on-demand-only. |
+| 4.10 | Marker file | `/etc/worxco/migrate-host-marker` (parallel to deploy-host's marker) | Guards for restore-mysql.sh wrap code — only apply bulk-load flags when running on migrate-host, not on legacy deploy-host during rollout. |
+| 4.11 | **Dump staging path** (revised 2026-08-05 per Kurt's review) | `/var/tmp/migration/zinew.sql` (local disk on migrate-host's 40 GiB gp3), NOT `/var/www/mysql/zinew.sql` (FSx). Kurt caught this — deploy-host used FSx because its 20 GiB root couldn't hold multi-GiB dumps; migrate-host's 40 GiB high-IOPS gp3 has plenty of room. Bonus: removes FSx dependency + `nfs-common` package + `use-env sandbox` boot step. |
 
 ---
 
@@ -227,8 +239,14 @@ AskUserQuestion in the 2026-08-05 planning session.
 - **AMI**: `ami-*` resolved from SSM public parameter
   `/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id`
   (same as deploy-host — arm64 correct for Graviton).
-- **Placement**: AWS default VPC (parallel to deploy-host). Survives
-  project VPC teardowns.
+- **Placement**: **Project VPC, private subnet** (revised per Kurt's
+  review 2026-08-05). Unlike deploy-host (which lives in the default
+  VPC to survive project teardowns), the migrate-host is ephemeral —
+  it doesn't need to outlive the project VPC. Living IN the project
+  VPC gives direct SG-based access to RDS with zero peering complexity.
+  If someone runs `destroy-all` while a migrate-host is up (unusual),
+  they need to `destroy-migrate-host` first — mirroring how any
+  workload compute stack works today.
 - **Access**: SSM Session Manager only. No SSH keypair. No inbound.
 - **Cost math**: $0.214/hr × 1 hour = ~$0.21/run for the instance
   itself; plus ~$0.06/run for the provisioned-IOPS EBS; plus ~$0.08/run
@@ -248,9 +266,11 @@ BlockDeviceMappings:
       Encrypted: true
 ```
 
-**Sizing math**: ~5 GiB OS + ~3 GiB staged dump (on FSx actually, so
-subtract) + ~6 GiB imported `/var/lib/mysql` + working temp ≈ 15 GiB
-peak. 40 GiB gives 25 GiB slack for future bigger client DBs.
+**Sizing math** (revised 2026-08-05 for local dump staging): ~5 GiB
+OS + ~3 GiB staged dump at `/var/tmp/migration/zinew.sql` (local
+disk now, not FSx — see §4.11) + ~6 GiB imported `/var/lib/mysql`
++ working temp ≈ 15 GiB peak. 40 GiB gives 25 GiB slack for future
+bigger client DBs.
 
 **Why provisioned IOPS matters here**: bulk-load `mysql < dump.sql`
 today stalls on 3000-IOPS-capped root EBS. Bumping to 10000 IOPS +
@@ -314,11 +334,30 @@ performance_schema               = OFF  # save ~500 MB for buffer pool
 - `performance_schema = OFF`: saves ~500 MiB RAM. We're not
   monitoring per-query stats during a bulk import.
 
-### 6.2 `restore-mysql.sh` session-flag wrap
+### 6.2 `restore-mysql.sh` — dump staging path + session-flag wrap
 
-Applied around the `mysql < dump.sql` call at line 283. Guarded by
-marker file so the wrap only fires on the migrate-host (deploy-host
-falls through to legacy behavior during Phase 1-4 rollout).
+**Dump staging path change** (revised 2026-08-05 per Kurt's review):
+the current `DUMP_LOCAL_PATH="/var/www/mysql/zinew.sql"` defaults to
+FSx because deploy-host's 20 GiB root can't hold a multi-GiB dump.
+On migrate-host, override to `/var/tmp/migration/zinew.sql` (local
+40 GiB gp3 with plenty of room). Simplest way: honor the existing
+`DUMP_LOCAL_PATH` env var, and set it explicitly in the migrate-host
+dispatch:
+
+```bash
+DUMP_LOCAL_PATH="/var/tmp/migration/zinew.sql" \
+HOST_STACK=cf-migrate-host \
+make dispatch-restore-mysql
+```
+
+Or bake into the dispatch wrapper: when `HOST_STACK=cf-migrate-host`,
+default `DUMP_LOCAL_PATH` to `/var/tmp/migration/zinew.sql`. Same
+effect, less operator boilerplate.
+
+**Session-flag wrap** applied around the `mysql < dump.sql` call at
+line 283. Guarded by marker file so the wrap only fires on the
+migrate-host (deploy-host falls through to legacy behavior during
+Phase 1-4 rollout).
 
 ```bash
 if [ -f /etc/worxco/migrate-host-marker ]; then
@@ -406,35 +445,53 @@ size to 50 MB, (3) drop workers to 2.
   the instance exists (SSM SendCommand fails silently if no target),
   so nightly capture happens automatically on "keep" days.
 
-### 7.3 Peering SG ingress rules — INLINE
+### 7.3 Network access — trivially simple (project-VPC placement)
 
-The peering CONNECTION and ROUTES in `cf-deploy-peering.yaml` are
-per-env-VPC-pair (only one peering per VPC pair anyway) — those stay
-unchanged. The migrate-host inherits the peering.
+**Revised 2026-08-05 per Kurt's review**: migrate-host lives IN the
+project VPC (§5.1), so there is NO peering complexity for the
+migrate-host at all. Deploy-host's own peering stack
+(`cf-deploy-peering.yaml`) is unchanged — that's about deploy-host's
+access from the default VPC to the project VPC, which is unrelated
+to migrate-host now.
 
-What the migrate-host stack needs to ADD: four `AWS::EC2::SecurityGroupIngress`
-resources granting FSx (2049 + 111), RDS (5432), and Valkey (6379)
-from the migrate-host SG. **Put those INSIDE `cf-migrate-host.yaml`**:
+**What migrate-host actually needs:**
+
+- **RDS access (only)**: outbound 5432 to the RDS SG. Inline SG
+  ingress rule in `cf-migrate-host.yaml`:
 
 ```yaml
-FSxIngressNFSFromMigrateHost:
+RDSIngressFromMigrateHost:
   Type: AWS::EC2::SecurityGroupIngress
   Properties:
     GroupId: !ImportValue
-      Fn::Sub: '${EnvironmentName}-fsx-sg-id'
+      Fn::Sub: '${EnvironmentName}-rds-sg-id'
     IpProtocol: tcp
-    FromPort: 2049
-    ToPort: 2049
+    FromPort: 5432
+    ToPort: 5432
     SourceSecurityGroupId: !Ref MigrateHostSecurityGroup
-    Description: NFS from migrate-host (via VPC peering)
-# ... same shape for FSx portmapper 111, RDS 5432, Valkey 6379
+    Description: Postgres from migrate-host (pgloader target)
 ```
 
-**Why inline**: destroying the migrate-host stack must remove the
-ingress rules atomically. If those rules lived in a separate peering
-stack, tearing down migrate-host would fail (the SG can't be deleted
-while another stack references it). Inlining makes the stack
-lifecycle-atomic.
+- **AWS-service access**: S3 (fetch dump + backup state), Secrets
+  Manager (DB passwords), SSM (agent registration + SendCommand
+  target). All via **VPC endpoints already provisioned** by the
+  project VPC stack for the compute fleets — migrate-host inherits
+  them automatically by being in the same VPC.
+
+**What migrate-host does NOT need:**
+
+- **FSx access** — dump now stages on local disk (§4.11), not
+  `/var/www/mysql/`. No NFS mount, no `nfs-common` package.
+- **Valkey access** — Drupal caching isn't part of migration.
+- **VPC peering** — SSM SendCommand between deploy-host and
+  migrate-host goes over AWS APIs, not the VPC network.
+- **Public IP** — outbound is via VPC endpoints; there's nothing
+  external to reach.
+
+**Why inline the SG ingress rule** (same argument as before, still
+holds): destroying the migrate-host stack removes the SG. If the
+ingress rule referencing that SG lived in a separate peering-like
+stack, the destroy would fail. Inline = lifecycle-atomic.
 
 ### 7.4 Backup bucket stack
 
@@ -467,23 +524,30 @@ as the starting point, then:
 - SSM agent snap + session-manager-plugin .deb
 - RDS CA bundle in `/usr/local/share/ca-certificates/`
 - `git config --global --add safe.directory` for root
-- Endpoint helpers: `/usr/local/bin/{info-env,show-env,psql-env,valkey-env}`
-  + `/usr/local/sbin/{use-env,refresh-env-config}` + sudoers file.
-  Required because `run-pgloader.sh` sources `/etc/worxco/envs/sandbox`
-  for `DRUPAL_DB_HOST` etc.
+- Endpoint helpers: `/usr/local/bin/{info-env,show-env,psql-env}`
+  + `/usr/local/sbin/refresh-env-config` + sudoers file. Required
+  because `run-pgloader.sh` sources `/etc/worxco/envs/sandbox` for
+  `DRUPAL_DB_HOST` etc. **NOTE: dropping `use-env` and `valkey-env`
+  from the helper set** — `use-env` manages FSx mounts (not needed),
+  `valkey-env` manages Valkey connection (not needed for migration).
 - Initial `refresh-env-config sandbox staging production`
-- Auto-`use-env sandbox` on first boot so `/var/www/mysql/` FSx
-  staging path is mounted and available for the dump file
 - MOTD (updated to say "migrate-host")
 - Admin SSH key sync from SSM registry
 
 **ADD** (migrate-host-specific):
-- `apt install mariadb-server mariadb-client pgloader postgresql-client
-  nfs-common gettext-base`
+- `apt install mariadb-server mariadb-client pgloader postgresql-client gettext-base`
+  (**gettext-base** is needed for envsubst in run-pgloader.sh; NO
+  `nfs-common` because we don't mount FSx)
+- `mkdir -p /var/tmp/migration` (dump staging dir on local disk)
 - Write `/etc/mysql/mariadb.conf.d/99-migrate-host.cnf` (contents from §6.1)
 - `systemctl enable --now mariadb` (**opposite** of deploy-host's
   `disable --now`)
 - Write `/etc/worxco/migrate-host-marker`
+
+**DO NOT include** (previously in the plan; removed after Kurt's review):
+- `nfs-common` package
+- Auto-`use-env sandbox` boot step (there's no FSx to mount)
+- Anything that references `/var/www/mysql/` on FSx
 
 ---
 
@@ -561,15 +625,32 @@ Add `MIGRATE_HOST_LIFECYCLE` env-var:
 - `keep`: deploy-migrate-host → run (leave up for the day)
 - `none`: dispatch to deploy-host (legacy — for Phase 1-3 rollout only)
 
-Phase sequence for `ephemeral`:
+Phase sequence for `ephemeral` (**revised 2026-08-05 per Kurt's review**
+— overlaps the CFN deploy with the preflight/backup work that
+doesn't need the migrate-host):
 
-1. `deploy-migrate-host` (~5-8 min)
-2. `wait-migrate-host-ready` (implicit)
-3. Phases -2, -1, 0 (env-refresh, preflight, safety backup — unchanged)
+1. `deploy-migrate-host &` — fire CFN deploy in **background** (~5-8 min)
+2. Concurrently:
+   - Phase -2: `refresh-env-config`
+   - Phase -1: `verify-drupal-installed` preflight
+   - Phase 0: `dispatch-db-backup` (safety-net backup of current sandbox DB)
+3. `wait-migrate-host-ready` — join point, block until CFN + cloud-init done
 4. Phase 1: `dispatch-restore-mysql HOST_STACK=cf-migrate-host`
 5. Phase 2: `dispatch-run-pgloader HOST_STACK=cf-migrate-host`
 6. `destroy-migrate-host CONFIRMED=yes`
 7. Phase 3: `clear-drupal-cache` (unchanged — still hits deploy-host)
+
+**Expected overlap savings**: 2-3 min. Preflights are fast (usually
+under 2 min combined), so the CFN deploy is almost certainly still
+running when they finish — the `wait-migrate-host-ready` at step 3
+absorbs the remaining deploy time cleanly.
+
+**Implementation note**: backgrounding `make` in a Makefile recipe
+requires `&` + tracking the PID for `wait`. Cleaner: a small
+`deploy-migrate-host-async` target that fires the deploy in the
+background and returns immediately, plus `wait-migrate-host-ready`
+blocking on the CFN stack reaching CREATE_COMPLETE + marker file
+existing. Same pattern as any parallel-orchestration make target.
 
 Once Phase 5 lands (deploy-host shrink), `ephemeral` becomes the
 locked default and `none` is deprecated.
@@ -592,8 +673,8 @@ Makefile targets.
 - `make ssm-migrate-host` gives a shell
 - `systemctl status mariadb` shows active
 - `pgloader --version` prints (validates the SBCL binary is functional)
-- `use-env sandbox` mounts FSx; `psql-env sandbox -c 'select 1'`
-  reaches RDS
+- `psql-env sandbox -c 'select 1'` reaches RDS (proves in-project-VPC
+  network path + RDS SG ingress + endpoint-helper scripts all work)
 
 ### Phase 2 — Tuning (prove the speedup)
 
@@ -659,6 +740,14 @@ noted as legacy paths.
 
 ## §12 — Non-Goals for MVP (explicit deferrals)
 
+- **Pre-baked AMI** (Phase 6 candidate per Kurt's §2.1 comment).
+  Baking a Packer/EC2-Image-Builder AMI with MariaDB + pgloader +
+  tuning drop-in + bootstrap-installed tools pre-provisioned would
+  drop first-boot time from ~3-4 min (bootstrap.sh) to ~90 sec
+  (AMI resume). Real speed win, but not while we're iterating on
+  tuning — every my.cnf tweak or WITH-block edit would require a
+  new AMI bake. Right time to do this: after Phase 4 stabilizes
+  and the tuning proves out across 3-5 successful ephemeral cycles.
 - **pigz-parallel tar** for restore-files/codebase/private. Single-threaded
   `gzip` in `tar xzf` is a knob we could turn, but the underlying
   workload is FSx-I/O-bound — CPU parallelism from pigz doesn't
@@ -883,7 +972,38 @@ INSERT round-trips to RDS. Meaningful but not game-changing.
 Combined effect: `concurrency=4` gets ~3-4× wins wall-time; other
 knobs each add ~10-30%.
 
-### C.3 Why bulk-load MariaDB tuning is safe for a throwaway box
+### C.3 Why migrate-host lives in project VPC (not default VPC)
+
+Deploy-host lives in the default VPC specifically so it can survive
+`destroy-all` — it's a control-plane host that outlives any given
+environment's project VPC. That was the right call for deploy-host.
+
+Migrate-host has a completely different lifecycle: **it only exists
+during a migration run**. It doesn't need to survive `destroy-all`
+because a `destroy-all` implies you're rebuilding, which implies
+you'd need to `migrate-full-all` again after, which implies a new
+migrate-host anyway.
+
+Given migrate-host is scoped to a single environment's migration
+window, placing it INSIDE that environment's project VPC removes
+an entire class of complexity:
+
+- No peering resources
+- No routes on either side
+- No cross-VPC SG references
+- No `cf-migrate-peering.yaml`
+- No dependency on `cf-deploy-peering.yaml` for network access
+- Direct SG-to-SG ingress on RDS (one 5-line YAML block, inline)
+
+SSM SendCommand (the ONLY way anything talks to migrate-host from
+outside — deploy-host or Mac) uses AWS APIs, not the VPC network
+path. So no peering is needed for control-plane traffic either.
+
+This was a design bug I made in the original draft — Kurt caught it
+in his 2026-08-05 review. Documenting the corrected reasoning here
+so future-me doesn't reintroduce the mistake.
+
+### C.4 Why bulk-load MariaDB tuning is safe for a throwaway box
 
 The tuning in §6.1 turns off durability features:
 `flush_log_at_trx_commit=0`, `doublewrite=0`, `sync_binlog=0`,
