@@ -365,6 +365,49 @@ git config --global --add safe.directory /home/ubuntu/projects/cf-scalable-web \
   || echo "WARN: could not set git safe.directory (non-fatal)"
 
 # ============================================================
+step "Auto-restore operator state from S3 (if a prior backup exists)"
+# ============================================================
+# Symmetric with destroy-migrate-host's auto-backup hook: on every
+# destroy, the Makefile runs `make backup-migrate-host` which uploads
+# a tarball of SSH keys / dotfiles / shell history / etc. to
+# s3://sandbox-migrate-host-backups-kv-worxco/config/migrate-host-latest.tar.gz.
+# Here on first boot we pull that tarball back down so the operator's
+# environment survives destroy → deploy cycles.
+#
+# First-ever deploy (bucket empty): head-object returns 404, we log
+# and skip. Subsequent deploys: restore-state.sh does its 7-phase
+# restore with pre-restore snapshot in /tmp for undo.
+#
+# Non-fatal on restore-state.sh failure: we WARN and continue so the
+# operator gets a working (if empty) box. They can inspect the log and
+# manually `make restore-migrate-host` if they want to try again.
+_RESTORE_BUCKET="sandbox-migrate-host-backups-kv-worxco"
+_RESTORE_KEY="config/migrate-host-latest.tar.gz"
+_RESTORE_SCRIPT="/home/ubuntu/projects/cf-scalable-web/scripts/migrate-host/restore-state.sh"
+
+if aws s3api head-object \
+     --bucket "$_RESTORE_BUCKET" --key "$_RESTORE_KEY" \
+     --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+  echo "Prior backup present at s3://$_RESTORE_BUCKET/$_RESTORE_KEY"
+  if [ -x "$_RESTORE_SCRIPT" ]; then
+    echo "Running restore-state.sh (auto, first-boot)..."
+    if CONFIRMED=yes bash "$_RESTORE_SCRIPT"; then
+      echo "OK: operator state restored from S3"
+    else
+      echo "WARN: restore-state.sh failed (exit $?). Box is functional but"
+      echo "      SSH keys / dotfiles / history were not restored."
+      echo "      Retry manually from the Mac: make restore-migrate-host"
+    fi
+  else
+    echo "WARN: $_RESTORE_SCRIPT not found or not executable — skipping restore"
+  fi
+else
+  echo "No prior backup at s3://$_RESTORE_BUCKET/$_RESTORE_KEY"
+  echo "  (first-ever deploy, or bucket was cleared). Skipping auto-restore."
+fi
+unset _RESTORE_BUCKET _RESTORE_KEY _RESTORE_SCRIPT
+
+# ============================================================
 step "Worxco config directories + migrate-host marker"
 # ============================================================
 mkdir -p /etc/worxco/envs
