@@ -280,7 +280,30 @@ else
   # inside a sandbox VPC this is acceptable. If ever adapted for a
   # non-scratch environment, switch to --defaults-extra-file with a
   # mode-600 temp file so the password doesn't appear in ps output.
-  mysql -h 127.0.0.1 -u "$LOCAL_DB_USER" -p"$LOCAL_DB_PASS" "$LOCAL_DB_NAME" < "$DUMP_LOCAL_PATH"
+  #
+  # On the ephemeral migrate-host (marker file present) we wrap the
+  # dump in bulk-load session flags: skip FK + UNIQUE constraint
+  # checks during load, defer commit to the very end. Safe because
+  # dumps come from prod (already-consistent), and the DB is a
+  # throwaway scratch space. Combined with the 8 GiB buffer pool +
+  # innodb_flush_log_at_trx_commit=0 tuning in
+  # /etc/mysql/mariadb.conf.d/99-migrate-host.cnf, this hits the
+  # 3-5 min restore target from the design doc §6.
+  # NOTE: SQL_LOG_BIN is deliberately NOT in this wrap — it needs
+  # SUPER/BINLOG_ADMIN, which worxco@127.0.0.1 lacks. skip_log_bin
+  # in the drop-in makes it a no-op anyway.
+  if [ -f /etc/worxco/migrate-host-marker ]; then
+    log_info "migrate-host marker present — wrapping restore in bulk-load session flags"
+    {
+      echo "SET SESSION FOREIGN_KEY_CHECKS = 0;"
+      echo "SET SESSION UNIQUE_CHECKS      = 0;"
+      echo "SET SESSION AUTOCOMMIT         = 0;"
+      cat "$DUMP_LOCAL_PATH"
+      echo "COMMIT;"
+    } | mysql -h 127.0.0.1 -u "$LOCAL_DB_USER" -p"$LOCAL_DB_PASS" "$LOCAL_DB_NAME"
+  else
+    mysql -h 127.0.0.1 -u "$LOCAL_DB_USER" -p"$LOCAL_DB_PASS" "$LOCAL_DB_NAME" < "$DUMP_LOCAL_PATH"
+  fi
 
   time_elapsed=$(( SECONDS - time_start ))
   log_ok "Restore complete in ${time_elapsed}s ($(( SIZE_MB * 60 / (time_elapsed + 1) )) MB/min)"

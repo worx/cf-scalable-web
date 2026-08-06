@@ -40,7 +40,10 @@
 #   ENV_FILE           Path to sandbox env file (/etc/worxco/envs/sandbox)
 #   TEMPLATE_PATH      pgloader .load template  (<repo>/migration/pgloader/zinew.load.tmpl)
 #   RENDERED_PATH      Rendered .load path      (/tmp/zinew.load)
-#   PGLOADER_HEAP_MB   SBCL dynamic-space-size  (4096 — 4 GB)
+#   PGLOADER_HEAP_MB   SBCL dynamic-space-size  (10240 — 10 GB, sized
+#                        for r7g.xlarge migrate-host with 32 GiB RAM.
+#                        Old default of 4096 was sized for the 2 GiB
+#                        deploy-host with 4 GiB swap. Design doc §6.1.)
 #   MIGRATION_DB_NAME  Name of DB being migrated (zinew)
 #                        Used for source MariaDB precondition check AND
 #                        target Postgres schema verify. Pgloader creates
@@ -95,7 +98,7 @@ MIGRATION_BUCKET="${MIGRATION_BUCKET:-sandbox-migration-kv-worxco}"
 ENV_FILE="${ENV_FILE:-/etc/worxco/envs/sandbox}"
 TEMPLATE_PATH="${TEMPLATE_PATH:-$REPO_MIGRATION_DIR/pgloader/zinew.load.tmpl}"
 RENDERED_PATH="${RENDERED_PATH:-/tmp/zinew.load}"
-PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-4096}"
+PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-10240}"
 MIGRATION_DB_NAME="${MIGRATION_DB_NAME:-zinew}"
 
 # ============================================================
