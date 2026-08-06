@@ -304,16 +304,32 @@ step "MariaDB service: enable + start (opposite of deploy-host)"
 # ============================================================
 # Deploy-host installs mariadb and immediately disables/stops it (uses
 # on-demand). Migrate-host's WHOLE purpose is to run MariaDB, so we
-# leave it enabled and running. First-boot log tuning changes apply at
-# service start (systemd starts it fresh AFTER the drop-in is written
-# above).
-systemctl enable --now mariadb \
-  || echo "WARN: could not enable/start mariadb — check journalctl -u mariadb"
+# leave it enabled and running.
+#
+# CRITICAL: apt-get install mariadb-server ALREADY started the service
+# with distro defaults BEFORE our drop-in above was written. systemctl
+# --now on an already-running service is a no-op — it will NOT reload
+# the config. We must explicitly restart to pick up 99-migrate-host.cnf.
+systemctl enable mariadb \
+  || echo "WARN: could not enable mariadb — check journalctl -u mariadb"
+systemctl restart mariadb \
+  || echo "WARN: could not restart mariadb — check journalctl -u mariadb"
 
-# Give MariaDB a moment to finish its initial log-file allocation
-# (with innodb_log_file_size=1G it takes a few seconds).
+# Give MariaDB a moment to finish its 1G log-file allocation on restart.
 sleep 5
 systemctl status mariadb --no-pager | head -20 || true
+
+# Verify the drop-in was picked up — a bootstrap that leaves the buffer
+# pool at 128 MiB is a silent bug (the box works but pgloader/restore
+# are slow). Fail loudly if we see the distro default.
+BUFFER_POOL=$(mysql -Nse 'SELECT @@innodb_buffer_pool_size' 2>/dev/null || echo 0)
+if [ "$BUFFER_POOL" -lt 1073741824 ]; then
+  echo "ERROR: innodb_buffer_pool_size is ${BUFFER_POOL} (< 1 GiB)."
+  echo "       Drop-in /etc/mysql/mariadb.conf.d/99-migrate-host.cnf"
+  echo "       was not picked up. Check syntax + restart mariadb."
+  exit 1
+fi
+echo "OK: innodb_buffer_pool_size = ${BUFFER_POOL} bytes"
 
 # ============================================================
 step "AWS session-manager-plugin (SSM tunneling from migrate-host)"
