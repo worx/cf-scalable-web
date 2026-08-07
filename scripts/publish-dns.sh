@@ -157,21 +157,54 @@ fi
 # Verify against a public resolver (bypasses local cache). Poll for up to 60s.
 echo -n "  Verifying $SITE_NAME resolves (via 8.8.8.8)"
 DOT_COUNT=0
+RESOLVED=""
 for _ in $(seq 1 12); do
   RESOLVED=$(dig +short @8.8.8.8 "$SITE_NAME" 2>/dev/null | head -2 | tr '\n' ' ')
   if [ -n "$RESOLVED" ]; then
     echo ""
     echo "  ✓ Resolves to: $RESOLVED"
-    echo ""
-    echo "  End-to-end test: make smoke-test-public ENV=$ENV"
-    exit 0
+    break
   fi
   DOT_COUNT=$((DOT_COUNT + 1))
   if [ $((DOT_COUNT % 10)) -eq 0 ]; then printf "|"; elif [ $((DOT_COUNT % 5)) -eq 0 ]; then printf "+"; else printf "."; fi
   sleep 5
 done
+if [ -z "$RESOLVED" ]; then
+  echo ""
+  echo "  WARN: $SITE_NAME did not resolve via 8.8.8.8 within 60s." >&2
+  echo "        The change is submitted; propagation may need more time." >&2
+  echo "        Re-test with: dig +short $SITE_NAME" >&2
+fi
+
+# Warm THIS machine's OS resolver + ALB path so any subsequent tooling
+# (smoke-test-public, admin-login-url, browser check) hits a primed
+# cache instead of paying first-lookup latency. We do NOT care about
+# the HTTP status — pre-migration this returns 302→/core/install.php
+# because Drupal's schema `zinew` is empty until pgloader runs. The
+# curl's REAL job is to force our local resolver to query Route 53
+# authoritatively and cache the fresh answer. Best-effort throughout;
+# never blocks the target's exit code.
 echo ""
-echo "  WARN: $SITE_NAME did not resolve via 8.8.8.8 within 60s." >&2
-echo "        The change is submitted; propagation may need more time." >&2
-echo "        Re-test with: dig +short $SITE_NAME" >&2
+echo "  Warm-up: priming local resolver + ALB path for $SITE_NAME"
+if [ "$(uname -s)" = "Darwin" ]; then
+  sudo -n dscacheutil -flushcache 2>/dev/null || true
+  sudo -n killall -HUP mDNSResponder 2>/dev/null || true
+elif command -v resolvectl >/dev/null 2>&1; then
+  sudo -n resolvectl flush-caches 2>/dev/null || true
+elif command -v systemd-resolve >/dev/null 2>&1; then
+  sudo -n systemd-resolve --flush-caches 2>/dev/null || true
+fi
+WARMUP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" \
+  --max-time 10 --retry 2 \
+  "https://$SITE_NAME/" 2>/dev/null || echo "curl-error")
+case "$WARMUP_CODE" in
+  200) echo "  ✓ Warm-up curl → HTTP 200 (Drupal serving migrated content)" ;;
+  302) echo "  ✓ Warm-up curl → HTTP 302 (Drupal not yet migrated — expected pre-pgloader)" ;;
+  000|curl-error)
+       echo "  (warm-up curl couldn't connect — DNS still propagating? Re-check later.)" ;;
+  *)   echo "  (warm-up curl → HTTP $WARMUP_CODE — non-fatal, resolver still primed)" ;;
+esac
+
+echo ""
+echo "  End-to-end test: make smoke-test-public ENV=$ENV"
 exit 0  # Submission succeeded; we don't want to block on slow propagation.
