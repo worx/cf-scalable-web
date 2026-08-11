@@ -223,11 +223,19 @@ check_param "/${ENV_NAME}/s3/image-builder-bucket" "S3" \
   "make deploy-storage ENV=${ENV_NAME}"
 
 # --- AMI Parameters ---
+# php74 is skipped when the top-level Makefile has determined PHP74 is
+# disabled for this env (EnablePHP74=false in compute-php-<env>.json).
+# PHP74_ENABLED comes in via the environment; defaults to true for
+# backward compat when the script is invoked standalone.
 section_header "AMI (Image Builder)" "Makefile update-ami-param"
 check_param "/${ENV_NAME}/ami/nginx" "AMI" \
   "make update-ami-param ENV=${ENV_NAME} PIPELINE=nginx"
-check_param "/${ENV_NAME}/ami/php74" "AMI" \
-  "make update-ami-param ENV=${ENV_NAME} PIPELINE=php74"
+if [ "${PHP74_ENABLED:-true}" = "true" ]; then
+  check_param "/${ENV_NAME}/ami/php74" "AMI" \
+    "make update-ami-param ENV=${ENV_NAME} PIPELINE=php74"
+else
+  echo "  (skipping /${ENV_NAME}/ami/php74 — PHP74_ENABLED=false)"
+fi
 check_param "/${ENV_NAME}/ami/php83" "AMI" \
   "make update-ami-param ENV=${ENV_NAME} PIPELINE=php83"
 

@@ -3,10 +3,15 @@
 # Copyright (C) 2026 The Worx Company
 # Author: Kurt Vanderwater <kurt@worxco.net>
 #
-# restart-php-fpm: SSM-exec `systemctl restart php<ver>-fpm` across both
-# PHP ASGs (php74 + php83) for the named environment. Use after editing
-# settings.php on FSx or otherwise needing every worker to re-read state
-# (OPcache bust, env-var refresh after rotating a secret, etc.).
+# restart-php-fpm: SSM-exec `systemctl restart php<ver>-fpm` across the
+# environment's PHP ASGs. Use after editing settings.php on FSx or
+# otherwise needing every worker to re-read state (OPcache bust, env-var
+# refresh after rotating a secret, etc.).
+#
+# ASGs targeted: php83 always; php74 only when PHP74_ENABLED=true (env
+# var, defaults to true for backward compat). The top-level Makefile
+# derives PHP74_ENABLED from EnablePHP74 in compute-php-<env>.json and
+# exports it into this script's environment.
 #
 # Usage: scripts/restart-php-fpm.sh <env>
 #
@@ -26,17 +31,24 @@ fi
 # instance IDs alongside live ones, and SSM rejects the whole batch with
 # `InvalidInstanceId — Instances not in a valid state for account`. The
 # ASG's Instances[] list is authoritative; describe-auto-scaling-groups
-# accepts multiple group names in one call, so we still get both ASGs in
-# a single AWS API call.
+# accepts multiple group names in one call.
+PHP74_ENABLED="${PHP74_ENABLED:-true}"
+if [ "$PHP74_ENABLED" = "true" ]; then
+  ASG_NAMES="${ENV}-php74-asg ${ENV}-php83-asg"
+else
+  ASG_NAMES="${ENV}-php83-asg"
+  echo "(PHP74_ENABLED=false — targeting only ${ENV}-php83-asg)"
+fi
+# shellcheck disable=SC2086
 IDS=$(aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names "${ENV}-php74-asg" "${ENV}-php83-asg" \
+  --auto-scaling-group-names $ASG_NAMES \
   --query 'AutoScalingGroups[].Instances[?LifecycleState==`InService` && HealthStatus==`Healthy`].InstanceId' \
   --output text 2>/dev/null || true)
 
 if [ -z "$IDS" ]; then
-  echo "WARN: no InService+Healthy PHP instances in env=$ENV (ASGs ${ENV}-php74-asg + ${ENV}-php83-asg)"
+  echo "WARN: no InService+Healthy PHP instances in env=$ENV (ASGs: $ASG_NAMES)"
   echo "      The ASGs may be mid-refresh or scaled to 0. Try again in a few minutes,"
-  echo "      or check: aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${ENV}-php74-asg ${ENV}-php83-asg"
+  echo "      or check: aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names $ASG_NAMES"
   exit 0
 fi
 

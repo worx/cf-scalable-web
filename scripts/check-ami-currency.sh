@@ -4,8 +4,14 @@
 # Author: Kurt Vanderwater <kurt@worxco.net>
 #
 # check-ami-currency: are the AMIs currently referenced in SSM
-# (for ENV's nginx + php74 + php83 pipelines) built from the SAME
-# recipe version that's in image-builder-<env>.json's RecipeVersion?
+# (for ENV's enabled pipelines) built from the SAME recipe version
+# that's in image-builder-<env>.json's RecipeVersion?
+#
+# Pipelines checked: nginx + php83 always; php74 only when
+# PHP74_ENABLED=true (env var, defaults to true for backward
+# compat). The top-level Makefile derives PHP74_ENABLED from the
+# EnablePHP74 setting in cloudformation/parameters/compute-php-
+# <env>.json and exports it into this script's environment.
 #
 # Each AMI carries an `Ec2ImageBuilderArn` tag whose ARN looks like:
 #   arn:aws:imagebuilder:REGION:ACCT:image/<recipe-name>/<version>/<build>
@@ -43,11 +49,20 @@ fi
 echo "Target recipe version (from $PARAMS_FILE): $TARGET_VERSION"
 echo ""
 
+PHP74_ENABLED="${PHP74_ENABLED:-true}"
+if [ "$PHP74_ENABLED" = "true" ]; then
+  PIPELINES="nginx php74 php83"
+else
+  PIPELINES="nginx php83"
+  echo "(PHP74_ENABLED=false — skipping php74 pipeline in currency check)"
+  echo ""
+fi
+
 NEED_BUILD=0
 printf "  %-8s  %-22s  %-10s  %s\n" "PIPELINE" "CURRENT AMI" "VERSION" "STATUS"
 printf "  %-8s  %-22s  %-10s  %s\n" "--------" "----------------------" "----------" "------"
 
-for PIPELINE in nginx php74 php83; do
+for PIPELINE in $PIPELINES; do
   AMI_ID=$(aws ssm get-parameter \
     --name "/$ENV/ami/$PIPELINE" \
     --query 'Parameter.Value' --output text 2>/dev/null) || AMI_ID=""

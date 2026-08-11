@@ -65,6 +65,20 @@ STACK_PREFIX := cf-scalable-web-$(ENV)
 # Parameter file location
 PARAM_FILE := cloudformation/parameters/$(ENV).json
 
+# Per-env PHP 7.4 enablement, read from the compute-php-<env>.json parameter
+# file. Any target that would spend real time or money on PHP74 (AMI bake,
+# SSM param update, ASG restart, cache-currency check) consults this macro
+# and skips PHP74 when disabled. Default: true (fail-safe — assume enabled
+# if the file is missing or the key isn't set).
+# Evaluated once at Makefile parse time (`:=`) since ENV is fixed at that
+# point. Exported so shell scripts (check-ami-currency.sh, restart-php-fpm.sh,
+# ssm-audit-params.sh) can honor the same flag.
+PHP74_ENABLED := $(shell test -f cloudformation/parameters/compute-php-$(ENV).json && \
+                        jq -r '.Parameters.EnablePHP74 // "true"' \
+                          cloudformation/parameters/compute-php-$(ENV).json 2>/dev/null \
+                        || echo true)
+export PHP74_ENABLED
+
 # Stack names
 VPC_STACK := $(STACK_PREFIX)-vpc
 IAM_STACK := $(STACK_PREFIX)-iam
@@ -2606,14 +2620,18 @@ build-amis-if-needed:  ## Build AMIs only if the currently-deployed ones aren't 
 		$(MAKE) build-amis ENV=$(ENV) VALIDATED=1; \
 	fi
 
-build-amis-async:  ## Trigger all 3 pipeline executions (fire-and-forget; no wait)
-	@echo "$(BLUE)Triggering all AMI builds...$(NC)"
+build-amis-async:  ## Trigger all enabled pipeline executions (fire-and-forget; no wait)
+	@echo "$(BLUE)Triggering AMI builds (PHP74_ENABLED=$(PHP74_ENABLED))...$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@$(MAKE) build-ami-nginx ENV=$(ENV)
-	@$(MAKE) build-ami-php74 ENV=$(ENV)
+	@if [ "$(PHP74_ENABLED)" = "true" ]; then \
+		$(MAKE) build-ami-php74 ENV=$(ENV); \
+	else \
+		echo "$(YELLOW)Skipping build-ami-php74 (EnablePHP74=false in compute-php-$(ENV).json)$(NC)"; \
+	fi
 	@$(MAKE) build-ami-php83 ENV=$(ENV)
 	@echo ""
-	@echo "$(GREEN)✓ All 3 builds triggered$(NC)"
+	@echo "$(GREEN)✓ Builds triggered$(NC)"
 
 wait-amis:  ## Poll Image Builder pipelines until all 3 reach AVAILABLE or any FAIL
 	@echo "$(BLUE)Waiting for all 3 pipelines to reach AVAILABLE...$(NC)"
@@ -2640,6 +2658,10 @@ wait-amis:  ## Poll Image Builder pipelines until all 3 reach AVAILABLE or any F
 				--query "imagePipelineList[?contains(name,'$(ENV)')].arn" \
 				--output text --region $(AWS_REGION) 2>/dev/null); do \
 			NAME=$$(echo "$$P" | awk -F/ '{print $$NF}' | sed -e 's/sandbox-//' -e 's/-pipeline//'); \
+			if [ "$$NAME" = "php74" ] && [ "$(PHP74_ENABLED)" != "true" ]; then \
+				printf "%s=SKIP  " "$$NAME"; \
+				continue; \
+			fi; \
 			STATUS=$$(aws imagebuilder list-image-pipeline-images --image-pipeline-arn "$$P" \
 				--output json --region $(AWS_REGION) 2>/dev/null \
 				| jq -r '.imageSummaryList | sort_by(.dateCreated) | reverse | .[0].state.status // "UNKNOWN"'); \
@@ -2703,14 +2725,18 @@ update-ami-param:  ## Write latest AMI ID to SSM (PIPELINE=nginx|php74|php83)
 		--region $(AWS_REGION) >/dev/null; \
 	echo "$(GREEN)✓ SSM parameter /$(ENV)/ami/$(PIPELINE) = $$AMI_ID$(NC)"
 
-update-ami-params:  ## Write latest AMI IDs to SSM for all 3 pipelines (nginx + php74 + php83)
-	@echo "$(BLUE)Updating SSM AMI parameters for all 3 pipelines...$(NC)"
+update-ami-params:  ## Write latest AMI IDs to SSM for all enabled pipelines
+	@echo "$(BLUE)Updating SSM AMI parameters (PHP74_ENABLED=$(PHP74_ENABLED))...$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=nginx
-	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74
+	@if [ "$(PHP74_ENABLED)" = "true" ]; then \
+		$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php74; \
+	else \
+		echo "$(YELLOW)Skipping update-ami-param PIPELINE=php74 (disabled)$(NC)"; \
+	fi
 	@$(MAKE) update-ami-param ENV=$(ENV) PIPELINE=php83
 	@echo ""
-	@echo "$(GREEN)✓ All 3 SSM AMI parameters updated$(NC)"
+	@echo "$(GREEN)✓ Enabled SSM AMI parameters updated$(NC)"
 
 # Alias matching the muscle-memory `deploy-*` naming convention of the
 # surrounding targets (deploy-image-builder, deploy-compute, etc.).
