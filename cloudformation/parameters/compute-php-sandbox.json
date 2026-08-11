@@ -1,7 +1,7 @@
 {
   "Parameters": {
     "EnvironmentName": "sandbox",
-    "EnablePHP74": "true",
+    "EnablePHP74": "false",
     "EnablePHP83": "true",
     "PHP74InstanceType": "t4g.micro",
     "PHP83InstanceType": "t4g.micro",
