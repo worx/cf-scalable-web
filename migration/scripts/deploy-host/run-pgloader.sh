@@ -98,8 +98,52 @@ MIGRATION_BUCKET="${MIGRATION_BUCKET:-sandbox-migration-kv-worxco}"
 ENV_FILE="${ENV_FILE:-/etc/worxco/envs/sandbox}"
 TEMPLATE_PATH="${TEMPLATE_PATH:-$REPO_MIGRATION_DIR/pgloader/zinew.load.tmpl}"
 RENDERED_PATH="${RENDERED_PATH:-/tmp/zinew.load}"
-PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-10240}"
 MIGRATION_DB_NAME="${MIGRATION_DB_NAME:-zinew}"
+
+# ============================================================
+# Host-appropriate pgloader tuning (marker-guarded)
+# ============================================================
+# Phase 2 (2026-08-06) introduced aggressive pgloader tuning sized for
+# the migrate-host (r7g.xlarge, 4 vCPU / 32 GiB). Those same values are
+# a bad match on the tiny deploy-host (t4g.small, 2 vCPU / 2 GiB RAM +
+# 4 GiB swap): batch=5000 × workers=4 × concurrency=4 concurrent worker
+# sets easily push past 2 GiB, and dynamic-space-size=10240 provokes
+# swap thrash.
+#
+# Solution: pick tuning based on /etc/worxco/migrate-host-marker,
+# symmetric with the restore-mysql.sh session-flag wrap. Every value
+# is still overridable by the caller's environment; the defaults just
+# differ by host.
+#
+# All values below are consumed by zinew.load.tmpl via envsubst —
+# updating the whitelist in the render step below is mandatory when
+# adding a new PGLOADER_* variable.
+if [ -f /etc/worxco/migrate-host-marker ]; then
+  # Migrate-host profile — Phase 2 aggressive tuning, design doc §6.1.
+  PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-10240}"
+  PGLOADER_WORKERS="${PGLOADER_WORKERS:-4}"
+  PGLOADER_CONCURRENCY="${PGLOADER_CONCURRENCY:-4}"
+  PGLOADER_BATCH_ROWS="${PGLOADER_BATCH_ROWS:-5000}"
+  PGLOADER_PREFETCH_ROWS="${PGLOADER_PREFETCH_ROWS:-5000}"
+  PGLOADER_BATCH_SIZE="${PGLOADER_BATCH_SIZE:-100 MB}"
+  PGLOADER_MAX_PARALLEL_INDEX="${PGLOADER_MAX_PARALLEL_INDEX:-4}"
+  PGLOADER_PROFILE="migrate-host"
+else
+  # Deploy-host profile — pre-Phase 2 conservative values known safe on
+  # 2 GiB RAM + 4 GiB swap. Progression documented in the .tmpl history
+  # comment: defaults (OOM) → 250 (safe) → 500 (comfortable).
+  PGLOADER_HEAP_MB="${PGLOADER_HEAP_MB:-4096}"
+  PGLOADER_WORKERS="${PGLOADER_WORKERS:-2}"
+  PGLOADER_CONCURRENCY="${PGLOADER_CONCURRENCY:-1}"
+  PGLOADER_BATCH_ROWS="${PGLOADER_BATCH_ROWS:-500}"
+  PGLOADER_PREFETCH_ROWS="${PGLOADER_PREFETCH_ROWS:-500}"
+  PGLOADER_BATCH_SIZE="${PGLOADER_BATCH_SIZE:-25 MB}"
+  PGLOADER_MAX_PARALLEL_INDEX="${PGLOADER_MAX_PARALLEL_INDEX:-1}"
+  PGLOADER_PROFILE="deploy-host"
+fi
+export PGLOADER_HEAP_MB PGLOADER_WORKERS PGLOADER_CONCURRENCY \
+       PGLOADER_BATCH_ROWS PGLOADER_PREFETCH_ROWS PGLOADER_BATCH_SIZE \
+       PGLOADER_MAX_PARALLEL_INDEX
 
 # ============================================================
 # Set up logging + on-exit S3 upload of the log file
@@ -126,12 +170,19 @@ _cleanup() {
 trap _cleanup EXIT
 
 log_step "run-pgloader — local MariaDB scratch → sandbox RDS PostgreSQL"
-log_info "MIGRATION_BUCKET   = $MIGRATION_BUCKET"
-log_info "ENV_FILE           = $ENV_FILE"
-log_info "TEMPLATE_PATH      = $TEMPLATE_PATH"
-log_info "RENDERED_PATH      = $RENDERED_PATH"
-log_info "PGLOADER_HEAP_MB   = $PGLOADER_HEAP_MB"
-log_info "MIGRATION_DB_NAME  = $MIGRATION_DB_NAME"
+log_info "MIGRATION_BUCKET            = $MIGRATION_BUCKET"
+log_info "ENV_FILE                    = $ENV_FILE"
+log_info "TEMPLATE_PATH               = $TEMPLATE_PATH"
+log_info "RENDERED_PATH               = $RENDERED_PATH"
+log_info "MIGRATION_DB_NAME           = $MIGRATION_DB_NAME"
+log_info "PGLOADER_PROFILE            = $PGLOADER_PROFILE"
+log_info "PGLOADER_HEAP_MB            = $PGLOADER_HEAP_MB"
+log_info "PGLOADER_WORKERS            = $PGLOADER_WORKERS"
+log_info "PGLOADER_CONCURRENCY        = $PGLOADER_CONCURRENCY"
+log_info "PGLOADER_BATCH_ROWS         = $PGLOADER_BATCH_ROWS"
+log_info "PGLOADER_PREFETCH_ROWS      = $PGLOADER_PREFETCH_ROWS"
+log_info "PGLOADER_BATCH_SIZE         = $PGLOADER_BATCH_SIZE"
+log_info "PGLOADER_MAX_PARALLEL_INDEX = $PGLOADER_MAX_PARALLEL_INDEX"
 if [ "${DRY_RUN:-}" = "yes" ]; then
   log_warn "DRY_RUN=yes — commands will be previewed, not executed"
 fi
@@ -276,7 +327,7 @@ else
   # literal ${...} that isn't in our whitelist survives untouched.
   # (Belt-and-suspenders — the template doesn't have any other
   # ${...} references today, but this guards a future edit.)
-  envsubst '${DRUPAL_DB_USER} ${DRUPAL_DB_PASS} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME}' \
+  envsubst '${DRUPAL_DB_USER} ${DRUPAL_DB_PASS} ${DRUPAL_DB_HOST} ${DRUPAL_DB_PORT} ${DRUPAL_DB_NAME} ${PGLOADER_WORKERS} ${PGLOADER_CONCURRENCY} ${PGLOADER_BATCH_ROWS} ${PGLOADER_PREFETCH_ROWS} ${PGLOADER_BATCH_SIZE} ${PGLOADER_MAX_PARALLEL_INDEX}' \
     < "$TEMPLATE_PATH" > "$RENDERED_PATH"
   chmod 600 "$RENDERED_PATH"
   log_ok "Rendered to $RENDERED_PATH (chmod 600)"

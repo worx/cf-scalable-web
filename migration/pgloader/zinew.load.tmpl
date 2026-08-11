@@ -27,31 +27,31 @@
 --   - Schema `zinew` comes from Drupal's own settings.php, not
 --     pgloader — pgloader writes to the default (public) schema.
 --
--- WITH clause tuning (revised 2026-08-06 for migrate-host):
---   - batch rows = 5000, batch size = 100 MB, prefetch rows = 5000
---     Bumped 10× from the deploy-host-era 500. Sized against the
---     10 GiB SBCL heap on r7g.xlarge (design doc §6.1). batch size
---     hard-caps per-batch RAM so a giant blob row can't blow past
---     the row count.
---   - workers = 4, concurrency = 4
---     Four tables migrated concurrently, four worker threads per
---     table. Concurrency=4 is the biggest single wall-time win vs
---     the old strictly-serial concurrency=1 (design doc §6.3).
---   - max parallel create index = 4
---     Post-load index builds run in parallel too. Was serial by
---     default even under workers=2.
+-- WITH clause tuning — values are host-appropriate, chosen at render
+-- time by run-pgloader.sh based on /etc/worxco/migrate-host-marker:
+--
+--   Migrate-host profile (r7g.xlarge, 32 GiB, design doc §6.1):
+--     workers=4, concurrency=4, batch rows=5000, prefetch=5000,
+--     batch size=100 MB, max parallel create index=4, heap=10 GiB.
+--
+--   Deploy-host profile (t4g.small, 2 GiB RAM + 4 GiB swap):
+--     workers=2, concurrency=1, batch rows=500, prefetch=500,
+--     batch size=25 MB, max parallel create index=1, heap=4 GiB.
+--     Pre-Phase 2 conservative values known safe under the 2 GiB RAM
+--     ceiling. Progression there was pgloader defaults (~25000/1000,
+--     OOM) → 250 (safe) → 500 (comfortable under 4 GB SBCL heap).
+--
+-- Placeholders below are envsubst'd from PGLOADER_* environment
+-- variables set in run-pgloader.sh; every value remains overridable
+-- by the caller's environment.
+--
+-- Structural options (always the same across profiles):
 --   - include drop, create tables/indexes, reset sequences, foreign keys
 --     Full destructive rebuild of the target — safe because the target
 --     is a scratch/staging DB, never prod.
 --   - downcase identifiers
 --     MySQL is case-insensitive by default; postgres is case-sensitive.
 --     Downcasing keeps Drupal's PDO queries happy without needing quotes.
---
--- Historical: pre-migrate-host, this ran on the t4g.small deploy-host
--- with 2 GiB RAM + 4 GiB swap. Progression there was defaults
--- (~25000/1000, OOM) → 250 (safe) → 500 (comfortable under 4 GB SBCL
--- heap + workers=2/concurrency=1). The 5000/4/4 values below are ONLY
--- safe on the beefier migrate-host (32 GiB RAM, 10 GiB SBCL heap).
 --
 -- CAST clauses (unchanged since first working version):
 --   - tinyint(1) -> boolean (Drupal's boolean-ish int columns)
@@ -70,12 +70,12 @@ LOAD DATABASE
        reset sequences,
        foreign keys,
        downcase identifiers,
-       batch rows = 5000,
-       batch size = 100 MB,
-       prefetch rows = 5000,
-       workers = 4,
-       concurrency = 4,
-       max parallel create index = 4
+       batch rows = ${PGLOADER_BATCH_ROWS},
+       batch size = ${PGLOADER_BATCH_SIZE},
+       prefetch rows = ${PGLOADER_PREFETCH_ROWS},
+       workers = ${PGLOADER_WORKERS},
+       concurrency = ${PGLOADER_CONCURRENCY},
+       max parallel create index = ${PGLOADER_MAX_PARALLEL_INDEX}
 
   CAST type tinyint when (= 1 precision) to boolean drop typemod using tinyint-to-boolean,
        type datetime to timestamptz drop default drop not null using zero-dates-to-null,
