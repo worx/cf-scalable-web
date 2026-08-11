@@ -75,6 +75,7 @@ STACK_PREFIX="cf-scalable-web"
 TARGET_CLASS="db.r7g.xlarge"
 TARGET_IOPS=""          # empty = don't modify
 TARGET_THROUGHPUT=""    # empty = don't modify
+BOOST_ASYNC=""          # non-empty = --async mode (don't wait for available)
 
 # RDS enforcement: storage must be >= this GiB before IOPS/throughput
 # can be modified above the gp3 baseline.
@@ -86,13 +87,26 @@ GP3_MIN_STORAGE_FOR_IOPS_GIB=400
 usage() {
   cat >&2 <<USAGE
 Usage:
-  $0 <env> boost  [--target-class CLASS] [--target-iops N] [--target-throughput N]
+  $0 <env> boost   [--target-class CLASS] [--target-iops N] [--target-throughput N] [--async]
   $0 <env> revert
+  $0 <env> wait-if-boosting
 
 Defaults for boost:
   --target-class       $TARGET_CLASS
   --target-iops        (unset — do not modify. Set only if storage >= 400 GiB.)
   --target-throughput  (unset — do not modify. Set only if storage >= 400 GiB.)
+
+Modes:
+  --async           boost submits the modify + saves the pre-boost config
+                    to SSM, then RETURNS IMMEDIATELY without waiting for
+                    RDS to reach 'available'. Pair with 'wait-if-boosting'
+                    at the point in your workflow that actually needs the
+                    boosted RDS ready.
+  wait-if-boosting  If a boost is currently in flight (SSM parameter
+                    exists), wait for RDS to reach 'available'. No-op if
+                    no boost is in progress. Idempotent — safe to call
+                    from any hook that gates on "RDS is ready for
+                    heavy work" (e.g. before pgloader dispatch).
 USAGE
   exit 2
 }
@@ -280,6 +294,19 @@ boost() {
     --region "$AWS_REGION" >/dev/null
   log_ok "Modify request submitted."
 
+  if [ -n "$BOOST_ASYNC" ]; then
+    # --async mode: caller is responsible for calling wait-if-boosting
+    # later at the point in their workflow that gates on RDS being ready.
+    # Cleanup trap stays cleared (nothing to roll back — modify request
+    # was accepted; failures during the actual apply are the caller's to
+    # handle via wait-if-boosting or the revert function).
+    trap - EXIT INT TERM
+    log_ok "Boost SUBMITTED (async) — $modify_desc"
+    log_info "RDS is now transitioning. Call '$0 $env wait-if-boosting'"
+    log_info "before any step that requires RDS to be at the boosted config."
+    return 0
+  fi
+
   wait_available "$instance_id" "boost"
 
   # Success — clear the failure-cleanup trap so revert can be called
@@ -289,6 +316,48 @@ boost() {
 
   log_ok "Boost complete — RDS is now $modify_desc."
   log_info "Remember: run '$0 $env revert' after your migration completes."
+}
+
+# ============================================================
+# wait_if_boosting — idempotent gate for downstream steps
+# ============================================================
+# If /$env/rds/pre-migration-config exists, a boost is in flight (or
+# completed but not yet reverted). Wait for RDS to reach 'available'
+# so the next step gets the boosted config. If no SSM parameter,
+# no boost in flight — return silently.
+#
+# Safe to call from any hook that gates on "RDS is ready for heavy
+# work" — e.g. prepended to dispatch-run-pgloader. Idempotent by
+# design; costs one describe-db-instances call in the no-boost case.
+wait_if_boosting() {
+  local env="$1"
+  local ssm_name="/${env}/rds/pre-migration-config"
+
+  if ! aws $AWS_PROFILE_ARG ssm get-parameter --name "$ssm_name" \
+        --region "$AWS_REGION" >/dev/null 2>&1; then
+    # No boost in flight; nothing to wait for.
+    return 0
+  fi
+
+  local instance_id
+  instance_id=$(lookup_instance_id "$env")
+
+  # Check current status. If already available, no wait needed. If
+  # 'modifying' (or 'backing-up', 'rebooting', etc.), wait.
+  local status
+  status=$(aws $AWS_PROFILE_ARG rds describe-db-instances \
+    --db-instance-identifier "$instance_id" \
+    --query 'DBInstances[0].DBInstanceStatus' \
+    --output text --region "$AWS_REGION" 2>/dev/null || echo "unknown")
+
+  if [ "$status" = "available" ]; then
+    log_info "RDS is available; async boost already completed."
+    return 0
+  fi
+
+  log_info "Boost in flight (RDS status='$status'); waiting for available..."
+  wait_available "$instance_id" "async-boost"
+  log_ok "RDS is now available at the boosted config."
 }
 
 revert() {
@@ -368,14 +437,16 @@ while [ $# -gt 0 ]; do
     --target-class)       TARGET_CLASS="$2";      shift 2 ;;
     --target-iops)        TARGET_IOPS="$2";       shift 2 ;;
     --target-throughput)  TARGET_THROUGHPUT="$2"; shift 2 ;;
+    --async)              BOOST_ASYNC="yes";      shift 1 ;;
     *) log_error "Unknown flag: $1"; usage ;;
   esac
 done
 
 case "$SUBCOMMAND" in
-  boost)  boost  "$ENV" ;;
-  revert) revert "$ENV" ;;
-  *)      usage ;;
+  boost)             boost             "$ENV" ;;
+  revert)            revert            "$ENV" ;;
+  wait-if-boosting)  wait_if_boosting  "$ENV" ;;
+  *)                 usage ;;
 esac
 
 # License: GPL-2.0-or-later

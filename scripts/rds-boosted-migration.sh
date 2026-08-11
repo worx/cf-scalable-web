@@ -60,9 +60,14 @@ if [ "${SKIP_RDS_BOOST:-}" = "yes" ]; then
   exec "$@"
 fi
 
-# Boost. If this fails, we don't run the wrapped command and we don't
-# try to revert (there's nothing saved to revert to).
-"$TUNING_SCRIPT" "$ENV" boost || {
+# Boost --async. Submits the RDS modify + saves the pre-boost config to
+# SSM, then returns immediately WITHOUT waiting for RDS to reach
+# 'available'. This lets the wrapped command's first step (usually
+# restore-mysql on migrate-host) run CONCURRENTLY with the RDS reboot,
+# saving 3-5 min per run. The pgloader dispatch step will call
+# 'wait-if-boosting' before actually connecting to RDS — that's the
+# gate that guarantees RDS is ready when it matters.
+"$TUNING_SCRIPT" "$ENV" boost --async || {
   echo "ERROR: RDS boost failed; aborting before running wrapped command" >&2
   exit 1
 }

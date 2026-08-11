@@ -819,6 +819,13 @@ dispatch-run-pgloader:  ## Fire run-pgloader on deploy-host via SSM (walk-away s
 	@# 2-hour default POLL_TIMEOUT matches the observed pgloader wall time
 	@# for a full 12M-row load with index build. Override with
 	@# POLL_TIMEOUT=<seconds> for smaller/larger datasets.
+	@# Gate: if an --async RDS boost is in flight (SSM param exists), wait
+	@# for RDS to reach 'available' before pgloader connects. This is the
+	@# hook that turns rds-boosted-migration.sh's async boost into a
+	@# parallelized (concurrent-with-restore-mysql) flow. Idempotent — one
+	@# describe-db-instances call in the no-boost case; no wall-time cost
+	@# for non-boosted migrations.
+	@../scripts/rds-migration-tuning.sh $(if $(ENV),$(ENV),sandbox) wait-if-boosting
 	@./scripts/_ssm-run-deploy-host.sh run-pgloader
 
 dispatch-restore-files:  ## Fire restore-files on deploy-host via SSM (walk-away safe)  [FROM: Mac|deploy-host, PROFILE: ZI-Sandbox]

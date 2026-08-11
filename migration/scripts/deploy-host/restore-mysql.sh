@@ -59,7 +59,19 @@ source "$(dirname "$(readlink -f "$0")")/../_common.sh"
 # ============================================================
 MIGRATION_BUCKET="${MIGRATION_BUCKET:-sandbox-migration-kv-worxco}"
 DUMP_S3_KEY="${DUMP_S3_KEY:-dumps/zinew.sql}"
-DUMP_LOCAL_PATH="${DUMP_LOCAL_PATH:-/var/www/mysql/zinew.sql}"
+
+# DUMP_LOCAL_PATH default is host-specific:
+#   deploy-host:  /var/www/mysql/zinew.sql  (FSx mount at /var/www)
+#   migrate-host: /var/tmp/migration/zinew.sql  (local gp3, dir created
+#                 by scripts/migrate-host/bootstrap.sh; design doc §6.2).
+# Marker-guarded symmetric with the bulk-load session-flag wrap in
+# Phase 6. Always overridable via the caller's environment.
+if [ -f /etc/worxco/migrate-host-marker ]; then
+  DUMP_LOCAL_PATH="${DUMP_LOCAL_PATH:-/var/tmp/migration/zinew.sql}"
+else
+  DUMP_LOCAL_PATH="${DUMP_LOCAL_PATH:-/var/www/mysql/zinew.sql}"
+fi
+
 LOCAL_DB_NAME="${LOCAL_DB_NAME:-zinew}"
 LOCAL_DB_USER="${LOCAL_DB_USER:-worxco}"
 LOCAL_DB_PASS="${LOCAL_DB_PASS:-localscratchpass}"
