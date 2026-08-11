@@ -1074,6 +1074,34 @@ migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-f
 	@echo "$(CYAN)Sandbox Drupal now serves prod DB + files + private + media$(if $(filter yes,$(SKIP_CODEBASE)), (sandbox codebase preserved), + codebase).$(NC)"
 	@echo "$(CYAN)Smoke test: make admin-login-url ENV=sandbox$(NC)"
 
+# ============================================================
+# RDS-boosted variants of migrate-db-all and migrate-full-all
+# ============================================================
+# Wrap the migration in a temporary RDS upsize (db.t4g.micro → db.r7g.xlarge
+# + 10K IOPS / 500 MB/s gp3) that reverts on completion — even on
+# migration failure (trap in the wrapper script). Reduces pgloader wall
+# time from ~50 min to ~10-15 min (target from design doc §6.3 was 8-12
+# min, but that predates the confirmed RDS-side ceiling).
+#
+# Cost per run: ~$0.13 for the boosted window + ~10-15 min two-sided
+# reboot overhead. Break-even is a single migration saving > 15 min,
+# which every full-DB migration does.
+#
+# Escape hatch: SKIP_RDS_BOOST=yes bypasses boost + revert entirely,
+# useful when the RDS baseline is already the target class (e.g., prod
+# if we ever migrate there) or for dry-runs where wall time doesn't
+# matter.
+#
+# Recommended for local iteration / test cycles. NOT recommended for
+# production migrations (set SKIP_RDS_BOOST=yes there, or use the
+# non-boosted target directly).
+
+migrate-db-all-boosted:  ## migrate-db-all wrapped in temp RDS upsize (~30-40 min faster on sandbox)
+	@../scripts/rds-boosted-migration.sh $(ENV) $(MAKE) --no-print-directory migrate-db-all AUTO=$(AUTO)
+
+migrate-full-all-boosted:  ## migrate-full-all wrapped in temp RDS upsize (~30-40 min faster on sandbox)
+	@../scripts/rds-boosted-migration.sh $(ENV) $(MAKE) --no-print-directory migrate-full-all AUTO=$(AUTO) SKIP_CODEBASE=$(SKIP_CODEBASE)
+
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
 # Author: Kurt Vanderwater <kurt@worxco.net>
