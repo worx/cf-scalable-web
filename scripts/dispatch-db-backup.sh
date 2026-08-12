@@ -64,21 +64,25 @@ echo "Dispatching db-backup for env=$ENV DB=$DB_NAME..." >&2
 # take effect without a separate deploy step. CONFIRMED=yes because SSM
 # is non-interactive.
 #
-# git safe.directory: SSM runs commands as root, but the repo is owned
-# by ubuntu — git 2.35+ refuses to operate on repos owned by a different
-# user unless the path is whitelisted. `-c safe.directory=<path>` is
-# the one-shot inline whitelist (equivalent to `git config --global
-# --add safe.directory <path>` but scoped to this one invocation).
+# git pull runs as `ubuntu` so we inherit ubuntu's ~/.ssh/known_hosts
+# and the GitHub deploy-key setup that cf-deploy-host.yaml's UserData
+# installed. SSM ran this dispatched INNER_SCRIPT as root, and root
+# has no ~/.ssh/github_deploy_key nor github.com in known_hosts — a
+# plain root-side `git pull` fails with "Host key verification failed".
+# Matches the pattern already used in scripts/dispatch-clean-migration-baks.sh
+# and scripts/refresh-deploy-host-scripts.sh. Bug caught 2026-08-12
+# during full-test-cycle.sh run (task #42).
 #
 # Pull is best-effort: if it fails (network glitch, merge conflict,
 # whatever), we continue with whatever's already on disk rather than
-# blocking the whole flow.
+# blocking the whole flow. db-backup.sh below still runs as root
+# (needs to be — it invokes sudo -E to preserve the caller's env).
 INNER_SCRIPT=$(cat <<EOF_INNER
 #!/bin/bash
 set -e
-cd /home/ubuntu/projects/cf-scalable-web
-git -c safe.directory=/home/ubuntu/projects/cf-scalable-web pull --quiet \\
+su - ubuntu -c "cd /home/ubuntu/projects/cf-scalable-web && git pull --quiet" \\
   || echo "WARN: git pull failed — using existing checkout"
+cd /home/ubuntu/projects/cf-scalable-web
 CONFIRMED=yes DB="$DB_NAME" sudo -E scripts/deploy-host/db-backup.sh "$ENV" "$DB_NAME"
 EOF_INNER
 )
