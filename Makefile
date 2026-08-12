@@ -3142,9 +3142,17 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header, bypassing DNS, 
 	echo "  Host:   $$SITE_NAME"; \
 	echo "  URL:    https://$$SITE_NAME/  (via --resolve, no DNS lookup)"; \
 	BODY=$$(mktemp); \
-	HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" \
-		--resolve "$$SITE_NAME:443:$$ALB_IP" \
-		"https://$$SITE_NAME/" --max-time 20); \
+	HTTP=""; \
+	for attempt in 1 2 3; do \
+		HTTP=$$(curl -s -o "$$BODY" -w "%{http_code}" \
+			--resolve "$$SITE_NAME:443:$$ALB_IP" \
+			"https://$$SITE_NAME/" --max-time 20); \
+		[ "$$HTTP" = "200" ] && break; \
+		if [ "$$attempt" -lt 3 ]; then \
+			echo "  $(YELLOW)attempt $$attempt returned HTTP $$HTTP — retrying in 15s (ALB target-health may still be converging after restart-php-fpm)$(NC)"; \
+			sleep 15; \
+		fi; \
+	done; \
 	if [ "$$HTTP" = "200" ]; then \
 		echo "  $(GREEN)✓ Drupal returned HTTP 200 over HTTPS (DNS-bypassed)$(NC)"; \
 		head -3 "$$BODY"; \
@@ -3157,7 +3165,7 @@ smoke-test-drupal:  ## Curl the ALB with the Drupal Host header, bypassing DNS, 
 		rm -f "$$BODY"; \
 		exit 1; \
 	else \
-		echo "  $(RED)✗ Drupal returned HTTP $$HTTP$(NC)"; \
+		echo "  $(RED)✗ Drupal returned HTTP $$HTTP (after 3 attempts)$(NC)"; \
 		head -10 "$$BODY"; \
 		rm -f "$$BODY"; \
 		exit 1; \
