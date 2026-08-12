@@ -1082,13 +1082,12 @@ migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-f
 	@echo "$(CYAN)Smoke test: make admin-login-url ENV=sandbox$(NC)"
 
 # ============================================================
-# RDS-boosted variants of migrate-db-all and migrate-full-all
+# RDS-boosted variant of migrate-db-all
 # ============================================================
-# Wrap the migration in a temporary RDS upsize (db.t4g.micro → db.r7g.xlarge
-# + 10K IOPS / 500 MB/s gp3) that reverts on completion — even on
-# migration failure (trap in the wrapper script). Reduces pgloader wall
-# time from ~50 min to ~10-15 min (target from design doc §6.3 was 8-12
-# min, but that predates the confirmed RDS-side ceiling).
+# Wraps migrate-db-all in a temporary RDS upsize (db.t4g.micro →
+# db.r7g.xlarge + 10K IOPS / 500 MB/s gp3) that reverts on completion —
+# even on migration failure (trap in the wrapper script). Reduces
+# pgloader wall time from ~50 min to ~6 min (validated 2026-08-11/12).
 #
 # Cost per run: ~$0.13 for the boosted window + ~10-15 min two-sided
 # reboot overhead. Break-even is a single migration saving > 15 min,
@@ -1099,15 +1098,16 @@ migrate-full-all:  ## FULL migration: migrate-db-all + sync-s3-media + restore-f
 # if we ever migrate there) or for dry-runs where wall time doesn't
 # matter.
 #
-# Recommended for local iteration / test cycles. NOT recommended for
-# production migrations (set SKIP_RDS_BOOST=yes there, or use the
-# non-boosted target directly).
+# NOTE: only migrate-db-all has a -boosted variant. A migrate-full-all-
+# boosted target used to exist but was removed 2026-08-12 — it was
+# broken with HOST_STACK=cf-migrate-host (env-var propagated to
+# Phases 5-7 restore-files/private/codebase, which MUST run on
+# deploy-host for FSx access). scripts/full-test-cycle.sh is the
+# supported end-to-end runner and calls the DB-boosted portion +
+# file-restore portions with correct HOST_STACK scoping per phase.
 
 migrate-db-all-boosted:  ## migrate-db-all wrapped in temp RDS upsize (~30-40 min faster on sandbox)
 	@../scripts/rds-boosted-migration.sh $(ENV) $(MAKE) --no-print-directory migrate-db-all AUTO=$(AUTO)
-
-migrate-full-all-boosted:  ## migrate-full-all wrapped in temp RDS upsize (~30-40 min faster on sandbox)
-	@../scripts/rds-boosted-migration.sh $(ENV) $(MAKE) --no-print-directory migrate-full-all AUTO=$(AUTO) SKIP_CODEBASE=$(SKIP_CODEBASE)
 
 # License: GPL-2.0-or-later
 # Copyright (C) 2026 The Worx Company
