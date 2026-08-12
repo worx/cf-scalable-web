@@ -3056,48 +3056,53 @@ destroy-migrate-host:  ## Delete migrate-host (with final backup by default). CO
 		--stack-name $(MIGRATE_HOST_STACK) --region $(AWS_REGION)
 	@echo "$(GREEN)✓ Migrate host deleted$(NC)"
 
-install-drupal-full:  ## Full sandbox Drupal setup: install-drupal + smoke-test + publish-dns + smoke-test-public (~5-7 min)
-	@# Operator-friendly orchestrator on top of install-drupal. Adds
-	@# DNS publish + both smoke tests so a fresh env goes from "no
-	@# Drupal" to "publicly reachable and end-to-end verified" in one
-	@# call. Each step is strict (fail = abort) so the operator sees
-	@# which layer broke.
-	@#
-	@# Refactored 2026-07-31: install-drupal is now self-sufficient
-	@# — it publishes the nginx vhost and reloads the nginx fleet as
-	@# part of "installed." install-drupal-full no longer needs to
-	@# call publish-drupal-vhost and reload-nginx explicitly — those
-	@# happen inside install-drupal (via install-drupal-remote SSM).
-	@# Same functional result, cleaner semantics.
+install-drupal-full:  ## Install Drupal + publish DNS (~5-6 min). Smoke tests are a SEPARATE operator step (see docstring).
+	@# Two-step orchestrator: install Drupal on deploy-host + publish
+	@# the Route 53 alias so the env becomes reachable at its
+	@# configured site name. Nothing more.
 	@#
 	@# Steps:
-	@#   1. install-drupal-remote — installs Drupal AND publishes vhost
-	@#                              AND reloads nginx (all via install-drupal
-	@#                              on the deploy-host)
-	@#   2. smoke-test-drupal     — ALB+cert+nginx+PHP-FPM+Drupal (DNS-bypassed)
-	@#   3. publish-dns           — UPSERT Route 53 alias + SOA MIN preflight
-	@#   4. smoke-test-public     — end-to-end via real public DNS
+	@#   1. install-drupal-remote — SSM-dispatches install-drupal to the
+	@#                              deploy-host. Installs Drupal, creates
+	@#                              drupal_user in RDS, publishes vhost,
+	@#                              reloads nginx.
+	@#   2. publish-dns           — UPSERT Route 53 alias + SOA MIN preflight
+	@#                              + warm-up curl (see publish-dns.sh).
+	@#
+	@# What this target does NOT do (and why):
+	@#   - No smoke-test-drupal, no smoke-test-public. Both would fail on
+	@#     a cold-start env (Drupal points at empty `zinew` schema until
+	@#     migration runs; smoke tests would see the "not installed"
+	@#     302 → /core/install.php redirect and abort the whole target).
+	@#   - Verification is a deliberate operator step:
+	@#         make smoke-test-drupal ENV=<env>   # DNS-bypassed
+	@#         make smoke-test-public ENV=<env>   # via real DNS
+	@#     Run those AFTER migration has populated the `zinew` schema,
+	@#     not blindly after install-drupal-full.
+	@#
+	@# Historical note (2026-08-12): earlier version included both smoke
+	@# tests as Steps 2 + 4. That worked only on already-migrated envs;
+	@# cold-start callers hit a confusing false failure. Splitting the
+	@# smoke tests out matches the actual workflow — you install first,
+	@# migrate, THEN verify.
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)  install-drupal-full: ENV=$(ENV)$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
 	@echo ""
-	@echo "$(CYAN)Step 1/4: Install Drupal on deploy-host + publish vhost + reload nginx (via SSM, ~5 min)$(NC)"
+	@echo "$(CYAN)Step 1/2: Install Drupal on deploy-host + publish vhost + reload nginx (via SSM, ~5 min)$(NC)"
 	@$(MAKE) install-drupal-remote ENV=$(ENV)
 	@echo ""
-	@echo "$(CYAN)Step 2/4: Smoke-test Drupal (DNS-bypassed via --resolve)$(NC)"
-	@$(MAKE) smoke-test-drupal ENV=$(ENV)
-	@echo ""
-	@echo "$(CYAN)Step 3/4: Publish Route 53 alias for the env's site name$(NC)"
+	@echo "$(CYAN)Step 2/2: Publish Route 53 alias for the env's site name$(NC)"
 	@$(MAKE) publish-dns ENV=$(ENV)
-	@echo ""
-	@echo "$(CYAN)Step 4/4: End-to-end smoke test via real public DNS$(NC)"
-	@$(MAKE) smoke-test-public ENV=$(ENV)
 	@echo ""
 	@echo "$(GREEN)========================================$(NC)"
 	@echo "$(GREEN)  ✓ install-drupal-full done: ENV=$(ENV)$(NC)"
 	@SITE_NAME=$$(aws ssm get-parameter --name "/$(ENV)/drupal/site-name" \
 		--query 'Parameter.Value' --output text --region $(AWS_REGION) 2>/dev/null); \
-	echo "$(GREEN)  Sandbox Drupal live at https://$$SITE_NAME/$(NC)"
+	echo "$(GREEN)  Sandbox Drupal at https://$$SITE_NAME/  (may 302 until migration runs)$(NC)"
+	@echo "$(CYAN)  Verify after migration:$(NC)"
+	@echo "$(CYAN)    make smoke-test-drupal ENV=$(ENV)  # DNS-bypassed$(NC)"
+	@echo "$(CYAN)    make smoke-test-public ENV=$(ENV)  # via real DNS$(NC)"
 	@echo "$(GREEN)========================================$(NC)"
 
 install-drupal-remote:  ## SSM-dispatch `make install-drupal ENV=<env>` to the deploy-host

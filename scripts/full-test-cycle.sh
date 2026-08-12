@@ -123,19 +123,24 @@ echo ""
   # Longest of the three (deploy-migrate-host at ~5-6 min) sets the
   # wall time for this phase.
   echo ""
-  echo "### PHASE 2/11: deploy-migrate-host (bg) + install-drupal + publish-dns"
+  echo "### PHASE 2/11: deploy-migrate-host (bg) + install-drupal-full"
 
   make deploy-migrate-host &
   MIGRATE_PID=$!
 
-  make install-drupal-remote ENV="$ENV" && make publish-dns ENV="$ENV"
+  # install-drupal-full = install-drupal-remote + publish-dns. Post-2026-08-12
+  # cleanup: the old install-drupal-full also included smoke tests, which
+  # failed on cold-start (pre-migration Drupal 302's to /core/install.php).
+  # The current install-drupal-full drops those tests — smoke is a separate
+  # Phase 11 step here, run AFTER migration populates the zinew schema.
+  make install-drupal-full ENV="$ENV"
   FG_STATUS=$?
 
   wait "$MIGRATE_PID"
   MIGRATE_STATUS=$?
 
   if [ "$FG_STATUS" -ne 0 ]; then
-    echo "ERROR: install-drupal-remote or publish-dns failed (status=$FG_STATUS)" >&2
+    echo "ERROR: install-drupal-full failed (status=$FG_STATUS)" >&2
     exit 1
   fi
   if [ "$MIGRATE_STATUS" -ne 0 ]; then
