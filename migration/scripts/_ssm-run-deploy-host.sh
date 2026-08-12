@@ -311,8 +311,15 @@ while true; do
       --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
       --query Status --output text --region "$AWS_REGION" 2>/dev/null || echo "Pending")
 
+  # SSM has a brief null-status window right after send-command:
+  # get-command-invocation may SUCCEED but the Status field is null,
+  # which `aws cli --output text` prints as literal "None". Similarly
+  # the field can come back as empty string. Both mean "AWS hasn't
+  # settled a status yet — keep polling." Caught 2026-08-12 when a
+  # dispatch-db-backup call died with "None" on the first poll while
+  # the underlying command completed successfully seconds later.
   case "$STATUS" in
-    InProgress|Pending|Delayed)
+    InProgress|Pending|Delayed|None|"")
       DOT_COUNT=$((DOT_COUNT + 1))
       if [ $((DOT_COUNT % 10)) -eq 0 ]; then
         printf "|"
