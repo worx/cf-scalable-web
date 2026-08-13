@@ -54,3 +54,15 @@ node_modules/
 vendor/
 dist/
 build/
+
+# LaTeX intermediate build artifacts (docs/plans/*.tex renders)
+docs/plans/*.aux
+docs/plans/*.fdb_latexmk
+docs/plans/*.fls
+docs/plans/*.idx
+docs/plans/*.ilg
+docs/plans/*.ind
+docs/plans/*.log
+docs/plans/*.out
+docs/plans/*.toc
+docs/plans/*.xdv

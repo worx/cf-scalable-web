@@ -1,0 +1,635 @@
+% !TEX program = xelatex
+% !TEX indexOptions = -s
+%
+% LaTeX-on-Lambda — Discussion Reference
+% Prepared for the 2026-08-13 client meeting.
+%
+% Render:  latexmk -xelatex -f latex-on-lambda-2026-08-13.tex
+% Or:      xelatex file && makeindex file && xelatex file && xelatex file
+%
+% Content is deliberately NEUTRAL — options presented with trade-offs,
+% no author recommendation. Selection criteria in chapter 5 lets the
+% reader weigh options against their own priorities.
+
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{fontspec}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{makeidx}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdftitle={LaTeX-on-Lambda: Scaling Document Generation for the Residential Pivot},
+  pdfauthor={The Worx Company},
+  pdfsubject={Serverless LaTeX architecture options},
+  pdfkeywords={LaTeX, Lambda, Fargate, Batch, PDF, serverless, Drupal}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{LaTeX-on-Lambda Discussion Reference}
+\fancyhead[R]{2026-08-13}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!30!black}}{\thesubsection}{0.8em}{}
+
+\definecolor{callout}{RGB}{240,240,245}
+% Simple indented italic pull-quote for cited passages.
+% (Earlier version used colorbox+minipage but had brace-nesting issues.)
+\newenvironment{tradeoffs}
+  {\vspace{0.5em}\begin{quote}\small\itshape}
+  {\end{quote}\vspace{0.5em}}
+
+\setlength{\headheight}{14pt}
+
+\makeindex
+
+\title{\vspace{-2cm}\textbf{LaTeX-on-Lambda}\\[0.4em]\large Scaling Document Generation for the Residential Pivot\\[0.6em]\normalsize Discussion Reference}
+\author{The Worx Company \& Client\\Prepared by Kurt Vanderwater}
+\date{2026-08-13}
+
+\begin{document}
+\maketitle
+
+\vspace{-1em}
+\begin{center}
+\rule{0.6\linewidth}{0.4pt}\\
+\vspace{0.6em}
+\small\emph{Meeting context: current LaTeX-on-Docker monolith needs to move to a scalable execution model to support the residential-market pivot. This document aggregates prior planning, catalogs execution options, and gives the room shared vocabulary and comparable numbers for the discussion. Tone is deliberately \textbf{neutral} --- no vendor pushing a recommendation.}
+\end{center}
+
+\vspace{1em}
+\tableofcontents
+\newpage
+
+\section{Executive Summary}
+\label{sec:exec-summary}
+
+\subsection{The situation}
+LaTeX-generated documents\index{LaTeX} are currently produced by a Dockerized\index{Docker} \texttt{pdflatex}/\texttt{latexmk} runtime that lives on the client's single production server (32 GB RAM, running nginx + PHP + MySQL + the LaTeX container). For the current \textbf{commercial-only} order volume (\textasciitilde 7 orders/day), the monolithic setup is comfortable\index{monolith}.
+
+\subsection{Why we're revisiting}
+The client's \textbf{residential pivot}\index{residential pivot} projects a target volume of \textbf{20{,}000 sales per month} in a fully-automated flow --- roughly 100$\times$ current volume, with real concurrency requirements. The existing monolithic execution model is a poor fit for that shape of load. Separately, the operations side (WorxCo) is completing a move to a scalable, resilient AWS architecture that eliminates any single-server aggregations by design. The two forces converge on the same question: \emph{where should LaTeX execution live?}
+
+\subsection{What has already been done}
+Two years ago, an initial \textbf{MVP of a custom Lambda container image}\index{MVP} for LaTeX generation was built by a member of the client team. It worked end-to-end but was never taken to production because the residential pivot wasn't yet a business priority. That MVP is real institutional knowledge --- this discussion is not starting from zero.
+
+\subsection{What has changed in two years}
+Three material shifts:
+\begin{itemize}[nosep]
+  \item \textbf{Modern \texttt{latexmk} auto-iterates passes.} No more specifying "compile 2, 3, or 4 times to resolve TOC/indexes/tables." A single invocation runs to convergence.
+  \item \textbf{AWS Lambda container images matured.} 10 GB image size limit, 10 GB ephemeral storage, 10 GB memory --- all comfortably fit a full TeX Live installation plus generation temp space.
+  \item \textbf{New AWS execution options emerged}, notably App Runner (2021) and Fargate Spot (2020). Both are relevant to a re-evaluation of the "serverless LaTeX" design space.
+\end{itemize}
+
+\subsection{What this document does not do}
+It does \emph{not} pick a winner. Chapter~\ref{sec:options} presents the realistic options (Lambda, Fargate, Batch, App Runner, dedicated EC2), chapter~\ref{sec:selection} offers a set of \textbf{selection criteria} to evaluate against your team's own priorities, and chapters~\ref{sec:cost}--\ref{sec:rollout} give shared numbers and considerations for the group to weigh.
+
+\newpage
+
+\section{Current State}
+\label{sec:current-state}
+
+\subsection{Production monolith}
+A single production server currently hosts every component of the platform:
+
+\begin{itemize}[nosep]
+  \item nginx (web front-end)\index{nginx}
+  \item PHP-FPM (Drupal application server)\index{PHP-FPM}
+  \item MySQL (database)\index{MySQL}
+  \item Docker container running the LaTeX toolchain\index{Docker}
+  \item 32 GB RAM, sufficient for current commercial load
+\end{itemize}
+
+Because everything shares one memory pool, the LaTeX container can burst to 4--6 GB per document without competing with the web tier's normal working set. This works because the concurrency is naturally low.
+
+\subsection{Current volume}
+Order volume from the past three days: 8, 7, 6 --- a running average of \textbf{7 orders/day}\index{commercial volume}. Peak simultaneous LaTeX generations rarely exceeds one at a time. The Docker container has all the memory it wants because nothing else is asking.
+
+\subsection{Two Drupal routes that generate documents}
+The Drupal codebase invokes document generation from two distinct routes\index{Drupal routes}, both discovered during operations testing:
+
+\begin{itemize}[nosep]
+  \item \texttt{/zoning-info/conformance-report/\{id\}/latex-preview} --- custom \texttt{report} module; calls \texttt{LatexGenerator->renderTemplate()}; \texttt{.tex.twig} templates strongly imply the LaTeX toolchain
+  \item \texttt{/print/pdf/commerce\_order/\{id\}} --- provided by \texttt{entity\_print} module (8.x-2.18) with the DomPDF engine (pure PHP, no external binary)
+\end{itemize}
+
+Both routes generate synchronously in-request. On the small sandbox PHP instances (which deliberately do NOT have LaTeX installed --- adding it "would have far too much of a memory impact on these small machines"), both return HTTP 504 Gateway Timeout after \textasciitilde 60 seconds.
+
+\subsection{Why the current architecture works today}
+Two factors make the monolith comfortable for now:
+\begin{enumerate}[nosep]
+  \item Extreme headroom (32 GB) absorbs LaTeX's memory spikes
+  \item Low concurrency (single-digit orders/day) means requests essentially don't queue
+\end{enumerate}
+Neither factor holds under the residential pivot. Chapter~\ref{sec:why-not-grow} unpacks why.
+
+\newpage
+
+\section{Business Driver: The Residential Pivot}
+\label{sec:business-driver}
+
+\subsection{Target volume}
+Client's residential-market plan projects up to \textbf{20{,}000 sales per month}\index{residential pivot!volume target} in a fully-automated flow. That's:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Per month & 20{,}000 \\
+Per day (uniform) & \textasciitilde 667 \\
+Per hour (uniform) & \textasciitilde 28 \\
+Per business-hour day (8-hr peak) & \textasciitilde 84/hr \\
+Peak burst (10\% of daily in worst hour) & \textasciitilde 67/hr \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Concurrency implications}
+Residential automation typically clusters --- customers act on real-estate transactions during business hours, with peaks around morning and end-of-day. A conservative planning assumption is that peak-hour throughput is \textbf{2--4$\times$} the daily-uniform rate. That puts the design point somewhere between \textbf{50--120 documents per hour}, or one every 30--70 seconds on average.
+
+If any given document takes 20--45 seconds of LaTeX compute time, then at peak the system needs to support \textbf{multiple concurrent generations} without queuing latency ballooning.
+
+\subsection{Business consequences of getting this wrong}
+\begin{itemize}[nosep]
+  \item \textbf{Automation stalls} $\rightarrow$ orders sit in "pending PDF" state; customer perception of slow product
+  \item \textbf{Load-driven timeouts} $\rightarrow$ the web tier itself degrades when LaTeX consumes shared resources under burst
+  \item \textbf{Over-provisioning cost} $\rightarrow$ solving concurrency by growing a single server means paying for peak capacity 24/7 while using \textasciitilde 5\% of it
+\end{itemize}
+The right architecture handles these three simultaneously.
+
+\newpage
+
+\section{Why "Just Grow the Box" Fails at Scale}
+\label{sec:why-not-grow}
+
+\subsection{The memory math}
+A single LaTeX compile of a typical zoning-info conformance report consumes \textasciitilde 2--4 GB of resident memory during execution (varies with images, table complexity, and index depth). On a 32 GB monolith:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Concurrent generations} & \textbf{Peak memory pressure} \\
+\midrule
+1 (today's commercial) & 4 GB (comfortable) \\
+5 & 20 GB (tight; nginx + PHP + MySQL competing) \\
+10 & 40 GB (does not fit; OOM territory) \\
+20 & Guaranteed OOM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At the residential target volume, sustained 5--10 concurrent generations is baseline, not peak. The monolith cannot host this even after being sized up --- the shared-memory model itself is the failure.
+
+\subsection{The web-tier collateral damage}
+When LaTeX blocks PHP-FPM workers for tens of seconds, the FPM pool exhausts. \emph{All} incoming requests degrade, not just the ones asking for a PDF. Customer-facing latency rises across the entire product.
+
+\subsection{The 24/7-peak-cost problem}
+The residential load is bursty (business hours, day-of-week seasonality, marketing-event spikes). Growing a monolith to handle peak burst means paying for peak capacity around the clock. In a serverless or auto-scaling model, cost tracks utilization.
+
+\subsection{Deferred backlog reference}
+This project's internal backlog explicitly captures the "don't grow the boxes" position with an operator note:
+
+\begin{tradeoffs}
+\emph{"Every 504-fix increase (instance size, ALB timeout, PHP memory limit, DomPDF resource limits) leaves the base architecture wrong: a synchronous request handler blocking a web worker for tens of seconds while it generates a document. Under real load, even bigger instances FPM-pool-exhaust when many users hit 'View PDF' at once."} --- from \texttt{docs/memory/pdf-generation-lambda-candidates.md}
+\end{tradeoffs}
+
+\newpage
+
+\section{Options: Where LaTeX Can Live}
+\label{sec:options}
+
+Five realistic execution models --- each has a section in the appendices with technical specifics. This section gives them equal-footing overview and a side-by-side matrix.
+
+\subsection{Option A: AWS Lambda with container image}
+Custom Docker image (up to 10 GB) that contains TeX Live, invoked per-document via SQS trigger or synchronous invoke. Auto-scales to concurrency, zero infrastructure when idle. See Appendix~\ref{app:lambda}.
+
+\subsection{Option B: AWS Fargate (ECS or EKS)}
+Long-running container tasks that accept LaTeX jobs from an SQS queue. No cold starts (already-warm workers), no time limit, more control over persistent state. See Appendix~\ref{app:fargate}.
+
+\subsection{Option C: AWS Batch on Fargate}
+Purpose-built for queued compute workloads. Auto-provisions Fargate capacity based on queue depth, tears down when idle. Job-oriented, not request-oriented. See Appendix~\ref{app:batch}.
+
+\subsection{Option D: Dedicated EC2 Auto Scaling Group with LaTeX AMI}
+Long-lived EC2 instances baked with TeX Live in an AMI, sitting behind an internal ALB or SQS queue. Full control, familiar operational model. See Appendix~\ref{app:ec2}.
+
+\subsection{Option E: AWS App Runner}
+Container-based fully-managed service. Simpler than Fargate to operate (no ECS cluster), auto-scales to zero (when configured). Newer, less mature. See Appendix~\ref{app:apprunner}.
+
+\subsection{Comparison Matrix}
+
+{\footnotesize
+\begin{longtable}{@{}p{2.4cm}p{1.7cm}p{1.7cm}p{1.7cm}p{1.7cm}p{1.7cm}@{}}
+\toprule
+\textbf{Dimension} & \textbf{Lambda} & \textbf{Fargate} & \textbf{Batch} & \textbf{EC2 ASG} & \textbf{App Runner} \\
+\midrule
+\endhead
+
+Max execution time & 15 min & unlimited & unlimited & unlimited & unlimited \\
+Max memory & 10 GB & 120 GB & 120 GB & any & 4 GB \\
+Cold start & 1--10 s & seconds (task launch) & minutes (queue+launch) & instant (warm) & seconds \\
+Scales to zero & \textbf{yes} & no (min 1 task) & \textbf{yes} & no & \textbf{yes} \\
+Concurrency model & per-invoke & tasks & jobs & per-worker & per-instance \\
+Ops complexity & low & medium & medium-high & high & \textbf{lowest} \\
+LaTeX image fit & \textbf{excellent} (10 GB) & excellent & excellent & N/A (AMI) & good (4 GB memory limit) \\
+Cost @ 20K/mo & \textasciitilde\$15--25/mo & \textasciitilde\$60--90/mo & \textasciitilde\$40--60/mo & \textasciitilde\$50--100/mo & \textasciitilde\$40--70/mo \\
+Cost @ 100K/mo & \textasciitilde\$80--120/mo & \textasciitilde\$80--120/mo & \textasciitilde\$70--110/mo & \textasciitilde\$50--100/mo & \textasciitilde\$60--100/mo \\
+MVP leverage & \textbf{high} (image reusable) & medium & medium & low & low \\
+Async / sync fit & \textbf{both} & both & async only & both & both \\
+IaC maturity in project & \textbf{new build} & \textbf{new build} & \textbf{new build} & precedent (ASG pattern used elsewhere) & \textbf{new build} \\
+\bottomrule
+\end{longtable}
+}
+
+\emph{All cost figures are order-of-magnitude estimates at us-east-1 pricing, assuming 30-second average generation and 2 GB memory. Chapter~\ref{sec:cost} unpacks the model.}
+
+\newpage
+
+\section{Selection Criteria}
+\label{sec:selection}
+
+Rather than a recommendation, here is a framework for the group to weigh options against actual priorities. Each criterion below has an obvious "winner" among the options --- but that only matters if the criterion itself matters to \emph{this} team, on \emph{this} project, at \emph{this} moment.
+
+\subsection{Cost fit}
+\textbf{Winner at 20K/mo}: Lambda\index{Lambda!cost} (usage-based, tiny at that volume).\\
+\textbf{Winner at 100K+/mo}: EC2 ASG\index{EC2 ASG} (fixed always-on cheaper than per-invocation).\\
+\emph{Weight this if}: cost predictability or minimization is a stated goal. Residential is projected but not-yet-real; over-optimizing for volume that hasn't materialized may not pay off.
+
+\subsection{MVP leverage}
+\textbf{Winner}: Lambda (the 2-year-old custom-image MVP is directly reusable structurally; the image contents need modernization but the deployment shape is done).\\
+\emph{Weight this if}: reducing time-to-production matters more than picking the theoretical best.
+
+\subsection{Operational simplicity}
+\textbf{Winner}: App Runner (fewest moving parts). Lambda close second (no cluster, no VPC required by default).\\
+\textbf{Loser}: EC2 ASG (AMI lifecycle, patching, capacity planning).\\
+\emph{Weight this if}: the ops team is small or already stretched.
+
+\subsection{Cold-start tolerance}
+\textbf{Winner}: EC2 ASG (always warm). Fargate close second (task-level warm-pool).\\
+\textbf{Loser}: Lambda (1--10s cold start on a fresh container).\\
+\emph{Weight this if}: customer-facing UX requires sub-second document appearance. \emph{Doesn't matter if} the flow is async (email me the PDF).
+
+\subsection{Elasticity / peak absorption}
+\textbf{Winner}: Lambda (thousands of concurrent invocations available in the region-wide account quota, scales to peak in seconds).\\
+\textbf{Loser}: EC2 ASG (minutes to scale up new instances).\\
+\emph{Weight this if}: expected traffic patterns include sharp spikes (marketing events, batch imports, monthly runs).
+
+\subsection{Runtime limits}
+\textbf{Losers}: Lambda (15-min hard cap; if any document ever takes longer, it fails).\\
+\textbf{Winners}: Fargate, Batch, EC2 ASG (no time limit).\\
+\emph{Weight this if}: any generated document might exceed 15 minutes of compute --- rare for LaTeX but possible for large, image-heavy reports with many index-resolution passes.
+
+\subsection{Integration with existing WorxCo IaC}
+\textbf{Precedent}: EC2 ASG (the project already uses ASG-fronted architecture for nginx and PHP-FPM tiers).\\
+\textbf{New territory}: everything else.\\
+\emph{Weight this if}: consistency of infrastructure patterns across the platform is valued over per-workload optimization.
+
+\subsection{Vendor lock-in gradient}
+\textbf{Most portable}: EC2 ASG (a Linux VM running LaTeX --- runs anywhere).\\
+\textbf{Least portable}: Lambda (deeply Lambda-specific handler signature; container-image approach softens this significantly).\\
+\emph{Weight this if}: multi-cloud or on-prem migration is on any horizon.
+
+\newpage
+
+\section{Cost Projections}
+\label{sec:cost}
+
+\subsection{Assumptions}
+\begin{itemize}[nosep]
+  \item Average LaTeX compilation: 30 seconds, 2 GB memory
+  \item us-east-1 pricing
+  \item arm64 (Graviton) where the service supports it (Lambda, Fargate, EC2)
+  \item Fargate: 2 tasks running continuously for baseline; Fargate Spot @ 30--50\% list price
+  \item EC2 ASG: 2 $\times$ m6g.large baseline (2 vCPU, 8 GB), always-on
+  \item App Runner: 2 vCPU / 2 GB configuration, provisioned + active mix
+  \item No egress charges included (small PDFs, all within AWS to S3)
+\end{itemize}
+
+\subsection{Cost at various volumes}
+
+{\small
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Service} & \textbf{1K/mo} & \textbf{20K/mo} & \textbf{100K/mo} & \textbf{500K/mo}\\
+\midrule
+Lambda (arm64) & \$0.80 & \$16 & \$80 & \$400 \\
+Fargate (2 always-on) & \$65 & \$65 & \$90 & \$220 \\
+Fargate Spot (2 always-on) & \$25 & \$25 & \$40 & \$120 \\
+Batch on Fargate & \$5 & \$45 & \$100 & \$350 \\
+EC2 ASG (2 m6g.large) & \$110 & \$110 & \$110 & \$150 \\
+App Runner (2 vCPU baseline) & \$40 & \$50 & \$80 & \$240 \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+\subsection{Reading the cost curves}
+Three distinct cost shapes visible in the table:
+
+\begin{itemize}[nosep]
+  \item \textbf{Linear-with-usage} (Lambda, Batch, App Runner): near-zero at low volume, scale up cleanly with real load. Best when volume is uncertain or bursty.
+  \item \textbf{Flat-then-linear} (Fargate, Fargate Spot): base cost for keeping tasks warm; small marginal cost per additional job. Best when steady-state utilization justifies the baseline.
+  \item \textbf{Nearly-flat} (EC2 ASG): fixed cost dominates until you exceed baseline capacity. Cheapest at very high volume, most expensive at low.
+\end{itemize}
+
+\subsection{The crossover points}
+At the projected 20K/month: Lambda is the clear cost leader, but the delta vs Fargate Spot (\$16 vs \$25) is not decisive.\\
+At 100K/month: pricing converges into a \$80--\$120 band; other criteria dominate.\\
+At 500K/month: Lambda's per-invocation scaling starts to price it above always-on EC2.
+
+\newpage
+
+\section{From MVP to Production}
+\label{sec:mvp-to-prod}
+
+Any option chosen will need to bridge from "a working prototype" to "a production system that carries residential-order traffic." This chapter enumerates the work regardless of option.
+
+\subsection{Toolchain modernization}
+Two years of TeX Live releases and \texttt{latexmk}\index{latexmk} improvements to bring forward:
+
+\begin{itemize}[nosep]
+  \item \textbf{Auto-iterating passes}: single \texttt{latexmk -pdf -interaction=nonstopmode} call replaces the previous "specify 2, 3, or 4 passes" logic
+  \item \textbf{TeX Live 2024/2025}: current package ecosystem, security fixes since the MVP era
+  \item \textbf{Font handling}: if the templates use non-Latin scripts or ligature-heavy fonts, XeTeX or LuaTeX (rather than pdflatex) is the modern path
+\end{itemize}
+
+\subsection{Integration with Drupal}
+The two document-generating Drupal routes need to be re-shaped from "synchronous in-request" to "async fire-and-poll" for any external-execution model.
+
+\begin{itemize}[nosep]
+  \item \textbf{Route 1 (LaTeX conformance report)}: \texttt{/zoning-info/conformance-report/\{id\}/latex-preview} --- currently invokes \texttt{LatexGenerator->renderTemplate()} in-band. New shape: enqueue an SQS job with the report ID + template context, return a job-status page; Drupal polls or receives an SNS callback when the S3 URL is ready.
+  \item \textbf{Route 2 (Commerce order PDF)}: \texttt{/print/pdf/commerce\_order/\{id\}} --- currently uses \texttt{entity\_print} with the DomPDF engine (pure PHP, no LaTeX). This one might not need LaTeX at all --- but it \emph{does} need to move off in-request rendering.
+\end{itemize}
+
+\subsection{Storage and delivery}
+Generated PDFs land in an S3 bucket. Users receive a pre-signed URL for time-limited download\index{S3!presigned URL}. Existing project pattern: \texttt{/\_flysystem/s3/} route already serves cached S3-hosted PDFs without issue --- generated documents would use the same delivery path.
+
+\subsection{Observability}
+\begin{itemize}[nosep]
+  \item CloudWatch metrics: job duration, failure rate, cold-start percentage (Lambda specifically), queue depth (SQS)
+  \item CloudWatch alarms: p95 duration threshold, error rate threshold, queue-age threshold
+  \item X-Ray traces (Lambda) or OpenTelemetry (Fargate/Batch/EC2) to link Drupal request $\rightarrow$ enqueue $\rightarrow$ generation $\rightarrow$ delivery
+\end{itemize}
+
+\subsection{Bundle-class coverage gap (a related pre-existing item)}
+Prior operations testing surfaced a real Drupal-side issue: \texttt{ResearchDocumentBundleBase} defines \texttt{getResearchAnswer()}, but 4 of 12 research-document bundles have no subclass and Drupal instantiates the base class (which lacks the method). Two call sites in the \texttt{report} module invoke \texttt{->getResearchAnswer()} unguarded, and throw when they hit an unimplemented bundle:
+\begin{itemize}[nosep]
+  \item \texttt{ReportHooks::latexPreprocess()} line 345
+  \item \texttt{ConformanceAnalysisTrait} line 86
+\end{itemize}
+Meanwhile, \texttt{FannieFieldResolver.php} line 329 uses \texttt{method\_exists()} defensively and works fine. Either the missing 4 subclasses get implemented, or the two report-side call sites adopt the \texttt{method\_exists()} guard pattern. This is orthogonal to the Lambda decision but should be resolved before residential launch --- otherwise LaTeX generation will throw on documents referencing those bundles regardless of where the LaTeX runs. See \texttt{docs/memory/research-document-bundle-gaps.md} for full context.
+
+\newpage
+
+\section{Rollout and Risk Considerations}
+\label{sec:rollout}
+
+\subsection{Suggested phased approach (option-agnostic)}
+\begin{enumerate}[nosep]
+  \item \textbf{Pick the execution model} (this discussion's outcome)
+  \item \textbf{Bring the MVP forward}: modernize the LaTeX container / AMI with current TeX Live + \texttt{latexmk} auto-passes
+  \item \textbf{Shadow mode}: enqueue jobs from the current monolith but continue serving the in-band Docker output; compare outputs
+  \item \textbf{Sandbox smoke test}: verify end-to-end async flow through Drupal $\rightarrow$ queue $\rightarrow$ execution $\rightarrow$ S3 $\rightarrow$ presigned URL
+  \item \textbf{Cutover with feature flag}: Drupal route conditionally serves in-band (old) or redirects to async job (new); flag flips per env then per traffic percentage
+  \item \textbf{Retire the Docker-in-monolith LaTeX path}
+\end{enumerate}
+
+\subsection{Risks common to all options}
+\begin{itemize}[nosep]
+  \item \textbf{Template drift}: the current Docker container's TeX Live + package versions become the accidental reference; some templates may rely on specific package versions
+  \item \textbf{Font / locale surprises}: pre-generated PDFs from prod are the ground-truth for "does it render identically" comparison
+  \item \textbf{Cost surprises}: bursty traffic (marketing send, batch imports) can push volume 5--10$\times$ over baseline; per-invocation options handle this transparently, always-on options don't
+  \item \textbf{Failure modes to design for}: LaTeX compilation errors (bad template), timeouts, S3 upload failures, notification delivery failures --- all of which need idempotent retry semantics
+\end{itemize}
+
+\subsection{Risks specific to serverless (Lambda, Batch, App Runner)}
+\begin{itemize}[nosep]
+  \item Cold starts on infrequently-hit code paths
+  \item Concurrency quotas (Lambda default 1000 concurrent per account, raisable)
+  \item Deployment story for a 5+ GB container image is slower than a small zip
+\end{itemize}
+
+\subsection{Risks specific to always-on (Fargate, EC2 ASG)}
+\begin{itemize}[nosep]
+  \item Baseline cost when idle
+  \item Patching / AMI refresh cadence
+  \item Manual scale-out response time if peak exceeds pre-provisioned capacity
+\end{itemize}
+
+\newpage
+\appendix
+
+\section{Lambda with Container Image}
+\label{app:lambda}
+\index{Lambda!container image}
+
+\subsection{Fit for LaTeX}
+Lambda's container-image support (up to 10 GB) accommodates a full TeX Live installation plus the required custom templates and fonts. Ephemeral \texttt{/tmp} at 10 GB is generous for intermediate PDF passes and auxiliary files. Memory can be set anywhere from 128 MB to 10 GB (allocated in 1 MB increments); the LaTeX case typically wants 2--4 GB.
+
+\subsection{Invocation shape}
+Two natural patterns:
+\begin{itemize}[nosep]
+  \item \textbf{SQS-triggered async}: Drupal enqueues a job, Lambda consumes from SQS, uploads PDF to S3, sends SNS notification (or Drupal polls). Best throughput, best failure isolation.
+  \item \textbf{Direct invoke via API Gateway or Function URL}: synchronous request-reply. Simpler, but subject to the 15-minute Lambda ceiling and API Gateway's own 29-second cap (functions URLs are cleaner here, no gateway cap).
+\end{itemize}
+
+\subsection{Cold starts}
+A large container image (multi-GB TeX Live) has cold-start latency in the 5--10 second range on first invocation. Warm invocations start in milliseconds. Provisioned Concurrency\index{Provisioned Concurrency} pins a chosen number of always-warm instances at additional cost (\textasciitilde \$5/mo per always-warm instance at 2 GB memory).
+
+\subsection{IAM \& networking}
+\begin{itemize}[nosep]
+  \item Execution role: read from SQS queue, write to S3 bucket, publish to SNS topic (if used), write to CloudWatch Logs
+  \item VPC: optional; not required unless the function needs to reach a resource inside the VPC (like RDS). Skipping VPC attachment eliminates a class of cold-start latency.
+  \item Concurrency: reserved concurrency to isolate this workload from other Lambdas; account-level limit is 1000 concurrent by default, raisable
+\end{itemize}
+
+\subsection{2-year-old MVP relevance}
+The MVP built two years ago used the same container-image mechanism. The IAM, deployment, and invocation shape all carry forward directly. Only the image \emph{contents} (TeX Live version, template updates, \texttt{latexmk} instead of manual pass counting) need modernization.
+
+\newpage
+\section{AWS Fargate}
+\label{app:fargate}
+\index{Fargate}
+
+\subsection{Fit for LaTeX}
+Fargate runs container tasks without managing EC2 or Kubernetes nodes. Task CPU sizing goes up to 16 vCPU, memory up to 120 GB --- vastly larger than any single LaTeX document could need. Runs continuously as long as the task is alive.
+
+\subsection{Invocation shape}
+Long-running worker pattern:
+\begin{enumerate}[nosep]
+  \item 2--$N$ Fargate tasks running continuously
+  \item Each polls an SQS queue for jobs
+  \item Generates PDF, uploads to S3, ACKs the message
+\end{enumerate}
+Auto Scaling on queue depth grows/shrinks the task count.
+
+\subsection{Fargate Spot}
+Interruption-tolerant workloads (which LaTeX generation is --- a killed task's SQS message returns to the queue for retry) can use Fargate Spot at roughly 30--50\% of on-demand pricing.
+
+\subsection{Cost baseline}
+Two continuously-running 2 vCPU / 4 GB tasks on Fargate on-demand: \textasciitilde \$100/month.\\
+Same shape on Fargate Spot: \textasciitilde \$35--50/month.
+
+\subsection{Trade-offs vs Lambda}
+\begin{itemize}[nosep]
+  \item[+] No time limit, no memory ceiling (matters if some PDFs go long)
+  \item[+] No cold starts on warm tasks
+  \item[$-$] Always-on cost even when queue is empty
+  \item[$-$] Task management (ECS cluster, service definitions, task definitions) is heavier IaC than a Lambda function
+\end{itemize}
+
+\newpage
+\section{AWS Batch on Fargate}
+\label{app:batch}
+\index{AWS Batch}
+
+\subsection{Fit for LaTeX}
+Batch is purpose-built for queued job execution. It provisions Fargate (or EC2) capacity in response to job-queue depth, executes jobs, tears down when idle. Excellent scale-to-zero characteristics.
+
+\subsection{Invocation shape}
+Drupal submits a job to a Batch job queue; Batch schedules it onto a Fargate task from a compute environment; result lands in S3. Batch tracks job state (RUNNABLE, RUNNING, SUCCEEDED, FAILED).
+
+\subsection{When Batch wins over Lambda or Fargate}
+\begin{itemize}[nosep]
+  \item Job-oriented mental model matches "generate this PDF" better than "invoke this function"
+  \item Built-in retry policies, priority queues, dependency graphs (if some documents depend on others)
+  \item Compute environments can be mixed (Fargate for small jobs, EC2 for big ones)
+\end{itemize}
+
+\subsection{When Batch loses}
+\begin{itemize}[nosep]
+  \item Startup latency: allocating a fresh Fargate task per job adds \textasciitilde 30--60s to first response
+  \item Overkill for a single-workload use case; Batch's job/queue/compute-env abstraction is heavier than needed if only one workload runs on it
+\end{itemize}
+
+\newpage
+\section{Dedicated EC2 Auto Scaling Group}
+\label{app:ec2}
+\index{EC2 ASG}
+
+\subsection{Fit for LaTeX}
+Standard EC2 pattern: a custom AMI baked via Image Builder that includes TeX Live pre-installed. An Auto Scaling Group maintains $N$ instances behind an SQS queue or ALB. WorxCo already uses this pattern for the nginx and PHP-FPM tiers in the current platform.
+
+\subsection{Familiarity advantage}
+The team knows this pattern:
+\begin{itemize}[nosep]
+  \item Image Builder recipe (like the existing nginx / php83 recipes)
+  \item ASG with scaling policies
+  \item CloudWatch alarms driving scale-out / scale-in
+\end{itemize}
+
+\subsection{Downsides}
+\begin{itemize}[nosep]
+  \item Always-on cost (even minimum ASG size 1 pays 24/7)
+  \item AMI lifecycle: patching, TeX Live version management, testing new AMIs before rolling
+  \item Scale-out latency (2--5 minutes for a new instance to launch, bootstrap, and become healthy) is a real thing during burst
+\end{itemize}
+
+\subsection{When this wins}
+Steady-state volume high enough that always-on is cheaper than per-invocation, AND operational familiarity is worth more than the ceremony cost of learning a serverless service. At the projected 20K/month, both conditions are borderline.
+
+\newpage
+\section{AWS App Runner}
+\label{app:apprunner}
+\index{App Runner}
+
+\subsection{Fit for LaTeX}
+App Runner (introduced 2021) is a fully-managed container service --- push a container image, App Runner runs it behind a load balancer with auto-scaling. Simpler than Fargate (no ECS cluster to define), simpler than Lambda (standard HTTP handler, no Lambda-specific handler signature).
+
+\subsection{Constraints relevant to LaTeX}
+\begin{itemize}[nosep]
+  \item Maximum memory per instance: 4 GB (as of Q1 2025 --- verify at time of decision)
+  \item Maximum vCPU per instance: 2
+  \item Container image handling is straightforward; ECR-hosted images work out of the box
+\end{itemize}
+
+\subsection{Why it's on the list}
+It's the shortest path from "here is a container image" to "here is a running service." No cluster management, no VPC required, no Auto Scaling Group. If LaTeX generation fits within its per-instance limits, App Runner is the operationally simplest option.
+
+\subsection{Why it might not fit}
+The 4 GB memory ceiling is tight for LaTeX. If any documents ever push past 3--3.5 GB working-set memory, App Runner is off the table. This is a real risk with image-heavy conformance reports.
+
+\newpage
+\section{The 2024 MVP: What Was Built}
+\label{app:mvp}
+\index{MVP!details}
+
+\subsection{Scope of the MVP}
+Two years ago (roughly late 2024), a member of the client team built a custom Lambda container image containing a TeX Live installation and a proof-of-concept LaTeX compilation entrypoint. It generated a sample PDF end-to-end from a Lambda invocation.
+
+\subsection{Why it didn't ship}
+At the time, the residential pivot was a lower priority for the client. Commercial order volume (7 orders/day) didn't stress the existing Docker-on-monolith path. Rather than integrate the MVP into production for a workload that didn't need it, the team parked it.
+
+\subsection{What still applies today}
+\begin{itemize}[nosep]
+  \item The choice of "Lambda container image" as the deployment shape is still valid --- Lambda's container support has only improved
+  \item The deployment pipeline (build image, push to ECR, update Lambda function) is well-trodden AWS territory
+  \item The MVP's Dockerfile is a reasonable starting point for a modernized build
+\end{itemize}
+
+\subsection{What needs updating}
+\begin{itemize}[nosep]
+  \item TeX Live 2024/2025 vs whatever the MVP shipped with
+  \item \texttt{latexmk} auto-iteration replacing manual pass-count specification
+  \item Modern Lambda base image (arm64 / Graviton for cost)
+  \item Integration with SQS + S3 + Drupal (never wired up in the MVP)
+\end{itemize}
+
+\newpage
+\section{Drupal Integration Points}
+\label{app:drupal}
+\index{Drupal!integration}
+
+\subsection{Route 1: LaTeX conformance report}
+\begin{itemize}[nosep]
+  \item URL: \texttt{/zoning-info/conformance-report/\{id\}/latex-preview}
+  \item Module: custom \texttt{report} module
+  \item Current: calls \texttt{LatexGenerator->renderTemplate()} synchronously in-request
+  \item Template location: \texttt{.tex.twig} files in the \texttt{report} module
+  \item Uses (see chapter 6): \texttt{ReportHooks::latexPreprocess()} line 345 iterates research documents and calls \texttt{getResearchAnswer()} on each --- ties this route to the bundle-class-coverage gap
+\end{itemize}
+
+\subsection{Route 2: Commerce order PDF}
+\begin{itemize}[nosep]
+  \item URL: \texttt{/print/pdf/commerce\_order/\{id\}}
+  \item Module: \texttt{entity\_print} (8.x-2.18) with the DomPDF engine
+  \item Current: pure PHP (no LaTeX), still 504s at the 60s mark
+  \item Notable: this one might not need LaTeX at all --- but it does need to move off synchronous in-request generation
+\end{itemize}
+
+\subsection{Comparison to existing s3-served PDFs}
+\begin{itemize}[nosep]
+  \item URL pattern: \texttt{/\_flysystem/s3/\ldots}
+  \item Behavior: streams pre-existing PDFs from the sandbox media S3 bucket
+  \item Works fine (not part of the problem) --- and provides the delivery pattern the new async flow can adopt for freshly-generated documents
+\end{itemize}
+
+\subsection{Suggested Drupal-side changes for any option chosen}
+\begin{enumerate}[nosep]
+  \item Introduce a \texttt{documents\_queue} service that submits jobs to SQS (or the equivalent for whichever option is chosen)
+  \item Replace the current in-request \texttt{LatexGenerator->renderTemplate()} call with the queue submission + return of a job-status URL
+  \item Add a status endpoint the browser polls (or an SNS $\rightarrow$ email $\rightarrow$ link callback for truly async delivery)
+  \item Once ready, the delivered PDF is served via the same \texttt{/\_flysystem/s3/} pattern already in production
+\end{enumerate}
+
+\subsection{Feature-flag rollout}
+The Drupal side can gate this behavior with a config toggle so the async path is enabled per-env (sandbox first, then staging, then a percentage of production traffic) without a hard cutover.
+
+\newpage
+\printindex
+
+\end{document}
