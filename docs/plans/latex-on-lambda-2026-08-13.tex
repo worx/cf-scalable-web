@@ -1,15 +1,17 @@
 % !TEX program = xelatex
 % !TEX indexOptions = -s
 %
-% LaTeX-on-Lambda — Discussion Reference
-% Prepared for the 2026-08-13 client meeting.
+% LaTeX-on-Lambda — Discussion Reference + Meeting Outcomes
+% Originally prepared for the 2026-08-13 client meeting; extended
+% 2026-08-14 with the meeting outcomes chapter and follow-up
+% architectural decisions.
 %
 % Render:  latexmk -xelatex -f latex-on-lambda-2026-08-13.tex
 % Or:      xelatex file && makeindex file && xelatex file && xelatex file
 %
-% Content is deliberately NEUTRAL — options presented with trade-offs,
-% no author recommendation. Selection criteria in chapter 5 lets the
-% reader weigh options against their own priorities.
+% Chapters 1-8 (original) present options neutrally.
+% Chapter 9 (added 2026-08-14) captures decisions from the meeting.
+% Appendices A-G contain per-option technical depth for reference.
 
 \documentclass[11pt,letterpaper]{article}
 
@@ -26,6 +28,8 @@
 \usepackage{makeidx}
 \usepackage{enumitem}
 \usepackage{fancyhdr}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric,fit,backgrounds,shadows,calc}
 
 \hypersetup{
   colorlinks=true,
@@ -98,6 +102,9 @@ Three material shifts:
 
 \subsection{What this document does not do}
 It does \emph{not} pick a winner. Chapter~\ref{sec:options} presents the realistic options (Lambda, Fargate, Batch, App Runner, dedicated EC2), chapter~\ref{sec:selection} offers a set of \textbf{selection criteria} to evaluate against your team's own priorities, and chapters~\ref{sec:cost}--\ref{sec:rollout} give shared numbers and considerations for the group to weigh.
+
+\subsection{Meeting outcomes have been added}
+\emph{This document was extended 2026-08-14 with chapter~\ref{sec:meeting-outcomes}, which records the decisions confirmed in the 2026-08-13 meeting. Chapters 1--8 remain as the pre-meeting neutral reference; chapter 9 has the current ground-truth architecture (Lambda selected, staging-bucket delivery, Image Builder pipeline, payload contract, action items).}
 
 \newpage
 
@@ -428,6 +435,263 @@ Meanwhile, \texttt{FannieFieldResolver.php} line 329 uses \texttt{method\_exists
   \item Baseline cost when idle
   \item Patching / AMI refresh cadence
   \item Manual scale-out response time if peak exceeds pre-provisioned capacity
+\end{itemize}
+
+\newpage
+
+\section{Meeting Outcomes (2026-08-13)}
+\label{sec:meeting-outcomes}
+
+\emph{Chapter added 2026-08-14 to record the decisions and design choices confirmed in the 2026-08-13 meeting. Chapters 1--8 present the pre-meeting options landscape; this chapter carries the ground truth going forward.}
+
+\subsection{Attendees and Context}
+Four attendees:
+\begin{itemize}[nosep]
+  \item \textbf{Zac Hudson} --- client Drupal developer; owner of the existing Docker-based LaTeX generation code; author of the current \texttt{Document Service latex Generator}
+  \item \textbf{Kurt Vanderwater} --- WorxCo operations/infrastructure; owner of the scalable AWS architecture
+  \item \textbf{Pat Shaughnessy} --- author of the original 2024 Lambda LaTeX MVP; observer plus institutional reference
+  \item \textbf{Tim Houseman} --- observer / team member
+\end{itemize}
+
+\subsection{Decisions Confirmed}
+\label{sec:meeting-decisions}
+
+\subsubsection{Execution model: Lambda}\index{Lambda!decision}
+Lambda selected. App Runner ruled out (roughly $2\times$ cost with no compelling advantage). Fargate, Batch, and dedicated EC2 ASG deferred without further consideration --- Lambda's scale-to-zero, pay-per-invocation, and image-based deployment shape fit the workload and existing operational patterns.
+
+\subsubsection{Container: fresh build, not from MVP}
+Pat's 2024 MVP is architectural inspiration only. Too much has changed --- TeX Live version, Lambda container-image support maturity, \texttt{latexmk}\index{latexmk} auto-iteration --- to make direct code reuse worthwhile. The new container is a clean build.
+
+\subsubsection{Container lifecycle: Image Builder pipeline}\index{Image Builder}
+The Lambda container image will be built and refreshed via an ECR-container Image Builder pipeline, symmetric with the existing nginx/php83 AMI pipelines. Default cadence: \textbf{monthly rebuild} on the current base image with fresh package versions. On-demand trigger available for CVE response, new TeX Live releases, or template dependency changes. Ghostscript's CVE history alone justifies the automated refresh.
+
+\subsubsection{Delivery: staging-bucket clone with lifecycle}\index{S3!staging bucket}
+The finished PDF is written to two locations. The \emph{production} S3 bucket keeps the PDF forever as the canonical record. When a PDF needs to be delivered via presigned URL (email attachments too large to include inline), Lambda additionally writes a copy to a \emph{staging} S3 bucket with a 10-day object lifecycle. Presigned URLs are issued against the staging bucket with a max 7-day validity (always shorter than the object's remaining lifetime).
+
+Compared to presigning against the production bucket directly, this pattern gives:
+\begin{itemize}[nosep]
+  \item Smaller blast radius on a leaked URL (points at a file that's going away anyway)
+  \item Auditable "what is currently externally accessible" view (the staging bucket is the list)
+  \item Ability to revoke access surgically (delete the staging object) without rotating keys
+  \item Clean compliance story: no production data leaves the private bucket
+\end{itemize}
+
+\subsection{Payload Contract}
+\label{sec:meeting-payload}
+
+Three required parameters on every Lambda invocation. All required --- Zac's phrasing: \emph{``if you don't tell me how to notify you when I'm done, I don't want to talk to you at all.''}
+
+\begin{center}
+\begin{tabular}{@{}p{4cm}p{9.5cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Purpose} \\
+\midrule
+\texttt{input\_zip\_url} & S3 URL of the input zip that Drupal has built and uploaded. Contains everything the Lambda needs to compile: main \texttt{.tex} file, \texttt{.sty} style files, all PDFs to be included, plus any per-report font files not already baked into the container. \\
+\texttt{output\_pdf\_url} & S3 URL where the finished PDF should be written. Drupal decides the exact path (including any date prefix, tenant prefix, etc.) so name collisions are Drupal's problem, not Lambda's. Also becomes the ``handle'' by which Drupal tracks the job. \\
+\texttt{callback\_url} & HTTP endpoint Drupal exposes to receive the ``done'' notification when Lambda finishes. Different Drupal modules (report, invoice, future residential) may register different endpoints. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The callback message contains at minimum the same \texttt{output\_pdf\_url} value that Drupal supplied on invocation --- self-contained, so Drupal tracks correlation by destination filename with no separate correlation ID needed.
+
+\subsection{End-to-End Flow}
+\label{sec:meeting-flow}
+Figure~\ref{fig:sequence} shows the full sequence from Drupal request to customer delivery.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\small},
+  actor/.style={draw, fill=blue!10, minimum width=2cm, minimum height=0.7cm, rounded corners=1pt},
+  lifeline/.style={dashed, gray},
+  msg/.style={-Stealth, thick},
+]
+% Actors along the top
+\node[actor] (drupal)   at ( 0,  0) {Drupal};
+\node[actor] (s3in)     at ( 3.2,0) {S3 Input};
+\node[actor] (lambda)   at ( 6.4,0) {Lambda};
+\node[actor] (s3prod)   at ( 9.6,0) {S3 Prod};
+\node[actor] (s3stg)    at (12.8,0) {S3 Staging};
+
+% Lifelines
+\foreach \a in {drupal,s3in,lambda,s3prod,s3stg} {
+  \draw[lifeline] (\a.south) -- ++(0, -10);
+}
+
+% Messages
+\draw[msg] (drupal.south |- 0,-0.8) -- ++(3.2,0) node[midway,above,font=\scriptsize]{1. upload zip};
+\draw[msg] (drupal.south |- 0,-1.7) -- ++(6.4,0) node[midway,above,font=\scriptsize]{2. invoke Lambda (input+output+callback URLs)};
+
+\draw[msg] (lambda.south |- 0,-2.6) -- ++(-3.2,0) node[midway,above,font=\scriptsize]{3. pull zip};
+\node[font=\scriptsize,align=center] at ( 6.4,-3.5) {4. unzip $\rightarrow$ /tmp\\5. QPDF check\\6. Ghostscript (if needed)\\7. latexmk (lualatex)};
+\draw[dashed, gray!60] (5.4, -3) rectangle (7.4, -4.1);
+
+\draw[msg] (lambda.south |- 0,-4.7) -- ++(3.2,0) node[midway,above,font=\scriptsize]{8. write PDF (canonical, forever)};
+
+\draw[msg] (lambda.south |- 0,-5.6) -- ++(6.4,0) node[midway,above,font=\scriptsize]{9. clone to staging (only if large-delivery needed)};
+
+\draw[msg] (lambda.south |- 0,-6.5) -- ++(-6.4,0) node[midway,above,font=\scriptsize]{10. POST callback (output\_pdf\_url + delivery info)};
+
+\node[font=\scriptsize,align=center,text=gray!70!black] at (6.4,-7.3) {(Lambda container dies)};
+
+\draw[msg] (drupal.south |- 0,-8.2) -- ++(12.8,0) node[midway,above,font=\scriptsize]{11. issue presigned URL against staging bucket};
+
+\node[font=\scriptsize,align=left,anchor=west] at (-0.5,-9.1) {12. Drupal emails presigned URL to customer (large PDFs) OR attaches directly (small PDFs)};
+
+\end{tikzpicture}
+\caption{End-to-end sequence: Drupal $\rightarrow$ Lambda $\rightarrow$ dual-write to production + staging $\rightarrow$ callback $\rightarrow$ time-limited customer delivery.}
+\label{fig:sequence}
+\end{figure}
+
+\subsection{Lambda Container Contents}
+\label{sec:meeting-container}
+Figure~\ref{fig:container} shows what the ECR container image includes.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\small},
+  component/.style={draw, fill=blue!8, minimum width=3.2cm, minimum height=0.8cm, rounded corners=2pt},
+  system/.style={draw, fill=blue!20, minimum width=3.2cm, minimum height=0.8cm, rounded corners=2pt, thick},
+  group/.style={draw, dashed, rounded corners=4pt, inner sep=8pt},
+]
+\node[system] (base)  at (0, 4) {Base image (AL2023 / Ubuntu)};
+
+\node[component] (texlive)  at (-3.2, 2.5) {TeX Live 2025+};
+\node[component] (fonts)    at ( 0, 2.5) {Preloaded fonts};
+\node[component] (custom)   at ( 3.2, 2.5) {Custom entry script};
+
+\node[component] (lualatex) at (-4.6, 1) {\texttt{lualatex}};
+\node[component] (latexmk)  at (-1.6, 1) {\texttt{latexmk}};
+\node[component] (qpdf)     at ( 1.6, 1) {\texttt{qpdf}};
+\node[component] (gs)       at ( 4.6, 1) {\texttt{ghostscript}};
+
+% Group the LaTeX toolchain
+\begin{scope}[on background layer]
+  \node[group, label={[font=\footnotesize\itshape]above:LaTeX toolchain}, fit=(texlive)(lualatex)(latexmk)] {};
+\end{scope}
+\begin{scope}[on background layer]
+  \node[group, label={[font=\footnotesize\itshape]above:PDF preprocessing}, fit=(qpdf)(gs)] {};
+\end{scope}
+
+\node[font=\footnotesize\itshape, align=center] at (0, -0.5) {Container invocation contract: 3 required params\\(\texttt{input\_zip\_url}, \texttt{output\_pdf\_url}, \texttt{callback\_url})};
+
+\end{tikzpicture}
+\caption{Lambda container image contents. TeX Live provides \texttt{lualatex} + \texttt{latexmk}; QPDF and Ghostscript preprocess incoming PDFs; fonts and the entrypoint script complete the image.}
+\label{fig:container}
+\end{figure}
+
+\subsection{Storage Architecture}
+\label{sec:meeting-storage}
+Figure~\ref{fig:storage} shows the three-bucket model.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\small},
+  bucket/.style={draw, fill=orange!15, minimum width=3.6cm, minimum height=1.8cm, rounded corners=2pt, align=center},
+  actor/.style={draw, fill=blue!10, minimum width=2.4cm, minimum height=0.7cm, rounded corners=1pt},
+  arrow/.style={-Stealth, thick},
+]
+\node[actor] (drupal) at (0, 5) {Drupal};
+\node[actor] (lambda) at (7, 5) {Lambda};
+\node[actor] (customer) at (14, 2) {Customer};
+
+\node[bucket] (input)   at ( 0, 2) {\textbf{S3 Input Bucket}\\\footnotesize private\\\footnotesize job zips\\\footnotesize (short-lived)};
+\node[bucket] (prod)    at ( 7, 2) {\textbf{S3 Production Bucket}\\\footnotesize private\\\footnotesize canonical PDFs\\\footnotesize (keep forever)};
+\node[bucket] (staging) at (7, -1.5) {\textbf{S3 Staging Bucket}\\\footnotesize private\\\footnotesize delivery copies\\\footnotesize (10-day lifecycle)};
+
+\draw[arrow] (drupal) -- (input) node[midway,left,font=\scriptsize]{upload zip};
+\draw[arrow] (input) -- (lambda) node[midway,above,font=\scriptsize]{pull zip};
+\draw[arrow] (lambda) -- (prod) node[midway,right,font=\scriptsize]{write canonical};
+\draw[arrow] (lambda.south) -- ++(0,-1.5) -| (staging) node[near end, right,font=\scriptsize]{clone if needed};
+\draw[arrow, dashed] (staging) -- (customer) node[midway, above, align=center, font=\scriptsize\itshape]{presigned URL\\(7 day max)};
+
+\end{tikzpicture}
+\caption{Three-bucket storage model. Input bucket holds job payloads. Production bucket keeps the canonical PDF forever. Staging bucket receives a copy only when large-file delivery via presigned URL is required; objects auto-expire after 10 days, presigned URLs valid for max 7 days --- URL always expires before the underlying object.}
+\label{fig:storage}
+\end{figure}
+
+\subsection{Image Builder Pipeline}
+\label{sec:meeting-imagebuilder}
+The Lambda container image is built and refreshed via a dedicated ECR-container Image Builder pipeline. Figure~\ref{fig:imagebuilder} shows the flow.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\small},
+  stage/.style={draw, fill=green!10, minimum width=2.8cm, minimum height=1.1cm, rounded corners=2pt, align=center},
+  trigger/.style={draw, fill=yellow!15, minimum width=2.6cm, minimum height=0.7cm, rounded corners=1pt, align=center},
+  arrow/.style={-Stealth, thick},
+]
+\node[trigger] (cron)      at (-1, 3.5) {monthly cron\\\footnotesize (default cadence)};
+\node[trigger] (ondemand)  at ( 3, 3.5) {on-demand trigger\\\footnotesize (CVE, TeX Live update)};
+
+\node[stage] (source)  at (-3.5, 1.5) {\textbf{Source}\\\footnotesize Dockerfile\\in git};
+\node[stage] (build)   at (-0.3, 1.5) {\textbf{Build}\\\footnotesize \texttt{docker build}};
+\node[stage] (test)    at ( 2.9, 1.5) {\textbf{Test}\\\footnotesize hello-world.tex\\compile};
+\node[stage] (publish) at ( 6.1, 1.5) {\textbf{Publish}\\\footnotesize push to ECR};
+
+\node[stage] (lambda)  at ( 6.1, -1) {\textbf{Lambda function}\\\footnotesize updated to use\\new image tag};
+
+\draw[arrow] (cron) -- (build);
+\draw[arrow] (ondemand) -- (build);
+\draw[arrow] (source) -- (build);
+\draw[arrow] (build) -- (test);
+\draw[arrow] (test) -- (publish);
+\draw[arrow] (publish) -- (lambda);
+
+\end{tikzpicture}
+\caption{ECR-container Image Builder pipeline for the Lambda LaTeX image. Monthly cadence by default; on-demand trigger for CVE response or toolchain updates. Symmetric with existing nginx/php83 AMI pipelines --- reuses operational patterns.}
+\label{fig:imagebuilder}
+\end{figure}
+
+\subsection{Applies-to Breadth}
+\label{sec:meeting-applies-to}
+The Lambda infrastructure is not report-specific. Same pipeline serves multiple document types, each potentially with its own callback endpoint:
+
+\begin{itemize}[nosep]
+  \item \textbf{Conformance reports} (the original driver; commercial today)
+  \item \textbf{Invoices} (already LaTeX-generated in Zac's current Docker path)
+  \item \textbf{Future: residential-market documents} (same code base, new Drupal module)
+\end{itemize}
+
+Each caller supplies its own callback URL at invocation time, so a single Lambda function serves all three with per-module completion routing.
+
+\subsection{Action Items}
+\label{sec:meeting-actions}
+
+\subsubsection{Zac's TODO}
+\begin{itemize}[nosep]
+  \item Send Kurt the path to the current \texttt{Document Service latex Generator} implementation (Docker-based)
+  \item Send Kurt the current Drupal invocation points (where the code today calls into the Docker LaTeX pipeline) --- Kurt uses this to build the patches that Drupal will need to redirect calls at Lambda
+  \item Design the callback endpoint schema (payload shape, HTTP verbs, error semantics)
+  \item Design the Drupal-side submission flow: build zip, upload to S3 input bucket, invoke Lambda with three params
+  \item Add outstanding-jobs tracking to Drupal (a small table; up to $\sim$1000 rows expected under residential load)
+  \item Start work \emph{next week} (2026-08-18 or later)
+\end{itemize}
+
+\subsubsection{WorxCo's TODO}
+\begin{itemize}[nosep]
+  \item Build the Lambda container image (fresh, not from MVP): TeX Live 2025+, \texttt{lualatex}, \texttt{latexmk}, QPDF, Ghostscript, preloaded fonts, entrypoint script
+  \item Build the ECR-container Image Builder pipeline with monthly + on-demand triggers
+  \item Provision the three S3 buckets: input, production PDFs, staging (with 10-day lifecycle rule)
+  \item Build the Lambda function + invocation-URL infrastructure that accepts the three-parameter call
+  \item Provide Zac the Lambda invocation spec (HTTP endpoint URL, expected parameters, callback contract)
+  \item Provide Zac the S3 write credentials/roles for the input bucket
+\end{itemize}
+
+\subsection{Notes and Clarifications from the Meeting}
+\label{sec:meeting-notes}
+
+\begin{itemize}[nosep]
+  \item \textbf{LaTeX has no stream-wrapper support} --- files must be local on disk. This is why the zip payload pattern is necessary; Lambda unzips into \texttt{/tmp} before running \texttt{latexmk}.
+  \item \textbf{Toolchain is \texttt{lualatex} specifically}, not \texttt{pdflatex} or \texttt{xelatex}. Some included prod PDFs have quirks that only \texttt{lualatex} handles cleanly.
+  \item \textbf{PDF preprocessing is two-stage}: \texttt{qpdf --check} on every input PDF; if it flags issues, run Ghostscript to normalize the PDF (strips extra content, may bump version). QPDF is fast at checking; Ghostscript is thorough at rewriting.
+  \item \textbf{Fonts baked into the base container} for the shared set. Per-report font overrides can travel in the zip if needed.
+  \item \textbf{Cost expectation}: closer to \$25/mo than \$15/mo at the projected 20K/month volume (Zac's reports have many pages; more pages = longer execution = more billed compute).
+  \item \textbf{Migration status of Docker in production}: the Docker LaTeX container was \emph{not} migrated as part of the recent sandbox rebuild --- production still runs the old Docker path. Zac needs to identify all the Drupal call sites so Kurt can prepare the patches that redirect them at Lambda.
 \end{itemize}
 
 \newpage
