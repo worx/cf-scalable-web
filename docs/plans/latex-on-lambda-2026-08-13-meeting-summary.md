@@ -148,7 +148,7 @@ flowchart LR
 
     subgraph Buckets["S3 buckets (all private)"]
         direction TB
-        SI["📦 S3 Input Bucket<br/>job zips<br/>(short-lived)"]
+        SI["📦 S3 Input Bucket<br/>job zips<br/>Lambda self-clean<br/>+ 24h lifecycle"]
         SP["📄 S3 Production Bucket<br/>canonical PDFs<br/>(keep forever)"]
         SS["📤 S3 Staging Bucket<br/>delivery copies<br/>(10-day lifecycle)"]
     end
@@ -238,6 +238,194 @@ function serves all three with per-module completion routing.
 - [ ] Build the Lambda function + invocation-URL infrastructure that accepts the three-parameter call
 - [ ] Provide Zac the Lambda invocation spec (HTTP endpoint URL, expected parameters, callback contract)
 - [ ] Provide Zac the S3 write credentials/roles for the input bucket
+
+---
+
+## Drupal-Side Configuration
+
+Configuration Zac needs to consume lives under a single namespaced key in
+Drupal's `$settings[]` array. Baseline values live in the committed
+`sites/default/settings.php`; per-environment overrides live in the git-ignored
+`sites/default/settings.local.php` (Drupal's standard local-override pattern).
+
+### Baseline — committed to git
+
+Add to `sites/default/settings.php`:
+
+```php
+// Scalable-Web LaTeX/Lambda integration config.
+// Environment-specific overrides go in settings.local.php.
+$settings['scalable_web']['lambda_latex'] = [
+  'input_bucket'         => 'sandbox-latex-input',
+  'production_bucket'    => 'sandbox-latex-production',
+  'staging_bucket'       => 'sandbox-latex-staging',
+  'max_inline_bytes'     => 5 * 1024 * 1024,   // 5 MB email-attach ceiling
+  'presigned_url_ttl'    => 7 * 86400,         // 7 days max (S3 hard limit)
+  'lambda_invoke_url'    => 'https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/latex',
+  'lambda_region'        => 'us-east-1',
+];
+
+// Enable per-env override loading (usually already present, commented).
+if (file_exists($app_root . '/' . $site_path . '/settings.local.php')) {
+  include $app_root . '/' . $site_path . '/settings.local.php';
+}
+```
+
+### Per-env overrides — NOT committed
+
+In `sites/default/settings.local.php` (each dev has their own; not in git):
+
+```php
+// Point at your personal sandbox buckets + Lambda endpoint.
+$settings['scalable_web']['lambda_latex']['input_bucket']      = 'zac-dev-latex-input';
+$settings['scalable_web']['lambda_latex']['production_bucket'] = 'zac-dev-latex-production';
+$settings['scalable_web']['lambda_latex']['staging_bucket']    = 'zac-dev-latex-staging';
+$settings['scalable_web']['lambda_latex']['lambda_invoke_url'] = 'https://<dev-api-id>.execute-api.us-east-1.amazonaws.com/dev/latex';
+```
+
+### Reading the config from Drupal code
+
+```php
+use Drupal\Core\Site\Settings;
+
+$cfg = Settings::get('scalable_web')['lambda_latex'];
+$inputBucket = $cfg['input_bucket'];
+$maxInline   = $cfg['max_inline_bytes'];
+```
+
+### Why `$settings[]` and not `$config[]`
+
+Drupal's two config surfaces:
+
+- **`$settings[]`** — infrastructure/environment config, not exposed via admin UI. Examples in Drupal core: Redis config, memcached hosts, hash salt path. **This is where our AWS resource names live.**
+- **`$config[]`** — runtime overrides for Drupal-entity config exported via CMI. Not the right fit for infra endpoints.
+
+Nested-array style (`$settings['scalable_web']['lambda_latex']['input_bucket']`) is idiomatic Drupal for grouped settings.
+
+---
+
+## Presigned URL Generation
+
+### Direct AWS SDK, not an intermediate Lambda
+
+Presigned URL generation is a **local math operation** — the SDK computes
+HMAC-SHA256 of the URL fields using the caller's IAM credentials. No AWS API
+call is made. Round-tripping to Lambda just to get a signature would be
+wasteful.
+
+Drupal almost certainly already loads `aws/aws-sdk-php` via Composer (used by
+`s3fs`/`flysystem_s3` for media). If not, one-line install:
+
+```bash
+composer require aws/aws-sdk-php
+```
+
+### The snippet
+
+Drop-in for wherever Drupal decides to hand the customer a link:
+
+```php
+use Aws\S3\S3Client;
+use Drupal\Core\Site\Settings;
+
+$cfg = Settings::get('scalable_web')['lambda_latex'];
+
+$s3 = new S3Client([
+  'version' => 'latest',
+  'region'  => $cfg['lambda_region'],
+  // Credentials auto-resolved from IAM instance role attached to
+  // the PHP-FPM instances. No static keys needed.
+]);
+
+$cmd = $s3->getCommand('GetObject', [
+  'Bucket' => $cfg['staging_bucket'],
+  'Key'    => $stagingKey,   // e.g. "reports/2026/08/report-12345.pdf"
+]);
+
+$request = $s3->createPresignedRequest($cmd, '+7 days');
+$presignedUrl = (string) $request->getUri();
+
+// $presignedUrl is what goes in the email body.
+```
+
+`createPresignedRequest` returns synchronously; no network call fires. The URL
+is deterministic given (bucket, key, expiry, IAM key material).
+
+### IAM permission Drupal's PHP-FPM role needs
+
+Add to the PHP-FPM instance role's inline policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::sandbox-latex-staging/*"
+  }]
+}
+```
+
+`GetObject` is sufficient for both actually reading objects AND generating
+presigned URLs for GetObject. If Drupal also needs to write to the input bucket,
+add `s3:PutObject` on the input bucket ARN separately.
+
+### Why not store the URL somewhere and reuse it
+
+Presigned URLs are cheap to generate (microseconds). Regenerate per request
+rather than cache. Regeneration also gives you fresh 7-day windows every time —
+caching would freeze the expiry at the first-generation moment.
+
+---
+
+## Input Bucket Lifecycle
+
+Confirmed: input bucket is a **separate** bucket from production and staging.
+Rationale (from the meeting discussion): blast-radius isolation — an accidental
+`aws s3 rm --recursive` on the transient bucket cannot touch canonical PDFs.
+
+### Cleanup: two-layer defense
+
+1. **Primary: Lambda self-cleanup.** On successful compilation, Lambda deletes
+   its own input zip from the input bucket before exiting. Typical lifetime of
+   a payload: seconds to minutes, matching the Lambda run duration.
+2. **Backup: S3 lifecycle rule for orphans.** If Lambda crashes or throttles
+   before the cleanup step, the payload lingers. A lifecycle rule catches it.
+
+### The lifecycle rule
+
+```json
+{
+  "Rules": [{
+    "ID": "expire-orphan-payloads",
+    "Status": "Enabled",
+    "Filter": {},
+    "Expiration": { "Days": 1 }
+  }]
+}
+```
+
+### How S3 lifecycle actually behaves (worth understanding)
+
+Concern that came up in review — "what if an object is created at 12:58 AM and
+S3 scans at 1:00 AM?" Reassuring answer:
+
+- **Lifecycle rules use OBJECT AGE, not calendar-day boundaries.**
+  `ExpirationInDays: 1` means "eligible for deletion when object age ≥ 24
+  hours," measured from the object's creation timestamp.
+- **Guaranteed minimum lifetime**: 24 hours.
+- **Typical lifetime**: 24–36 hours (depends on when S3's daily lifecycle scan
+  runs relative to eligibility).
+- **Worst-case lifetime**: ~48 hours (if scan just ran before eligibility crossed).
+- An object created at 12:58 AM is safe from deletion until at least 12:58 AM
+  the following day.
+
+### If we ever need sub-day cleanup
+
+S3 lifecycle can't do sub-day granularity. If we ever need it (unlikely for
+this workload), the pattern is: EventBridge scheduled rule (hourly cron) →
+cleanup Lambda that lists + deletes based on custom age criteria. Not building
+this now; Lambda self-cleanup + 24h lifecycle backup is sufficient.
 
 ---
 
