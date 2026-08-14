@@ -252,8 +252,7 @@ function serves all three with per-module completion routing.
   fast at checking; Ghostscript is thorough at rewriting.
 - **Fonts baked into the base container** for the shared set. Per-report font overrides
   can travel in the zip if needed.
-- **Cost expectation**: closer to **$25/mo** than $15/mo at the projected 20K/month volume
-  (Zac's reports have many pages; more pages = longer execution = more billed compute).
+- **Cost expectation (current-reality math)**: **current commercial volume is 200–500 reports/month** — not the aspirational 20K/month residential projection. Using an average of **250 reports/month at ~250 pages each** (Zac's reports run heavy), Lambda compute cost lands at roughly **$1–3/month** for actual invocations, plus a few dollars/month for Image Builder + ECR storage + S3 buckets. **Total realistic monthly bill for current-state operations: ~$5–10/month.** The 20K/month figures in the PDF's chapter 7 cost table remain valid **capacity projections** for the residential pivot when/if it materializes, not a current billing forecast. Also worth noting: at 250/mo (roughly 8/day), **every invocation is essentially a cold start** — 5–10 seconds of latency added to each report generation for the container spin-up. Not a problem for the async fire-and-callback flow, but a latency floor to be aware of.
 - **Migration status of Docker in production**: the Docker LaTeX container was *not* migrated
   as part of the recent sandbox rebuild — production still runs the old Docker path. Zac
   needs to identify all the Drupal call sites so Kurt can prepare the patches that redirect
