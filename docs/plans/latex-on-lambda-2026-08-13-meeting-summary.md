@@ -12,7 +12,7 @@
 
 Four attendees:
 
-- **Zac Hudson** — client Drupal developer; owner of the existing Docker-based LaTeX generation code; author of the current `Document Service latex Generator`
+- **Zac Hudson** — client Drupal developer; owner of the current LaTeX generation code; extended and maintains the `Document Service latex Generator`. Runs against a native LaTeX stack installed directly on the Ubuntu production instance (not Dockerized — Zac replaced the original Docker path Kurt built with an in-place install to avoid script-plumbing overhead).
 - **Kurt Vanderwater** — WorxCo operations/infrastructure; owner of the scalable AWS architecture
 - **Pat Shaughnessy** — author of the original 2024 Lambda LaTeX MVP; observer plus institutional reference
 - **Tim Houseman** — observer / team member
@@ -63,15 +63,14 @@ Compared to presigning against the production bucket directly, this pattern give
 
 ## Payload Contract
 
-**Three required parameters** on every Lambda invocation. All required — Zac's phrasing:
+**Three required parameters and one optional parameter** on every Lambda invocation.
 
-> *"if you don't tell me how to notify you when I'm done, I don't want to talk to you at all."*
-
-| Parameter | Purpose |
-|---|---|
-| `input_zip_url` | S3 URL of the input zip that Drupal has built and uploaded. Contains everything the Lambda needs to compile: main `.tex` file, `.sty` style files, all PDFs to be included, plus any per-report font files not already baked into the container. |
-| `output_pdf_url` | S3 URL where the finished PDF should be written. Drupal decides the exact path (including any date prefix, tenant prefix, etc.) so name collisions are Drupal's problem, not Lambda's. Also becomes the "handle" by which Drupal tracks the job. |
-| `callback_url` | HTTP endpoint Drupal exposes to receive the "done" notification when Lambda finishes. Different Drupal modules (report, invoice, future residential) may register different endpoints. |
+| Parameter | Required? | Purpose |
+|---|---|---|
+| `input_zip_url` | **required** | S3 URL of the input zip that Drupal has built and uploaded. Contains everything the Lambda needs to compile: main `.tex` file, `.sty` style files, all PDFs to be included, plus any per-report font files not already baked into the container. |
+| `output_pdf_url` | **required** | S3 URL where the finished PDF should be written. Drupal decides the exact path (including any date prefix, tenant prefix, etc.) so name collisions are Drupal's problem, not Lambda's. Also becomes the "handle" by which Drupal tracks the job. |
+| `callback_url` | **required** | HTTP endpoint Drupal exposes to receive the "done" notification when Lambda finishes. Different Drupal modules (report, invoice, future residential) may register different endpoints. *"If you don't tell me how to notify you when I'm done, I don't want to talk to you at all."* |
+| `runtime_script_url` | *optional* | S3 URL of the runtime script that Lambda should download and execute for this specific run. When absent, Lambda uses the script baked into the container image at build time. Purpose: flexibility — iterate on the report-generation script without rebuilding the entire Lambda container image. Scripts live in a dedicated scripts bucket (see Storage Architecture below). |
 
 The callback message contains at minimum the same `output_pdf_url` value that
 Drupal supplied on invocation — self-contained, so Drupal tracks correlation
@@ -86,22 +85,27 @@ sequenceDiagram
     autonumber
     participant D as Drupal
     participant SI as S3 Input
+    participant SC as S3 Scripts
     participant L as Lambda
     participant SP as S3 Production
     participant SS as S3 Staging
     participant C as Customer
 
     D->>SI: upload zip (tex + sty + PDFs + fonts)
-    D->>L: invoke Lambda (input_zip_url, output_pdf_url, callback_url)
+    D->>L: invoke Lambda (input, output, callback, [script])
     L->>SI: pull zip
-    Note over L: unzip → /tmp<br/>qpdf --check<br/>ghostscript (if needed)<br/>latexmk (lualatex)
+    opt runtime_script_url provided
+        L->>SC: pull runtime script<br/>(else use baked-in default)
+    end
+    Note over L: unzip → /tmp<br/>qpdf --check<br/>ghostscript (if needed)<br/>execute script<br/>(lualatex via latexmk)
     L->>SP: write canonical PDF (kept forever)
     opt large-file delivery
         L->>SS: clone PDF to staging (10-day lifecycle)
     end
+    L->>SI: delete input zip (self-cleanup)
     L->>D: POST callback_url (output_pdf_url + delivery info)
     Note over L: container dies
-    D->>SS: issue presigned URL (7-day max)
+    D->>SS: issue presigned URL (7-day max, direct SDK)
     D-->>C: email presigned URL (large) OR attach PDF (small)
 ```
 
@@ -149,25 +153,34 @@ flowchart LR
     subgraph Buckets["S3 buckets (all private)"]
         direction TB
         SI["📦 S3 Input Bucket<br/>job zips<br/>Lambda self-clean<br/>+ 24h lifecycle"]
+        SC["📜 S3 Scripts Bucket<br/>runtime scripts<br/>versioned<br/>(keep forever)"]
         SP["📄 S3 Production Bucket<br/>canonical PDFs<br/>(keep forever)"]
         SS["📤 S3 Staging Bucket<br/>delivery copies<br/>(10-day lifecycle)"]
     end
 
     D -- upload zip --> SI
+    D -. publish new scripts .-> SC
     SI -- pull zip --> L
+    SC -- pull script<br/>(optional) --> L
     L -- write canonical --> SP
     L -- clone if needed --> SS
     SS -. presigned URL<br/>7 day max .-> C
 
     style SI fill:#fed7aa,stroke:#c2410c
+    style SC fill:#fed7aa,stroke:#c2410c
     style SP fill:#fed7aa,stroke:#c2410c
     style SS fill:#fed7aa,stroke:#c2410c
 ```
 
-**Three-bucket model** — input bucket holds job payloads, production bucket keeps the
-canonical PDF forever, staging bucket receives a copy only when large-file delivery via
-presigned URL is required. Objects auto-expire after 10 days, presigned URLs valid for
-max 7 days — URL always expires before the underlying object.
+**Four-bucket model** — input holds job payloads (short-lived), scripts holds runtime
+scripts that Lambda can optionally pull for per-invocation flexibility (long-lived,
+versioned by convention), production keeps the canonical PDF forever, staging receives
+a copy only when large-file delivery via presigned URL is required. Objects in staging
+auto-expire after 10 days, presigned URLs valid for max 7 days — URL always expires
+before the underlying object. **Scripts kept in a separate bucket** so its long-lived
+nature doesn't pollute the short-lived buckets (input's 24h lifecycle would delete
+scripts prematurely; staging's 10-day lifecycle likewise; putting scripts in production
+would pollute the canonical-PDF bucket).
 
 ---
 
@@ -211,7 +224,7 @@ The Lambda infrastructure is **not report-specific**. Same pipeline serves multi
 document types, each potentially with its own callback endpoint:
 
 - **Conformance reports** (the original driver; commercial today)
-- **Invoices** (already LaTeX-generated in Zac's current Docker path)
+- **Invoices** (already LaTeX-generated in Zac's current native Ubuntu install)
 - **Future: residential-market documents** (same code base, new Drupal module)
 
 Each caller supplies its own `callback_url` at invocation time, so a single Lambda
@@ -223,21 +236,22 @@ function serves all three with per-module completion routing.
 
 ### Zac's TODO
 
-- [ ] Send Kurt the path to the current `Document Service latex Generator` implementation (Docker-based)
-- [ ] Send Kurt the current Drupal invocation points (where the code today calls into the Docker LaTeX pipeline) — Kurt uses this to build the patches that Drupal will need to redirect calls at Lambda
+- [ ] Send Kurt the path to the current `Document Service latex Generator` implementation
+- [ ] Send Kurt the current Drupal invocation points (where the code today calls into the LaTeX pipeline) — Kurt uses this to build the patches that Drupal will need to redirect calls at Lambda
 - [ ] Design the callback endpoint schema (payload shape, HTTP verbs, error semantics)
-- [ ] Design the Drupal-side submission flow: build zip, upload to S3 input bucket, invoke Lambda with three params
+- [ ] Design the Drupal-side submission flow: build zip, upload to S3 input bucket, invoke Lambda with three required params and one optional param
 - [ ] Add outstanding-jobs tracking to Drupal (a small table; up to ~1000 rows expected under residential load)
+- [ ] **Get Kurt a list of fonts that need to be baked into the Lambda container image**
 - [ ] Start work **next week** (2026-08-18 or later)
 
 ### WorxCo's TODO
 
-- [ ] Build the Lambda container image (fresh, not from MVP): TeX Live 2025+, `lualatex`, `latexmk`, QPDF, Ghostscript, preloaded fonts, entrypoint script
+- [ ] Build the Lambda container image (fresh, not from MVP): TeX Live 2025+, `lualatex`, `latexmk`, QPDF, Ghostscript, preloaded fonts, entrypoint script, and a **baked-in default runtime script** (used when the 4th param is absent)
 - [ ] Build the ECR-container Image Builder pipeline with monthly + on-demand triggers
-- [ ] Provision the three S3 buckets: input, production PDFs, staging (with 10-day lifecycle rule)
-- [ ] Build the Lambda function + invocation-URL infrastructure that accepts the three-parameter call
+- [ ] Provision the **four** S3 buckets: input, production PDFs, staging (10-day lifecycle), **scripts**
+- [ ] Build the Lambda function + invocation-URL infrastructure that accepts the **four-parameter call** (three required + one optional `runtime_script_url`)
 - [ ] Provide Zac the Lambda invocation spec (HTTP endpoint URL, expected parameters, callback contract)
-- [ ] Provide Zac the S3 write credentials/roles for the input bucket
+- [ ] Grant Drupal's PHP-FPM instance role the IAM permissions it needs on each of the four buckets (see Presigned URL Generation section for the concrete policy) — least-privilege at the PHP-FPM tier, no static keys handed to Drupal
 
 ---
 
@@ -259,6 +273,8 @@ $settings['scalable_web']['lambda_latex'] = [
   'input_bucket'         => 'sandbox-latex-input',
   'production_bucket'    => 'sandbox-latex-production',
   'staging_bucket'       => 'sandbox-latex-staging',
+  'scripts_bucket'       => 'sandbox-latex-scripts',
+  'default_script_url'   => 's3://sandbox-latex-scripts/production/build-pdf.sh',
   'max_inline_bytes'     => 5 * 1024 * 1024,   // 5 MB email-attach ceiling
   'presigned_url_ttl'    => 7 * 86400,         // 7 days max (S3 hard limit)
   'lambda_invoke_url'    => 'https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/latex',
@@ -277,10 +293,12 @@ In `sites/default/settings.local.php` (each dev has their own; not in git):
 
 ```php
 // Point at your personal sandbox buckets + Lambda endpoint.
-$settings['scalable_web']['lambda_latex']['input_bucket']      = 'zac-dev-latex-input';
-$settings['scalable_web']['lambda_latex']['production_bucket'] = 'zac-dev-latex-production';
-$settings['scalable_web']['lambda_latex']['staging_bucket']    = 'zac-dev-latex-staging';
-$settings['scalable_web']['lambda_latex']['lambda_invoke_url'] = 'https://<dev-api-id>.execute-api.us-east-1.amazonaws.com/dev/latex';
+$settings['scalable_web']['lambda_latex']['input_bucket']       = 'zac-dev-latex-input';
+$settings['scalable_web']['lambda_latex']['production_bucket']  = 'zac-dev-latex-production';
+$settings['scalable_web']['lambda_latex']['staging_bucket']     = 'zac-dev-latex-staging';
+$settings['scalable_web']['lambda_latex']['scripts_bucket']     = 'zac-dev-latex-scripts';
+$settings['scalable_web']['lambda_latex']['default_script_url'] = 's3://zac-dev-latex-scripts/dev/build-pdf-experimental.sh';
+$settings['scalable_web']['lambda_latex']['lambda_invoke_url']  = 'https://<dev-api-id>.execute-api.us-east-1.amazonaws.com/dev/latex';
 ```
 
 ### Reading the config from Drupal code
@@ -351,24 +369,100 @@ $presignedUrl = (string) $request->getUri();
 `createPresignedRequest` returns synchronously; no network call fires. The URL
 is deterministic given (bucket, key, expiry, IAM key material).
 
-### IAM permission Drupal's PHP-FPM role needs
+### IAM permissions Drupal's PHP-FPM role needs
 
-Add to the PHP-FPM instance role's inline policy:
+Drupal touches all four buckets. Capability matrix (Kurt's spec, translated to
+concrete IAM actions):
+
+| Bucket | Actions |
+|---|---|
+| Input      | `s3:PutObject`, `s3:GetObject`, `s3:GetObjectAttributes`, `s3:ListBucket` |
+| Production | `s3:PutObject`, `s3:GetObject`, `s3:GetObjectAttributes`, `s3:ListBucket` |
+| Staging    | `s3:PutObject`, `s3:GetObject`, `s3:GetObjectAttributes`, `s3:DeleteObject`, `s3:ListBucket` |
+| Scripts    | `s3:PutObject`, `s3:GetObject`, `s3:GetObjectAttributes`, `s3:ListBucket` |
+
+**On the "readmeta" action**: this maps to `s3:GetObjectAttributes`, the modern
+AWS API for reading object metadata without downloading the object body. Drupal
+(via the AWS PHP SDK / flysystem) frequently calls this before actual reads to
+check existence or size. Historic incident: a few weeks back Drupal failed to
+read an S3 object because the role had `GetObject` but not the newer
+`GetObjectAttributes` — Drupal's pre-read metadata check tripped first. Granting
+both closes that gap.
+
+**On generating presigned URLs**: no separate IAM action. `createPresignedRequest`
+is client-side HMAC math. The resulting URL delegates `GetObject` to the URL
+holder, so as long as the SIGNER's identity has `s3:GetObject` on the bucket,
+the URL will work.
+
+Full policy example:
 
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::sandbox-latex-staging/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "InputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-input",
+        "arn:aws:s3:::sandbox-latex-input/*"
+      ]
+    },
+    {
+      "Sid": "ProductionBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-production",
+        "arn:aws:s3:::sandbox-latex-production/*"
+      ]
+    },
+    {
+      "Sid": "StagingBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-staging",
+        "arn:aws:s3:::sandbox-latex-staging/*"
+      ]
+    },
+    {
+      "Sid": "ScriptsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-scripts",
+        "arn:aws:s3:::sandbox-latex-scripts/*"
+      ]
+    }
+  ]
 }
 ```
 
-`GetObject` is sufficient for both actually reading objects AND generating
-presigned URLs for GetObject. If Drupal also needs to write to the input bucket,
-add `s3:PutObject` on the input bucket ARN separately.
+**Lambda's IAM role is separate.** Lambda needs: read from Input + Scripts,
+write to Production + Staging, delete from Input (for self-cleanup). Not
+included in this policy — Lambda's execution role is provisioned separately
+with its own least-privilege policy.
+
+**On least-privilege refinement**: the actions above are broader than strictly
+needed today (e.g., Drupal doesn't strictly need to write to Production if
+Lambda is the only writer). Kurt's rationale: catch missing permissions early
+during integration rather than debug obscure "access denied" errors
+mid-development. Tighten later once Drupal's actual call surface is stable.
 
 ### Why not store the URL somewhere and reuse it
 
@@ -441,10 +535,9 @@ this now; Lambda self-cleanup + 24h lifecycle backup is sufficient.
 - **Fonts baked into the base container** for the shared set. Per-report font overrides
   can travel in the zip if needed.
 - **Cost expectation (current-reality math)**: **current commercial volume is 200–500 reports/month** — not the aspirational 20K/month residential projection. Using an average of **250 reports/month at ~250 pages each** (Zac's reports run heavy), Lambda compute cost lands at roughly **$1–3/month** for actual invocations, plus a few dollars/month for Image Builder + ECR storage + S3 buckets. **Total realistic monthly bill for current-state operations: ~$5–10/month.** The 20K/month figures in the PDF's chapter 7 cost table remain valid **capacity projections** for the residential pivot when/if it materializes, not a current billing forecast. Also worth noting: at 250/mo (roughly 8/day), **every invocation is essentially a cold start** — 5–10 seconds of latency added to each report generation for the container spin-up. Not a problem for the async fire-and-callback flow, but a latency floor to be aware of.
-- **Migration status of Docker in production**: the Docker LaTeX container was *not* migrated
-  as part of the recent sandbox rebuild — production still runs the old Docker path. Zac
-  needs to identify all the Drupal call sites so Kurt can prepare the patches that redirect
-  them at Lambda.
+- **Migration status of LaTeX in production**: production still runs Zac's native-Ubuntu
+  LaTeX pipeline; the sandbox rebuild did not migrate that. Zac needs to identify all the
+  Drupal call sites so Kurt can prepare the patches that redirect them at Lambda.
 
 ---
 

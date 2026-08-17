@@ -96,7 +96,7 @@
 \begin{center}
 \rule{0.6\linewidth}{0.4pt}\\
 \vspace{0.6em}
-\small\emph{Meeting context: current LaTeX-on-Docker monolith needs to move to a scalable execution model to support the residential-market pivot. This document aggregates prior planning, catalogs execution options, and gives the room shared vocabulary and comparable numbers for the discussion. Tone is deliberately \textbf{neutral} --- no vendor pushing a recommendation.}
+\small\emph{Meeting context: current LaTeX-on-Ubuntu monolith needs to move to a scalable execution model to support the residential-market pivot. This document aggregates prior planning, catalogs execution options, and gives the room shared vocabulary and comparable numbers for the discussion. Tone is deliberately \textbf{neutral} --- no vendor pushing a recommendation.}
 \end{center}
 
 \vspace{1em}
@@ -107,7 +107,7 @@
 \label{sec:exec-summary}
 
 \subsection{The situation}
-LaTeX-generated documents\index{LaTeX} are currently produced by a Dockerized\index{Docker} \texttt{pdflatex}/\texttt{latexmk} runtime that lives on the client's single production server (32 GB RAM, running nginx + PHP + MySQL + the LaTeX container). For the current \textbf{commercial-only} order volume (\textasciitilde 7 orders/day), the monolithic setup is comfortable\index{monolith}.
+LaTeX-generated documents\index{LaTeX} are currently produced by a natively-installed \texttt{lualatex}/\texttt{latexmk} runtime that lives on the client's single production server (32 GB RAM, running nginx + PHP + MySQL + the LaTeX stack installed directly on Ubuntu). For the current \textbf{commercial-only} order volume (\textasciitilde 7 orders/day), the monolithic setup is comfortable\index{monolith}.
 
 \subsection{Why we're revisiting}
 The client's \textbf{residential pivot}\index{residential pivot} projects a target volume of \textbf{20{,}000 sales per month} in a fully-automated flow --- roughly 100$\times$ current volume, with real concurrency requirements. The existing monolithic execution model is a poor fit for that shape of load. Separately, the operations side (WorxCo) is completing a move to a scalable, resilient AWS architecture that eliminates any single-server aggregations by design. The two forces converge on the same question: \emph{where should LaTeX execution live?}
@@ -141,14 +141,14 @@ A single production server currently hosts every component of the platform:
   \item nginx (web front-end)\index{nginx}
   \item PHP-FPM (Drupal application server)\index{PHP-FPM}
   \item MySQL (database)\index{MySQL}
-  \item Docker container running the LaTeX toolchain\index{Docker}
+  \item LaTeX toolchain (\texttt{lualatex} + \texttt{latexmk} + supporting binaries) installed natively on Ubuntu
   \item 32 GB RAM, sufficient for current commercial load
 \end{itemize}
 
 Because everything shares one memory pool, the LaTeX container can burst to 4--6 GB per document without competing with the web tier's normal working set. This works because the concurrency is naturally low.
 
 \subsection{Current volume}
-Order volume from the past three days: 8, 7, 6 --- a running average of \textbf{7 orders/day}\index{commercial volume}. Peak simultaneous LaTeX generations rarely exceeds one at a time. The Docker container has all the memory it wants because nothing else is asking.
+Order volume from the past three days: 8, 7, 6 --- a running average of \textbf{7 orders/day}\index{commercial volume}. Peak simultaneous LaTeX generations rarely exceeds one at a time. The LaTeX process has all the memory it wants because nothing else is asking.
 
 \subsection{Two Drupal routes that generate documents}
 The Drupal codebase invokes document generation from two distinct routes\index{Drupal routes}, both discovered during operations testing:
@@ -245,7 +245,7 @@ This project's internal backlog explicitly captures the "don't grow the boxes" p
 Five realistic execution models --- each has a section in the appendices with technical specifics. This section gives them equal-footing overview and a side-by-side matrix.
 
 \subsection{Option A: AWS Lambda with container image}
-Custom Docker image (up to 10 GB) that contains TeX Live, invoked per-document via SQS trigger or synchronous invoke. Auto-scales to concurrency, zero infrastructure when idle. See Appendix~\ref{app:lambda}.
+Custom container image (up to 10 GB) that contains TeX Live, invoked per-document via SQS trigger or synchronous invoke. Auto-scales to concurrency, zero infrastructure when idle. See Appendix~\ref{app:lambda}.
 
 \subsection{Option B: AWS Fargate (ECS or EKS)}
 Long-running container tasks that accept LaTeX jobs from an SQS queue. No cold starts (already-warm workers), no time limit, more control over persistent state. See Appendix~\ref{app:fargate}.
@@ -432,15 +432,15 @@ Meanwhile, \texttt{FannieFieldResolver.php} line 329 uses \texttt{method\_exists
 \begin{enumerate}[nosep]
   \item \textbf{Pick the execution model} (this discussion's outcome)
   \item \textbf{Bring the MVP forward}: modernize the LaTeX container / AMI with current TeX Live + \texttt{latexmk} auto-passes
-  \item \textbf{Shadow mode}: enqueue jobs from the current monolith but continue serving the in-band Docker output; compare outputs
+  \item \textbf{Shadow mode}: enqueue jobs from the current monolith but continue serving the in-band production output; compare outputs
   \item \textbf{Sandbox smoke test}: verify end-to-end async flow through Drupal $\rightarrow$ queue $\rightarrow$ execution $\rightarrow$ S3 $\rightarrow$ presigned URL
   \item \textbf{Cutover with feature flag}: Drupal route conditionally serves in-band (old) or redirects to async job (new); flag flips per env then per traffic percentage
-  \item \textbf{Retire the Docker-in-monolith LaTeX path}
+  \item \textbf{Retire the in-monolith LaTeX path}
 \end{enumerate}
 
 \subsection{Risks common to all options}
 \begin{itemize}[nosep]
-  \item \textbf{Template drift}: the current Docker container's TeX Live + package versions become the accidental reference; some templates may rely on specific package versions
+  \item \textbf{Template drift}: the current production install's TeX Live + package versions become the accidental reference; some templates may rely on specific package versions
   \item \textbf{Font / locale surprises}: pre-generated PDFs from prod are the ground-truth for "does it render identically" comparison
   \item \textbf{Cost surprises}: bursty traffic (marketing send, batch imports) can push volume 5--10$\times$ over baseline; per-invocation options handle this transparently, always-on options don't
   \item \textbf{Failure modes to design for}: LaTeX compilation errors (bad template), timeouts, S3 upload failures, notification delivery failures --- all of which need idempotent retry semantics
@@ -470,7 +470,7 @@ Meanwhile, \texttt{FannieFieldResolver.php} line 329 uses \texttt{method\_exists
 \subsection{Attendees and Context}
 Four attendees:
 \begin{itemize}[nosep]
-  \item \textbf{Zac Hudson} --- client Drupal developer; owner of the existing Docker-based LaTeX generation code; author of the current \texttt{Document Service latex Generator}
+  \item \textbf{Zac Hudson} --- client Drupal developer; owner of the current LaTeX generation code; extended and maintains the \texttt{Document Service latex Generator}. Runs against a native LaTeX stack installed directly on the Ubuntu production instance (not Dockerized --- Zac replaced the original Docker path Kurt built with an in-place install to avoid script-plumbing overhead).
   \item \textbf{Kurt Vanderwater} --- WorxCo operations/infrastructure; owner of the scalable AWS architecture
   \item \textbf{Pat Shaughnessy} --- author of the original 2024 Lambda LaTeX MVP; observer plus institutional reference
   \item \textbf{Tim Houseman} --- observer / team member
@@ -502,16 +502,17 @@ Compared to presigning against the production bucket directly, this pattern give
 \subsection{Payload Contract}
 \label{sec:meeting-payload}
 
-Three required parameters on every Lambda invocation. All required --- Zac's phrasing: \emph{``if you don't tell me how to notify you when I'm done, I don't want to talk to you at all.''}
+Three required parameters and one optional parameter on every Lambda invocation.
 
 \begin{center}
-\begin{tabular}{@{}p{4cm}p{9.5cm}@{}}
+\begin{tabular}{@{}p{3.6cm}p{1.6cm}p{8.3cm}@{}}
 \toprule
-\textbf{Parameter} & \textbf{Purpose} \\
+\textbf{Parameter} & \textbf{Required?} & \textbf{Purpose} \\
 \midrule
-\texttt{input\_zip\_url} & S3 URL of the input zip that Drupal has built and uploaded. Contains everything the Lambda needs to compile: main \texttt{.tex} file, \texttt{.sty} style files, all PDFs to be included, plus any per-report font files not already baked into the container. \\
-\texttt{output\_pdf\_url} & S3 URL where the finished PDF should be written. Drupal decides the exact path (including any date prefix, tenant prefix, etc.) so name collisions are Drupal's problem, not Lambda's. Also becomes the ``handle'' by which Drupal tracks the job. \\
-\texttt{callback\_url} & HTTP endpoint Drupal exposes to receive the ``done'' notification when Lambda finishes. Different Drupal modules (report, invoice, future residential) may register different endpoints. \\
+\texttt{input\_zip\_url} & required & S3 URL of the input zip that Drupal has built and uploaded. Contains everything the Lambda needs to compile: main \texttt{.tex} file, \texttt{.sty} style files, all PDFs to be included, plus any per-report font files not already baked into the container. \\
+\texttt{output\_pdf\_url} & required & S3 URL where the finished PDF should be written. Drupal decides the exact path (including any date prefix, tenant prefix, etc.) so name collisions are Drupal's problem, not Lambda's. Also becomes the ``handle'' by which Drupal tracks the job. \\
+\texttt{callback\_url} & required & HTTP endpoint Drupal exposes to receive the ``done'' notification when Lambda finishes. Different Drupal modules (report, invoice, future residential) may register different endpoints. \emph{``If you don't tell me how to notify you when I'm done, I don't want to talk to you at all.''} \\
+\texttt{runtime\_script\_url} & optional & S3 URL of the runtime script that Lambda should download and execute for this specific run. When absent, Lambda uses the script baked into the container image at build time. Purpose: flexibility --- iterate on the report-generation script without rebuilding the entire Lambda container image. Scripts live in a dedicated scripts bucket (see \S\ref{sec:meeting-storage}). \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -526,44 +527,49 @@ Figure~\ref{fig:sequence} shows the full sequence from Drupal request to custome
 \centering
 \begin{tikzpicture}[
   every node/.style={font=\small},
-  actor/.style={draw, fill=blue!10, minimum width=2cm, minimum height=0.7cm, rounded corners=1pt},
+  actor/.style={draw, fill=blue!10, minimum width=1.7cm, minimum height=0.7cm, rounded corners=1pt},
   lifeline/.style={dashed, gray},
   msg/.style={-Stealth, thick},
 ]
-% Actors along the top
-\node[actor] (drupal)   at ( 0,  0) {Drupal};
-\node[actor] (s3in)     at ( 3.2,0) {S3 Input};
-\node[actor] (lambda)   at ( 6.4,0) {Lambda};
-\node[actor] (s3prod)   at ( 9.6,0) {S3 Prod};
-\node[actor] (s3stg)    at (12.8,0) {S3 Staging};
+% Actors along the top (6 participants — added S3 Scripts)
+\node[actor] (drupal)   at ( 0,   0) {Drupal};
+\node[actor] (s3in)     at ( 2.6, 0) {S3 Input};
+\node[actor] (s3scr)    at ( 5.2, 0) {S3 Scripts};
+\node[actor] (lambda)   at ( 7.8, 0) {Lambda};
+\node[actor] (s3prod)   at (10.4, 0) {S3 Prod};
+\node[actor] (s3stg)    at (13.0, 0) {S3 Staging};
 
 % Lifelines
-\foreach \a in {drupal,s3in,lambda,s3prod,s3stg} {
-  \draw[lifeline] (\a.south) -- ++(0, -10);
+\foreach \a in {drupal,s3in,s3scr,lambda,s3prod,s3stg} {
+  \draw[lifeline] (\a.south) -- ++(0, -11);
 }
 
 % Messages
-\draw[msg] (drupal.south |- 0,-0.8) -- ++(3.2,0) node[midway,above,font=\scriptsize]{1. upload zip};
-\draw[msg] (drupal.south |- 0,-1.7) -- ++(6.4,0) node[midway,above,font=\scriptsize]{2. invoke Lambda (input+output+callback URLs)};
+\draw[msg] (drupal.south |- 0,-0.7)  -- ++(2.6,0)   node[midway,above,font=\scriptsize]{1. upload zip};
+\draw[msg] (drupal.south |- 0,-1.5)  -- ++(7.8,0)   node[midway,above,font=\scriptsize]{2. invoke Lambda (input, output, callback, [script])};
 
-\draw[msg] (lambda.south |- 0,-2.6) -- ++(-3.2,0) node[midway,above,font=\scriptsize]{3. pull zip};
-\node[font=\scriptsize,align=center] at ( 6.4,-3.5) {4. unzip $\rightarrow$ /tmp\\5. QPDF check\\6. Ghostscript (if needed)\\7. latexmk (lualatex)};
-\draw[dashed, gray!60] (5.4, -3) rectangle (7.4, -4.1);
+\draw[msg] (lambda.south |- 0,-2.3)  -- ++(-5.2,0)  node[midway,above,font=\scriptsize]{3. pull zip};
+\draw[msg] (lambda.south |- 0,-3.1)  -- ++(-2.6,0)  node[midway,above,font=\scriptsize,align=center]{4. pull runtime script\\\itshape (or use baked-in default if 4th param absent)};
 
-\draw[msg] (lambda.south |- 0,-4.7) -- ++(3.2,0) node[midway,above,font=\scriptsize]{8. write PDF (canonical, forever)};
+\node[font=\scriptsize,align=center] at ( 7.8,-4.3) {5. unzip $\rightarrow$ /tmp\\6. QPDF check\\7. Ghostscript (if needed)\\8. execute script (lualatex via latexmk)};
+\draw[dashed, gray!60] (6.7, -3.7) rectangle (8.9, -4.9);
 
-\draw[msg] (lambda.south |- 0,-5.6) -- ++(6.4,0) node[midway,above,font=\scriptsize]{9. clone to staging (only if large-delivery needed)};
+\draw[msg] (lambda.south |- 0,-5.5)  -- ++(2.6,0)   node[midway,above,font=\scriptsize]{9. write PDF (canonical, forever)};
 
-\draw[msg] (lambda.south |- 0,-6.5) -- ++(-6.4,0) node[midway,above,font=\scriptsize]{10. POST callback (output\_pdf\_url + delivery info)};
+\draw[msg] (lambda.south |- 0,-6.3)  -- ++(5.2,0)   node[midway,above,font=\scriptsize]{10. clone to staging (only if large-delivery needed)};
 
-\node[font=\scriptsize,align=center,text=gray!70!black] at (6.4,-7.3) {(Lambda container dies)};
+\draw[msg] (lambda.south |- 0,-7.1)  -- ++(-5.2,0)  node[midway,above,font=\scriptsize]{11. delete input zip (self-cleanup)};
 
-\draw[msg] (drupal.south |- 0,-8.2) -- ++(12.8,0) node[midway,above,font=\scriptsize]{11. issue presigned URL against staging bucket};
+\draw[msg] (lambda.south |- 0,-7.9)  -- ++(-7.8,0)  node[midway,above,font=\scriptsize]{12. POST callback (output\_pdf\_url + delivery info)};
 
-\node[font=\scriptsize,align=left,anchor=west] at (-0.5,-9.1) {12. Drupal emails presigned URL to customer (large PDFs) OR attaches directly (small PDFs)};
+\node[font=\scriptsize,align=center,text=gray!70!black] at (7.8,-8.5) {(Lambda container dies)};
+
+\draw[msg] (drupal.south |- 0,-9.3)  -- ++(13.0,0)  node[midway,above,font=\scriptsize]{13. issue presigned URL against staging bucket (Drupal-side, direct SDK)};
+
+\node[font=\scriptsize,align=left,anchor=west] at (-0.5,-10.2) {14. Drupal emails presigned URL to customer (large PDFs) OR attaches directly (small PDFs)};
 
 \end{tikzpicture}
-\caption{End-to-end sequence: Drupal $\rightarrow$ Lambda $\rightarrow$ dual-write to production + staging $\rightarrow$ callback $\rightarrow$ time-limited customer delivery.}
+\caption{End-to-end sequence: Drupal $\rightarrow$ Lambda $\rightarrow$ dual-write to production + staging $\rightarrow$ callback $\rightarrow$ time-limited customer delivery. Step 4 fetches the runtime script when the optional 4th parameter is provided; otherwise Lambda uses the script baked into the container image.}
 \label{fig:sequence}
 \end{figure}
 
@@ -607,32 +613,35 @@ Figure~\ref{fig:container} shows what the ECR container image includes.
 
 \subsection{Storage Architecture}
 \label{sec:meeting-storage}
-Figure~\ref{fig:storage} shows the three-bucket model.
+Figure~\ref{fig:storage} shows the four-bucket model.
 
 \begin{figure}[h!]
 \centering
 \begin{tikzpicture}[
   every node/.style={font=\small},
-  bucket/.style={draw, fill=orange!15, minimum width=3.6cm, minimum height=1.8cm, rounded corners=2pt, align=center},
+  bucket/.style={draw, fill=orange!15, minimum width=3.4cm, minimum height=1.8cm, rounded corners=2pt, align=center},
   actor/.style={draw, fill=blue!10, minimum width=2.4cm, minimum height=0.7cm, rounded corners=1pt},
   arrow/.style={-Stealth, thick},
 ]
-\node[actor] (drupal) at (0, 5) {Drupal};
-\node[actor] (lambda) at (7, 5) {Lambda};
-\node[actor] (customer) at (14, 2) {Customer};
+\node[actor] (drupal) at (-1, 6) {Drupal};
+\node[actor] (lambda) at ( 7, 6) {Lambda};
+\node[actor] (customer) at (13.5, 2.5) {Customer};
 
-\node[bucket] (input)   at ( 0, 2) {\textbf{S3 Input Bucket}\\\footnotesize private, separate\\\footnotesize job zips\\\footnotesize Lambda self-clean\\\footnotesize + 24h lifecycle};
-\node[bucket] (prod)    at ( 7, 2) {\textbf{S3 Production Bucket}\\\footnotesize private\\\footnotesize canonical PDFs\\\footnotesize (keep forever)};
-\node[bucket] (staging) at (7, -1.5) {\textbf{S3 Staging Bucket}\\\footnotesize private\\\footnotesize delivery copies\\\footnotesize (10-day lifecycle)};
+\node[bucket] (input)   at (-1,  3) {\textbf{S3 Input Bucket}\\\footnotesize private, separate\\\footnotesize job zips\\\footnotesize Lambda self-clean\\\footnotesize + 24h lifecycle};
+\node[bucket] (scripts) at ( 3,  3) {\textbf{S3 Scripts Bucket}\\\footnotesize private\\\footnotesize runtime scripts\\\footnotesize versioned\\\footnotesize (keep forever)};
+\node[bucket] (prod)    at ( 7,  3) {\textbf{S3 Production Bucket}\\\footnotesize private\\\footnotesize canonical PDFs\\\footnotesize (keep forever)};
+\node[bucket] (staging) at ( 7, -1) {\textbf{S3 Staging Bucket}\\\footnotesize private\\\footnotesize delivery copies\\\footnotesize (10-day lifecycle)};
 
 \draw[arrow] (drupal) -- (input) node[midway,left,font=\scriptsize]{upload zip};
 \draw[arrow] (input) -- (lambda) node[midway,above,font=\scriptsize]{pull zip};
+\draw[arrow] (scripts) -- (lambda) node[midway,above,font=\scriptsize,align=center]{pull script\\\itshape(optional)};
+\draw[arrow, dashed] (drupal.east) -- ++(1.5,0) |- (scripts.west) node[near end, above, font=\scriptsize]{publish new scripts};
 \draw[arrow] (lambda) -- (prod) node[midway,right,font=\scriptsize]{write canonical};
-\draw[arrow] (lambda.south) -- ++(0,-1.5) -| (staging) node[near end, right,font=\scriptsize]{clone if needed};
+\draw[arrow] (lambda.south) -- ++(0,-1) -| (staging) node[near end, right,font=\scriptsize]{clone if needed};
 \draw[arrow, dashed] (staging) -- (customer) node[midway, above, align=center, font=\scriptsize\itshape]{presigned URL\\(7 day max)};
 
 \end{tikzpicture}
-\caption{Three-bucket storage model. Input bucket holds job payloads. Production bucket keeps the canonical PDF forever. Staging bucket receives a copy only when large-file delivery via presigned URL is required; objects auto-expire after 10 days, presigned URLs valid for max 7 days --- URL always expires before the underlying object.}
+\caption{Four-bucket storage model. Input holds job payloads (short-lived). Scripts holds runtime scripts that Lambda can optionally pull for per-invocation flexibility (long-lived, versioned by convention). Production keeps the canonical PDF forever. Staging receives a copy only when large-file delivery via presigned URL is required; objects auto-expire after 10 days, presigned URLs valid for max 7 days --- URL always expires before the underlying object. Scripts kept in a separate bucket so its long-lived nature doesn't pollute the short-lived buckets and vice versa.}
 \label{fig:storage}
 \end{figure}
 
@@ -676,7 +685,7 @@ The Lambda infrastructure is not report-specific. Same pipeline serves multiple 
 
 \begin{itemize}[nosep]
   \item \textbf{Conformance reports} (the original driver; commercial today)
-  \item \textbf{Invoices} (already LaTeX-generated in Zac's current Docker path)
+  \item \textbf{Invoices} (already LaTeX-generated in Zac's current native Ubuntu install)
   \item \textbf{Future: residential-market documents} (same code base, new Drupal module)
 \end{itemize}
 
@@ -687,22 +696,23 @@ Each caller supplies its own callback URL at invocation time, so a single Lambda
 
 \subsubsection{Zac's TODO}
 \begin{itemize}[nosep]
-  \item Send Kurt the path to the current \texttt{Document Service latex Generator} implementation (Docker-based)
-  \item Send Kurt the current Drupal invocation points (where the code today calls into the Docker LaTeX pipeline) --- Kurt uses this to build the patches that Drupal will need to redirect calls at Lambda
+  \item Send Kurt the path to the current \texttt{Document Service latex Generator} implementation
+  \item Send Kurt the current Drupal invocation points (where the code today calls into the LaTeX pipeline) --- Kurt uses this to build the patches that Drupal will need to redirect calls at Lambda
   \item Design the callback endpoint schema (payload shape, HTTP verbs, error semantics)
-  \item Design the Drupal-side submission flow: build zip, upload to S3 input bucket, invoke Lambda with three params
+  \item Design the Drupal-side submission flow: build zip, upload to S3 input bucket, invoke Lambda with three required params and one optional param
   \item Add outstanding-jobs tracking to Drupal (a small table; up to $\sim$1000 rows expected under residential load)
+  \item Get Kurt a list of fonts that need to be baked into the Lambda container image
   \item Start work \emph{next week} (2026-08-18 or later)
 \end{itemize}
 
 \subsubsection{WorxCo's TODO}
 \begin{itemize}[nosep]
-  \item Build the Lambda container image (fresh, not from MVP): TeX Live 2025+, \texttt{lualatex}, \texttt{latexmk}, QPDF, Ghostscript, preloaded fonts, entrypoint script
+  \item Build the Lambda container image (fresh, not from MVP): TeX Live 2025+, \texttt{lualatex}, \texttt{latexmk}, QPDF, Ghostscript, preloaded fonts, entrypoint script, and a baked-in default runtime script (used when the 4th param is absent)
   \item Build the ECR-container Image Builder pipeline with monthly + on-demand triggers
-  \item Provision the three S3 buckets: input, production PDFs, staging (with 10-day lifecycle rule)
-  \item Build the Lambda function + invocation-URL infrastructure that accepts the three-parameter call
+  \item Provision the four S3 buckets: input, production PDFs, staging (10-day lifecycle), scripts
+  \item Build the Lambda function + invocation-URL infrastructure that accepts the four-parameter call (three required + one optional \texttt{runtime\_script\_url})
   \item Provide Zac the Lambda invocation spec (HTTP endpoint URL, expected parameters, callback contract)
-  \item Provide Zac the S3 write credentials/roles for the input bucket
+  \item Grant Drupal's PHP-FPM instance role the IAM permissions it needs on each of the four buckets (see \S\ref{sec:meeting-presigned-url} for the concrete policy) --- least-privilege at the PHP-FPM tier, no static keys handed to Drupal
 \end{itemize}
 
 \subsection{Drupal-Side Configuration}
@@ -721,6 +731,8 @@ $settings['scalable_web']['lambda_latex'] = [
   'input_bucket'         => 'sandbox-latex-input',
   'production_bucket'    => 'sandbox-latex-production',
   'staging_bucket'       => 'sandbox-latex-staging',
+  'scripts_bucket'       => 'sandbox-latex-scripts',
+  'default_script_url'   => 's3://sandbox-latex-scripts/production/build-pdf.sh',
   'max_inline_bytes'     => 5 * 1024 * 1024,   // 5 MB email-attach ceiling
   'presigned_url_ttl'    => 7 * 86400,         // 7 days max (S3 hard limit)
   'lambda_invoke_url'    => 'https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/latex',
@@ -738,10 +750,12 @@ In \texttt{sites/default/settings.local.php} (each dev has their own; not in git
 
 \begin{lstlisting}[style=worxcode,language=php-like]
 // Point at your personal sandbox buckets + Lambda endpoint.
-$settings['scalable_web']['lambda_latex']['input_bucket']      = 'zac-dev-latex-input';
-$settings['scalable_web']['lambda_latex']['production_bucket'] = 'zac-dev-latex-production';
-$settings['scalable_web']['lambda_latex']['staging_bucket']    = 'zac-dev-latex-staging';
-$settings['scalable_web']['lambda_latex']['lambda_invoke_url'] = 'https://<dev-api-id>.execute-api.us-east-1.amazonaws.com/dev/latex';
+$settings['scalable_web']['lambda_latex']['input_bucket']       = 'zac-dev-latex-input';
+$settings['scalable_web']['lambda_latex']['production_bucket']  = 'zac-dev-latex-production';
+$settings['scalable_web']['lambda_latex']['staging_bucket']     = 'zac-dev-latex-staging';
+$settings['scalable_web']['lambda_latex']['scripts_bucket']     = 'zac-dev-latex-scripts';
+$settings['scalable_web']['lambda_latex']['default_script_url'] = 's3://zac-dev-latex-scripts/dev/build-pdf-experimental.sh';
+$settings['scalable_web']['lambda_latex']['lambda_invoke_url']  = 'https://<dev-api-id>.execute-api.us-east-1.amazonaws.com/dev/latex';
 \end{lstlisting}
 
 \subsubsection{Reading the config from Drupal code}
@@ -804,21 +818,89 @@ $presignedUrl = (string) $request->getUri();
 
 \texttt{createPresignedRequest} returns synchronously; no network call fires. The URL is deterministic given (bucket, key, expiry, IAM key material).
 
-\subsubsection{IAM permission Drupal's PHP-FPM role needs}
-Add to the PHP-FPM instance role's inline policy:
+\subsubsection{IAM permissions Drupal's PHP-FPM role needs}
+
+Drupal touches all four buckets. Capability matrix (Kurt's spec, translated to concrete IAM actions):
+
+\begin{center}
+\begin{tabular}{@{}p{2.4cm}p{11cm}@{}}
+\toprule
+\textbf{Bucket} & \textbf{Actions} \\
+\midrule
+Input      & \texttt{s3:PutObject}, \texttt{s3:GetObject}, \texttt{s3:GetObjectAttributes}, \texttt{s3:ListBucket} \\
+Production & \texttt{s3:PutObject}, \texttt{s3:GetObject}, \texttt{s3:GetObjectAttributes}, \texttt{s3:ListBucket} \\
+Staging    & \texttt{s3:PutObject}, \texttt{s3:GetObject}, \texttt{s3:GetObjectAttributes}, \texttt{s3:DeleteObject}, \texttt{s3:ListBucket} \\
+Scripts    & \texttt{s3:PutObject}, \texttt{s3:GetObject}, \texttt{s3:GetObjectAttributes}, \texttt{s3:ListBucket} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{On the ``readmeta'' action}: this maps to \texttt{s3:GetObjectAttributes}, the modern AWS API for reading object metadata without downloading the object body. Drupal (via the AWS PHP SDK / flysystem) frequently calls this before actual reads to check existence or size. Historic incident: a few weeks back Drupal failed to read an S3 object because the role had \texttt{GetObject} but not the newer \texttt{GetObjectAttributes} --- Drupal's pre-read metadata check tripped first. Granting both closes that gap.
+
+\textbf{On generating presigned URLs}: no separate IAM action. \texttt{createPresignedRequest} is client-side HMAC math. The resulting URL delegates \texttt{GetObject} to the URL holder, so as long as the SIGNER's identity has \texttt{s3:GetObject} on the bucket, the URL will work.
+
+Full policy example:
 
 \begin{lstlisting}[style=worxcode]
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::sandbox-latex-staging/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "InputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-input",
+        "arn:aws:s3:::sandbox-latex-input/*"
+      ]
+    },
+    {
+      "Sid": "ProductionBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-production",
+        "arn:aws:s3:::sandbox-latex-production/*"
+      ]
+    },
+    {
+      "Sid": "StagingBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-staging",
+        "arn:aws:s3:::sandbox-latex-staging/*"
+      ]
+    },
+    {
+      "Sid": "ScriptsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject", "s3:GetObject",
+        "s3:GetObjectAttributes", "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sandbox-latex-scripts",
+        "arn:aws:s3:::sandbox-latex-scripts/*"
+      ]
+    }
+  ]
 }
 \end{lstlisting}
 
-\texttt{GetObject} is sufficient for both actually reading objects AND generating presigned URLs for GetObject. If Drupal also needs to write to the input bucket, add \texttt{s3:PutObject} on the input bucket ARN separately.
+\textbf{Lambda's IAM role is separate.} Lambda needs: read from Input + Scripts, write to Production + Staging, delete from Input (for self-cleanup). Not included in this policy --- Lambda's execution role is provisioned separately with its own least-privilege policy.
+
+\textbf{On least-privilege refinement}: the actions above are broader than strictly needed today (e.g., Drupal doesn't strictly need to write to Production if Lambda is the only writer). Kurt's rationale: catch missing permissions early during integration rather than debug obscure ``access denied'' errors mid-development. Tighten later once Drupal's actual call surface is stable.
 
 \subsubsection{Why not store the URL somewhere and reuse it}
 Presigned URLs are cheap to generate (microseconds). Regenerate per request rather than cache. Regeneration also gives you fresh 7-day windows every time --- caching would freeze the expiry at the first-generation moment.
@@ -870,7 +952,7 @@ S3 lifecycle can't do sub-day granularity. If we ever need it (unlikely for this
   \item \textbf{PDF preprocessing is two-stage}: \texttt{qpdf --check} on every input PDF; if it flags issues, run Ghostscript to normalize the PDF (strips extra content, may bump version). QPDF is fast at checking; Ghostscript is thorough at rewriting.
   \item \textbf{Fonts baked into the base container} for the shared set. Per-report font overrides can travel in the zip if needed.
   \item \textbf{Cost expectation (current-reality math)}: current commercial volume is \textbf{200--500 reports/month} --- not the aspirational 20K/month residential projection. Using an average of \textbf{250 reports/month at $\sim$250 pages each} (Zac's reports run heavy), Lambda compute cost lands at roughly \textbf{\$1--3/month} for actual invocations, plus a few dollars/month for Image Builder + ECR storage + S3 buckets. Total realistic monthly bill for current-state operations: \textbf{\textasciitilde\$5--10/month}. The 20K/month figures in chapter~\ref{sec:cost}'s cost table remain valid \emph{capacity projections} for the residential pivot when/if it materializes, not a current billing forecast. Also worth noting: at 250/mo (roughly 8/day), \textbf{every invocation is essentially a cold start} --- 5--10 seconds of latency added to each report generation for the container spin-up. Not a problem for the async fire-and-callback flow, but a latency floor to be aware of.
-  \item \textbf{Migration status of Docker in production}: the Docker LaTeX container was \emph{not} migrated as part of the recent sandbox rebuild --- production still runs the old Docker path. Zac needs to identify all the Drupal call sites so Kurt can prepare the patches that redirect them at Lambda.
+  \item \textbf{Migration status of LaTeX in production}: production still runs Zac's native-Ubuntu LaTeX pipeline; the sandbox rebuild did not migrate that. Zac needs to identify all the Drupal call sites so Kurt can prepare the patches that redirect them at Lambda.
 \end{itemize}
 
 \newpage
@@ -1015,7 +1097,7 @@ The 4 GB memory ceiling is tight for LaTeX. If any documents ever push past 3--3
 Two years ago (roughly late 2024), a member of the client team built a custom Lambda container image containing a TeX Live installation and a proof-of-concept LaTeX compilation entrypoint. It generated a sample PDF end-to-end from a Lambda invocation.
 
 \subsection{Why it didn't ship}
-At the time, the residential pivot was a lower priority for the client. Commercial order volume (7 orders/day) didn't stress the existing Docker-on-monolith path. Rather than integrate the MVP into production for a workload that didn't need it, the team parked it.
+At the time, the residential pivot was a lower priority for the client. Commercial order volume (7 orders/day) didn't stress the existing monolith LaTeX path. Rather than integrate the MVP into production for a workload that didn't need it, the team parked it.
 
 \subsection{What still applies today}
 \begin{itemize}[nosep]
